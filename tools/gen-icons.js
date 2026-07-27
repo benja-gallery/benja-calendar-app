@@ -4,7 +4,17 @@
 
    Dependency-free: rasterises the brand mark (dark surface + champagne gold
    calendar glyph) with 4x supersampling and encodes real PNGs via zlib.
-   Re-run after any brand token change:  node tools/gen-icons.js
+
+   SUPERSEDED (Sprint 7). public/icons/ is now generated from the photographic
+   brand mark archived at tools/brand-mark.jpg, not from these shapes:
+
+       node ../benja-gallery/generate-icons.js tools/brand-mark.jpg \
+            --out public/icons          # then rename apple-touch-icon.png
+                                        # -> apple-touch-icon-180.png and add
+                                        # maskable-512.png (80% safe zone)
+
+   Running this file would overwrite the shipped icons with the old procedural
+   glyph. Kept only as the reference implementation for the shape-based mark.
    ========================================================================== */
 
 'use strict';

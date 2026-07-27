@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v7';   // Sprint 7 — app renamed to מה הלו"ז, branding refresh
+var CACHE_VERSION = 'v8';   // Sprint 7 — new photographic brand mark (icons/*)
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */
