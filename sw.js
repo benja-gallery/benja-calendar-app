@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v2';   // Sprint 2 — interactive calendar engine
+var CACHE_VERSION = 'v3';   // Sprint 3 — tasks engine, smart lists, quick notes
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */

@@ -22,11 +22,20 @@
   --card-2:       #212938;
   --danger:       #e2725b;
 
+  /* --- task status accents (Sprint 3) --- */
+  --waiting:      #f0a92e;         /* ממתין ללקוח — the one status that shouts */
+  --progress:     #7aa7e8;
+
   --gold-soft:    rgba(228,194,120,.12);
   --gold-edge:    rgba(228,194,120,.32);
   --business-soft:rgba(74,144,226,.14);
   --personal-soft:rgba(80,200,120,.14);
   --danger-soft:  rgba(226,114,91,.14);
+  --waiting-soft: rgba(240,169,46,.16);
+  --waiting-edge: rgba(240,169,46,.45);
+  --waiting-glow: 0 0 0 3px rgba(240,169,46,.10);
+  --progress-soft:rgba(122,167,232,.14);
+  --muted-soft:   rgba(151,161,180,.12);
 
   /* --- geometry --- */
   --r-sm: 10px;
@@ -275,7 +284,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
    ========================================================================== */
 
 .attention{
-  display:grid; grid-template-columns:1fr 1fr; gap:10px;
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(118px,1fr)); gap:10px;
   margin-top:12px;
 }
 .att{
@@ -294,6 +303,8 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 .att.is-hot .att-num{ color:var(--danger); }
 .att.is-warn{ border-color:var(--gold-edge); }
 .att.is-warn .att-num{ color:var(--gold); }
+.att.is-wait{ border-color:var(--waiting-edge); background:linear-gradient(var(--waiting-soft), transparent), var(--card); }
+.att.is-wait .att-num{ color:var(--waiting); }
 .att.is-calm .att-num{ color:var(--personal); }
 
 /* ==========================================================================
@@ -340,7 +351,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
    3. To-do today  /  generic rows
    ========================================================================== */
 
-.todo, #tasksList, #clientsList, #notesList{ padding:6px 4px; }
+.todo, #tasksList, #clientsList, #listsList, #notesList{ padding:6px 4px; }
 
 .row{
   display:flex; align-items:center; gap:12px;
@@ -376,6 +387,146 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   color:var(--faint); font-size:13.5px; line-height:1.7;
 }
 .empty b{ display:block; color:var(--muted); font-size:14.5px; margin-bottom:4px; }
+
+/* ==========================================================================
+   Tasks engine · smart lists · quick notes   (Sprint 3)
+   ========================================================================== */
+
+/* ---------- quick sub-tabs above the tasks list ---------- */
+.task-tabs{ margin-top:14px; }
+.task-tabs .seg{ padding:9px 4px; font-size:13px; }
+.seg-count{
+  display:inline-block; margin-inline-start:4px;
+  font-size:11px; font-weight:800; color:var(--faint);
+  font-variant-numeric:tabular-nums;
+}
+.task-tabs .seg.is-active .seg-count{ color:var(--gold); }
+
+/* ---------- status / priority badges ---------- */
+.badge{
+  display:inline-flex; align-items:center; gap:5px;
+  padding:3px 9px; border-radius:999px;
+  border:1px solid transparent;
+  font-size:11.5px; font-weight:700; white-space:nowrap;
+  background:var(--muted-soft); color:var(--muted);
+}
+/* the status chip is a control, not a label — it must stay tappable */
+.badge-btn{
+  min-height:32px; min-width:0;
+  padding:0 12px;
+  transition:filter .16s, border-color .16s;
+}
+.badge-btn:hover{ filter:brightness(1.14); }
+
+.st-new{ background:var(--muted-soft); color:var(--muted); }
+.st-todo{ background:var(--gold-soft); color:var(--gold); }
+.st-progress{ background:var(--progress-soft); color:var(--progress); }
+.st-done{ background:var(--personal-soft); color:var(--personal); }
+.st-cancelled{ background:var(--muted-soft); color:var(--faint); text-decoration:line-through; }
+
+/* ממתין ללקוח — mandated distinct badge: colour, border and a soft halo */
+.st-waiting{
+  background:var(--waiting-soft); color:var(--waiting);
+  border-color:var(--waiting-edge);
+  box-shadow:var(--waiting-glow);
+}
+.st-waiting::before{ content:"⏳"; font-size:10.5px; }
+
+.pr-high{ background:var(--danger-soft); color:var(--danger); }
+.pr-medium{ background:var(--gold-soft); color:var(--gold); }
+.pr-low{ background:var(--muted-soft); color:var(--faint); }
+
+.badge.dated{ background:var(--business-soft); color:var(--business); }
+.badge.timeless,
+.badge.pinned{ background:var(--gold-soft); color:var(--gold); }
+
+/* the whole row gets a quiet rail when the ball is in the client's court */
+.row.is-waiting{
+  border-inline-start:3px solid var(--waiting);
+  border-radius:var(--r-sm);
+  background:linear-gradient(to left, var(--waiting-soft), transparent 42%);
+}
+.row.is-cancelled .row-title{ color:var(--faint); text-decoration:line-through; }
+
+/* ---------- "הפעולה הבאה" ---------- */
+.next-action{
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  margin-top:7px; padding:7px 10px;
+  background:var(--gold-soft); border:1px solid var(--gold-edge);
+  border-radius:var(--r-sm);
+  font-size:12.5px; font-weight:650; color:var(--ink); line-height:1.5;
+}
+.next-action span{
+  font-size:10.5px; font-weight:800; letter-spacing:.3px;
+  color:var(--gold); text-transform:uppercase;
+}
+
+/* ---------- checklist: sub-tasks and smart-list items ---------- */
+.checklist{ margin-top:9px; }
+
+.prog{ display:flex; align-items:center; gap:9px; margin-bottom:7px; }
+.prog-track{
+  flex:1 1 auto; min-width:0; height:7px;
+  border-radius:999px; overflow:hidden;
+  background:var(--muted-soft);
+}
+.prog-fill{
+  display:block; height:100%;
+  border-radius:999px;
+  background:linear-gradient(to left, var(--gold), var(--personal));
+  transition:inline-size .3s ease;
+}
+.prog-num{
+  flex:0 0 auto;
+  font-size:11.5px; font-weight:800; color:var(--muted);
+  font-variant-numeric:tabular-nums;
+}
+
+.cl-item{
+  display:flex; align-items:center; gap:9px; width:100%;
+  min-height:38px; padding:5px 8px;
+  background:transparent; border:0; border-radius:var(--r-sm);
+  text-align:start; color:var(--ink);
+  transition:background .16s;
+}
+.cl-item:hover{ background:var(--line-soft); }
+.cl-box{
+  flex:0 0 auto;
+  width:20px; height:20px;
+  display:grid; place-items:center;
+  border-radius:6px;
+  border:1.5px solid var(--faint);
+  color:var(--surface); font-size:12px; line-height:1;
+  transition:background .16s, border-color .16s;
+}
+.cl-title{ font-size:13px; font-weight:600; line-height:1.45; }
+.cl-item.is-done .cl-box{ background:var(--personal); border-color:var(--personal); }
+.cl-item.is-done .cl-title{ color:var(--faint); text-decoration:line-through; }
+
+.row.list.is-complete .row-title{ color:var(--personal); }
+
+/* ---------- quick notes ---------- */
+.row.note{ align-items:flex-start; }
+.row.note.is-pinned{
+  border-inline-start:3px solid var(--gold);
+  border-radius:var(--r-sm);
+  background:linear-gradient(to left, var(--gold-soft), transparent 42%);
+}
+.note-body{
+  margin-top:6px;
+  font-size:13px; line-height:1.65; color:var(--muted);
+  white-space:pre-wrap; word-break:break-word;
+}
+.quick-acts{ display:flex; flex-wrap:wrap; gap:7px; margin-top:9px; }
+.mini{
+  min-height:34px; min-width:0;
+  padding:0 11px;
+  background:var(--card-2); border:1px solid var(--line-soft);
+  border-radius:999px;
+  color:var(--muted); font-size:12px; font-weight:700; white-space:nowrap;
+  transition:color .16s, border-color .16s;
+}
+.mini:hover{ color:var(--gold); border-color:var(--gold-edge); }
 
 /* day grouping in the calendar view */
 .day-group{ margin-bottom:14px; }
@@ -759,7 +910,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 
   .toast{ bottom:104px; }
 
-  .attention{ grid-template-columns:repeat(2,1fr); gap:14px; margin-top:16px; }
+  .attention{ grid-template-columns:repeat(3,1fr); gap:14px; margin-top:16px; }
 
   /* calendar gets the extra room a desktop canvas offers */
   .cal-cell{ min-height:92px; padding:10px 4px; }

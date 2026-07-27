@@ -141,8 +141,18 @@
       <div class="scroll-tail"></div>
     </section>
 
-    <!-- ---------- VIEW: TASKS ---------- -->
-    <section class="view" id="view-tasks" aria-label="משימות">
+    <!-- ---------- VIEW: TASKS / LISTS / NOTES ---------- -->
+    <section class="view" id="view-tasks" aria-label="משימות, רשימות ופתקים">
+
+      <!-- quick sub-tabs: הכל · היום · באיחור · ממתין · הושלם -->
+      <div class="segmented task-tabs" role="tablist" aria-label="סינון מהיר של משימות">
+        <button class="seg is-active" role="tab" aria-selected="true"  data-tasktab="all"     type="button">הכל <b class="seg-count" data-taskcount="all">0</b></button>
+        <button class="seg"           role="tab" aria-selected="false" data-tasktab="today"   type="button">היום <b class="seg-count" data-taskcount="today">0</b></button>
+        <button class="seg"           role="tab" aria-selected="false" data-tasktab="late"    type="button">באיחור <b class="seg-count" data-taskcount="late">0</b></button>
+        <button class="seg"           role="tab" aria-selected="false" data-tasktab="waiting" type="button">ממתין <b class="seg-count" data-taskcount="waiting">0</b></button>
+        <button class="seg"           role="tab" aria-selected="false" data-tasktab="done"    type="button">הושלם <b class="seg-count" data-taskcount="done">0</b></button>
+      </div>
+
       <div class="block">
         <div class="block-head">
           <h2>כל המשימות</h2>
@@ -150,10 +160,23 @@
         </div>
         <div class="card" id="tasksList"></div>
       </div>
+
       <div class="block">
-        <div class="block-head"><h2>רשימות ופתקים</h2></div>
+        <div class="block-head">
+          <h2>רשימות</h2>
+          <span class="block-meta" id="listsMeta"></span>
+        </div>
+        <div class="card" id="listsList"></div>
+      </div>
+
+      <div class="block">
+        <div class="block-head">
+          <h2>פתקים</h2>
+          <span class="block-meta" id="notesMeta"></span>
+        </div>
         <div class="card" id="notesList"></div>
       </div>
+
       <div class="scroll-tail"></div>
     </section>
 

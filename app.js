@@ -2,6 +2,8 @@
    Unified Personal & Business Productivity Center
    Sprint 1 — shell, "My Day" dashboard, Master Add, localStorage engine.
    Sprint 2 — PWA install shell, service worker, notifications engine.
+   Sprint 3 — tasks engine (status / priority / next action / sub-tasks),
+              smart checklist lists, quick notes.
 
    Architecture notes
    - Every entity carries category: 'personal' | 'business'  (PROJECT_PLAN §0.2)
@@ -30,6 +32,29 @@
     list: 'רשימה',
     note: 'פתק',
     client: 'לקוח חדש'
+  };
+
+  /* --- tasks engine (Sprint 3) --- */
+  var TASK_STATUSES = ['new', 'todo', 'progress', 'waiting', 'done', 'cancelled'];
+  var STATUS_LABEL = {
+    'new': 'חדש', 'todo': 'לביצוע', 'progress': 'בתהליך',
+    'waiting': 'ממתין ללקוח', 'done': 'הושלם', 'cancelled': 'בוטל'
+  };
+  /* the working loop a one-tap status chip walks; done/cancelled re-enter at לביצוע */
+  var STATUS_CYCLE = ['new', 'todo', 'progress', 'waiting'];
+  var CLOSED_STATUSES = ['done', 'cancelled'];
+
+  var PRIORITIES = ['high', 'medium', 'low'];
+  var PRIORITY_LABEL = { high: 'גבוהה', medium: 'בינונית', low: 'נמוכה' };
+  var PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
+
+  var TASK_TABS = ['all', 'today', 'late', 'waiting', 'done'];
+  var TASK_TAB_EMPTY = {
+    all: 'כל משימה שתוסיף תופיע כאן, מסודרת לפי תאריך יעד ועדיפות.',
+    today: 'אין משימה פתוחה שתאריך היעד שלה הוא היום.',
+    late: 'שום דבר לא נשאר מאחור — אין משימות באיחור.',
+    waiting: 'אין משימה שממתינה כרגע לחזרה של לקוח.',
+    done: 'עוד לא סומנה כאן משימה כהושלמה.'
   };
 
   var HE_DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
@@ -217,6 +242,169 @@
 
   function normCat(c) { return CATS.indexOf(c) === -1 ? 'personal' : c; }
 
+  /* ==========================================================================
+     Tasks / lists / notes model  (Sprint 3)
+
+     Everything below is pure: it takes a record (or a plain array) and returns
+     a value, or mutates only that record. No DOM, no store lookups — that is
+     what lets healthcheck.js execute the whole engine straight out of
+     window.APP and assert real status transitions and progress arithmetic.
+     ========================================================================== */
+
+  function normStatus(s) { return TASK_STATUSES.indexOf(s) === -1 ? 'new' : s; }
+  function normPriority(p) { return PRIORITIES.indexOf(p) === -1 ? 'medium' : p; }
+  function isClosed(status) { return CLOSED_STATUSES.indexOf(normStatus(status)) !== -1; }
+
+  /** {id,title,done} rows out of whatever a store ever held (v1 kept raw strings) */
+  function normItems(items, prefix) {
+    return (Array.isArray(items) ? items : [])
+      .map(function (it) {
+        if (typeof it === 'string') return { id: uid(prefix), title: it.trim(), done: false };
+        if (!it || typeof it !== 'object') return null;
+        return {
+          id: it.id || uid(prefix),
+          title: String(it.title == null ? '' : it.title).trim(),
+          done: !!it.done
+        };
+      })
+      .filter(function (it) { return it && it.title; });
+  }
+
+  /**
+   * A Sprint-1 task carries only `done`. Status is the new source of truth and
+   * `done` is kept in lockstep with it, so every selector written before this
+   * sprint keeps returning the right rows.
+   */
+  function migrateTask(t) {
+    if (!t || typeof t !== 'object') return t;
+    if (t.status === undefined || t.status === null || t.status === '') {
+      t.status = t.done ? 'done' : 'new';
+    }
+    t.status = normStatus(t.status);
+    t.priority = normPriority(t.priority);
+    t.nextAction = typeof t.nextAction === 'string' ? t.nextAction : '';
+    t.subtasks = normItems(t.subtasks, 'st');
+    t.done = t.status === 'done';
+    return t;
+  }
+
+  function migrateList(l) {
+    if (!l || typeof l !== 'object') return l;
+    l.items = normItems(l.items, 'li');
+    l.date = typeof l.date === 'string' ? l.date : '';       // '' = a timeless list
+    return l;
+  }
+
+  function migrateNote(n) {
+    if (!n || typeof n !== 'object') return n;
+    n.pinned = !!n.pinned;
+    n.body = typeof n.body === 'string' ? n.body : '';
+    return n;
+  }
+
+  /** the single writer of task state — status and `done` never drift apart */
+  function setTaskStatus(task, status) {
+    if (!task) return task;
+    var next = normStatus(status);
+    if (next === 'done' && task.status !== 'done') task.prevStatus = normStatus(task.status);
+    task.status = next;
+    task.done = next === 'done';
+    task.updatedAt = Date.now();
+    return task;
+  }
+
+  /** one-tap check-off; un-checking returns the task to where it came from */
+  function toggleTaskDone(task) {
+    if (!task) return task;
+    if (task.status === 'done') {
+      var back = STATUS_CYCLE.indexOf(task.prevStatus) === -1 ? 'todo' : task.prevStatus;
+      return setTaskStatus(task, back);
+    }
+    return setTaskStatus(task, 'done');
+  }
+
+  /** one-tap status chip: walk the working loop, closed statuses re-enter at לביצוע */
+  function nextStatus(status) {
+    var i = STATUS_CYCLE.indexOf(normStatus(status));
+    return i === -1 ? 'todo' : STATUS_CYCLE[(i + 1) % STATUS_CYCLE.length];
+  }
+
+  /** {done,total,pct} — sub-tasks and list items share one checklist shape */
+  function progressOf(items) {
+    var list = Array.isArray(items) ? items.filter(Boolean) : [];
+    var done = list.filter(function (i) { return !!i.done; }).length;
+    return {
+      done: done,
+      total: list.length,
+      pct: list.length ? Math.round(done / list.length * 100) : 0
+    };
+  }
+
+  function subtaskProgress(task) { return progressOf(task && task.subtasks); }
+  function listProgress(list) { return progressOf(list && list.items); }
+
+  /** toggles one checklist row in place and reports the new progress */
+  function toggleItem(items, id) {
+    (Array.isArray(items) ? items : []).forEach(function (it) {
+      if (it && it.id === id) it.done = !it.done;
+    });
+    return progressOf(items);
+  }
+
+  /** the quick sub-tabs of the tasks view: היום · באיחור · ממתין · הושלם */
+  function taskMatchesTab(task, tab, today) {
+    if (!task) return false;
+    var status = normStatus(task.status);
+    var open = !isClosed(status);
+    var t = today || todayISO();
+    if (tab === 'today') return open && task.due === t;
+    if (tab === 'late') return open && !!task.due && task.due < t;
+    if (tab === 'waiting') return status === 'waiting';
+    if (tab === 'done') return status === 'done';
+    return true;                                              // 'all'
+  }
+
+  /** open first, then by due date, then by priority, then by time of day */
+  function sortTasks(tasks) {
+    return (Array.isArray(tasks) ? tasks.slice() : []).sort(function (a, b) {
+      var ca = isClosed(a.status) ? 1 : 0, cb = isClosed(b.status) ? 1 : 0;
+      if (ca !== cb) return ca - cb;
+      var da = a.due || '9999-99-99', db = b.due || '9999-99-99';
+      if (da !== db) return da < db ? -1 : 1;
+      var pa = PRIORITY_RANK[normPriority(a.priority)], pb = PRIORITY_RANK[normPriority(b.priority)];
+      if (pa !== pb) return pa - pb;
+      return timeToMinutes(a.time) - timeToMinutes(b.time);
+    });
+  }
+
+  /** pinned notes float to the top, newest first inside each band */
+  function sortNotes(notes) {
+    return (Array.isArray(notes) ? notes.slice() : []).sort(function (a, b) {
+      var pa = a.pinned ? 0 : 1, pb = b.pinned ? 0 : 1;
+      if (pa !== pb) return pa - pb;
+      return (b.updatedAt || 0) - (a.updatedAt || 0);
+    });
+  }
+
+  /** a note becomes a task / an event — the text survives the type change */
+  function noteToTask(note) {
+    return {
+      type: 'task', title: (note.title || note.body || 'פתק').slice(0, 80),
+      category: normCat(note.category),
+      due: todayISO(), time: '', status: 'todo', priority: 'medium',
+      nextAction: '', subtasks: [], done: false, notes: note.body || ''
+    };
+  }
+
+  function noteToEvent(note) {
+    return {
+      type: 'event', title: (note.title || note.body || 'פתק').slice(0, 80),
+      category: normCat(note.category),
+      date: todayISO(), start: '09:00', end: '10:00',
+      location: '', notes: note.body || ''
+    };
+  }
+
   /* ------------------------------------------------------------------ store */
 
   var Store = {
@@ -226,7 +414,10 @@
       return {
         version: 1,
         owner: OWNER,
-        prefs: { filter: 'all', calView: 'month', notify: { on: false, lead: 10 }, fired: {} },
+        prefs: {
+          filter: 'all', calView: 'month', taskTab: 'all',
+          notify: { on: false, lead: 10 }, fired: {}
+        },
         events: [], tasks: [], lists: [], notes: [], clients: [],
         seeded: false
       };
@@ -259,7 +450,15 @@
           return r;
         });
       });
+      // Sprint 3 shapes: a v1 store holds status-less tasks and string list items
+      d.tasks = d.tasks.map(migrateTask);
+      d.lists = d.lists.map(migrateList);
+      d.notes = d.notes.map(migrateNote);
+
       if (['all', 'personal', 'business'].indexOf(d.prefs.filter) === -1) d.prefs.filter = 'all';
+
+      // the selected tasks sub-tab survives a reload exactly like the calendar view
+      if (TASK_TABS.indexOf(d.prefs.taskTab) === -1) d.prefs.taskTab = 'all';
 
       // the selected calendar view survives a reload; anything unknown falls back
       if (CAL_VIEWS.indexOf(d.prefs.calView) === -1) d.prefs.calView = 'month';
@@ -285,18 +484,51 @@
     seed: function () {
       var t = todayISO();
       var d = this.data;
+
       d.events.push(
         this.stamp({ type: 'event', title: 'פגישת היכרות — לקוח חדש', category: 'business', date: t, start: '10:00', end: '11:00', location: 'זום', notes: '' }),
         this.stamp({ type: 'event', title: 'אימון כושר', category: 'personal', date: t, start: '18:30', end: '19:30', location: '', notes: '' })
       );
+
       d.tasks.push(
-        this.stamp({ type: 'task', title: 'להכין הצעת מחיר', category: 'business', due: t, time: '', done: false, notes: '' }),
-        this.stamp({ type: 'task', title: 'לקנות מתנה ליום הולדת', category: 'personal', due: t, time: '', done: false, notes: '' }),
-        this.stamp({ type: 'task', title: 'לשלוח חוזה חתום', category: 'business', due: addDaysISO(t, -2), time: '', done: false, notes: '' })
+        this.shaped('tasks', {
+          type: 'task', title: 'להכין הצעת מחיר', category: 'business', due: t, time: '',
+          status: 'progress', priority: 'high', nextAction: 'לאסוף מידות ולשלוח טיוטה',
+          subtasks: [{ title: 'לאסוף מידות מהלקוח', done: true }, { title: 'לחשב תמחור והדפסה', done: false }],
+          notes: ''
+        }),
+        this.shaped('tasks', {
+          type: 'task', title: 'לקנות מתנה ליום הולדת', category: 'personal', due: t, time: '',
+          status: 'todo', priority: 'medium', nextAction: '', subtasks: [], notes: ''
+        }),
+        this.shaped('tasks', {
+          type: 'task', title: 'לשלוח חוזה חתום', category: 'business', due: addDaysISO(t, -2), time: '',
+          status: 'waiting', priority: 'high', nextAction: 'לוודא שהלקוח קיבל את המסמך', subtasks: [], notes: ''
+        })
       );
+
+      d.lists.push(
+        this.shaped('lists', {
+          type: 'list', title: 'ציוד לסטודיו', category: 'business', date: '',
+          items: [
+            { title: 'צבעי שמן — לבן טיטניום', done: true },
+            { title: 'מדללים', done: false },
+            { title: 'בדים מתוחים 70x100', done: false }
+          ]
+        })
+      );
+
+      d.notes.push(
+        this.shaped('notes', {
+          type: 'note', title: 'רעיון לקמפיין', category: 'business', pinned: true,
+          body: 'סדרת פורטרטים באימפסטו — לצלם תהליך עבודה קצר לכל יצירה ולפרסם כסטורי.'
+        })
+      );
+
       d.clients.push(
         this.stamp({ type: 'client', name: 'דנה כהן', category: 'business', phone: '', email: '', followUpAt: t, nextAction: 'לחזור אליה עם הצעת מחיר', notes: '' })
       );
+
       d.seeded = true;
       this.save();
     },
@@ -311,8 +543,16 @@
       return rec;
     },
 
+    /** stamped AND type-normalised — the only shape a collection ever receives */
+    shaped: function (collection, rec) {
+      if (collection === 'tasks') rec = migrateTask(rec);
+      else if (collection === 'lists') rec = migrateList(rec);
+      else if (collection === 'notes') rec = migrateNote(rec);
+      return this.stamp(rec);
+    },
+
     add: function (collection, rec) {
-      this.data[collection].push(this.stamp(rec));
+      this.data[collection].push(this.shaped(collection, rec));
       this.save();
     },
 
@@ -352,9 +592,14 @@
       .sort(function (a, b) { return timeToMinutes(a.start) - timeToMinutes(b.start); });
   }
 
+  /** "open" now means: not הושלם and not בוטל */
+  function openTasks() {
+    return pick('tasks').filter(function (x) { return !isClosed(x.status); });
+  }
+
   function tasksDueToday() {
     var t = todayISO();
-    return pick('tasks').filter(function (x) { return !x.done && x.due === t; });
+    return openTasks().filter(function (x) { return x.due === t; });
   }
 
   function unscheduledToday() {
@@ -363,7 +608,11 @@
 
   function overdueTasks() {
     var t = todayISO();
-    return pick('tasks').filter(function (x) { return !x.done && x.due && x.due < t; });
+    return openTasks().filter(function (x) { return x.due && x.due < t; });
+  }
+
+  function waitingTasks() {
+    return pick('tasks').filter(function (x) { return normStatus(x.status) === 'waiting'; });
   }
 
   function pendingFollowUps() {
@@ -378,7 +627,7 @@
     $$('.view').forEach(function (v) { v.classList.toggle('is-active', v.id === 'view-' + view); });
     $$('[data-nav]').forEach(function (b) { b.classList.toggle('is-active', b.dataset.nav === view); });
     $('#viewTitle').textContent =
-      ({ today: 'היום שלי', calendar: 'יומן', tasks: 'משימות ורשימות', clients: 'לקוחות' })[view] || '';
+      ({ today: 'היום שלי', calendar: 'יומן', tasks: 'משימות, רשימות ופתקים', clients: 'לקוחות' })[view] || '';
     window.scrollTo(0, 0);
     render();
   }
@@ -427,7 +676,8 @@
     $('#summaryChips').innerHTML = [
       '<span class="chip">' + esc(relDay(todayISO())) + '</span>',
       '<span class="chip">תצוגה: <b>' + (f === 'all' ? 'הכל' : CAT_LABEL[f]) + '</b></span>',
-      '<span class="chip">פתוחות: <b>' + pick('tasks').filter(function (x) { return !x.done; }).length + '</b></span>'
+      '<span class="chip">פתוחות: <b>' + openTasks().length + '</b></span>',
+      '<span class="chip">ממתין ללקוח: <b>' + waitingTasks().length + '</b></span>'
     ].join('');
   }
 
@@ -435,15 +685,20 @@
 
   function renderAttention() {
     var late = overdueTasks().length;
+    var waiting = waitingTasks().length;
     var follow = pendingFollowUps().length;
 
     $('#attentionCards').innerHTML =
-      attCard(late, 'משימות באיחור', late ? 'דורש טיפול מיידי' : 'הכול בזמן', late ? 'is-hot' : 'is-calm', 'tasks') +
-      attCard(follow, 'מעקבי לקוחות', follow ? 'ממתין לחזרה שלך' : 'אין מעקבים פתוחים', follow ? 'is-warn' : 'is-calm', 'clients');
+      attCard(late, 'משימות באיחור', late ? 'דורש טיפול מיידי' : 'הכול בזמן',
+        late ? 'is-hot' : 'is-calm', 'data-tasktab="late"') +
+      attCard(waiting, 'ממתין ללקוח', waiting ? 'הכדור אצל הלקוח' : 'אין המתנות פתוחות',
+        waiting ? 'is-wait' : 'is-calm', 'data-tasktab="waiting"') +
+      attCard(follow, 'מעקבי לקוחות', follow ? 'ממתין לחזרה שלך' : 'אין מעקבים פתוחים',
+        follow ? 'is-warn' : 'is-calm', 'data-nav="clients"');
   }
 
-  function attCard(num, label, hint, cls, nav) {
-    return '<button type="button" class="att ' + cls + '" data-nav="' + nav + '">' +
+  function attCard(num, label, hint, cls, attrs) {
+    return '<button type="button" class="att ' + cls + '" ' + attrs + '>' +
       '<span class="att-num">' + num + '</span>' +
       '<span class="att-label">' + esc(label) + '</span>' +
       '<span class="att-hint">' + esc(hint) + '</span>' +
@@ -507,21 +762,77 @@
     $('#todoMeta').textContent = list.length ? plural(list.length, 'משימה אחת', 'משימות') : '';
   }
 
-  function taskRow(t) {
-    var late = !t.done && t.due && t.due < todayISO();
+  /**
+   * One task row. `compact` is used inside the calendar panes, where the
+   * next-action line and the sub-task checklist would drown the day grid.
+   */
+  function taskRow(t, compact) {
+    var status = normStatus(t.status);
+    var late = !isClosed(status) && t.due && t.due < todayISO();
+    var prog = subtaskProgress(t);
+
     var meta = [];
     if (t.due) meta.push((late ? 'באיחור · ' : '') + relDay(t.due));
     if (t.time) meta.push(t.time);
-    if (t.notes) meta.push(t.notes);
+    if (!compact && t.notes) meta.push(t.notes);
 
-    return '<div class="row' + (t.done ? ' is-done' : '') + (late ? ' is-late' : '') + '">' +
+    var cls = 'row task st-row-' + status +
+      (t.done ? ' is-done' : '') +
+      (status === 'cancelled' ? ' is-cancelled' : '') +
+      (status === 'waiting' ? ' is-waiting' : '') +
+      (late ? ' is-late' : '');
+
+    return '<div class="' + cls + '">' +
       '<button type="button" class="check-tap" data-toggle="' + t.id + '" aria-label="סימון כבוצע">' +
       '<span class="check">' + (t.done ? '✓' : '') + '</span></button>' +
       '<div class="row-body">' +
       '<div class="row-title">' + esc(t.title) + '</div>' +
-      '<div class="row-meta">' + catTag(t.category) + esc(meta.join(' · ')) + '</div>' +
+      '<div class="row-meta">' +
+      catTag(t.category) +
+      statusBadge(t) +
+      priorityTag(t.priority) +
+      esc(meta.join(' · ')) +
+      '</div>' +
+      (!compact && t.nextAction
+        ? '<div class="next-action"><span>הפעולה הבאה</span>' + esc(t.nextAction) + '</div>' : '') +
+      (!compact && prog.total ? checklist(prog, t.subtasks, 'subtask', t.id) : '') +
       '</div>' +
       delBtn('tasks', t.id) +
+      '</div>';
+  }
+
+  /** tap to walk חדש → לביצוע → בתהליך → ממתין ללקוח → חדש */
+  function statusBadge(t) {
+    var status = normStatus(t.status);
+    return '<button type="button" class="badge badge-btn st-' + status + '" data-cycle="' + t.id + '"' +
+      ' aria-label="' + esc('סטטוס: ' + STATUS_LABEL[status] + ' — לחיצה מעבירה לסטטוס הבא') + '">' +
+      esc(STATUS_LABEL[status]) + '</button>';
+  }
+
+  function priorityTag(p) {
+    var pr = normPriority(p);
+    return '<span class="badge pr-' + pr + '">עדיפות ' + PRIORITY_LABEL[pr] + '</span>';
+  }
+
+  function progressBar(p) {
+    return '<div class="prog">' +
+      '<span class="prog-track"><span class="prog-fill" style="inline-size:' + p.pct + '%"></span></span>' +
+      '<span class="prog-num">' + p.done + '/' + p.total + ' הושלמו</span>' +
+      '</div>';
+  }
+
+  /** shared by task sub-tasks and by smart lists — same shape, same markup */
+  function checklist(prog, items, kind, ownerId) {
+    return '<div class="checklist">' +
+      progressBar(prog) +
+      items.map(function (it) {
+        return '<button type="button" class="cl-item' + (it.done ? ' is-done' : '') + '"' +
+          ' data-' + kind + '="' + ownerId + ':' + it.id + '"' +
+          ' aria-pressed="' + (it.done ? 'true' : 'false') + '">' +
+          '<span class="cl-box">' + (it.done ? '✓' : '') + '</span>' +
+          '<span class="cl-title">' + esc(it.title) + '</span>' +
+          '</button>';
+      }).join('') +
       '</div>';
   }
 
@@ -779,7 +1090,7 @@
           ? '<div class="day-group" style="margin-top:14px">' +
           '<div class="day-head"><span>משימות ליום הזה</span>' +
           '<span class="day-count">' + plural(tasks.length, 'משימה אחת', 'משימות') + '</span></div>' +
-          '<div class="card">' + tasks.map(taskRow).join('') + '</div></div>'
+          '<div class="card">' + tasks.map(function (x) { return taskRow(x, true); }).join('') + '</div></div>'
           : '');
     },
 
@@ -809,7 +1120,7 @@
           '<span class="day-count">' + plural(count, 'פריט אחד', 'פריטים') + '</span></div>' +
           '<div class="card" style="padding:6px 8px">' +
           g.events.map(eventCard).join('') +
-          g.tasks.map(taskRow).join('') +
+          g.tasks.map(function (x) { return taskRow(x, true); }).join('') +
           '</div></div>';
       }).join('');
     },
@@ -883,41 +1194,119 @@
 
   /* ---------------------------------------------- render: tasks / lists / notes */
 
+  function taskTab() { return Store.data.prefs.taskTab; }
+
+  function setTaskTab(tab) {
+    if (TASK_TABS.indexOf(tab) === -1) tab = 'all';
+    Store.data.prefs.taskTab = tab;
+    Store.save();
+    if (UI.view !== 'tasks') { setView('tasks'); return; }   // setView() repaints
+    render();
+  }
+
   function renderTasks() {
-    var all = pick('tasks').slice().sort(function (a, b) {
-      if (a.done !== b.done) return a.done ? 1 : -1;
-      return (a.due || '9999') < (b.due || '9999') ? -1 : 1;
+    var tab = taskTab();
+    var today = todayISO();
+    var all = pick('tasks');
+    var shown = sortTasks(all.filter(function (x) { return taskMatchesTab(x, tab, today); }));
+
+    // scoped to the sub-tab strip — the attention cards deep-link with the same
+    // attribute but must never pick up the active-tab styling
+    $$('.task-tabs [data-tasktab]').forEach(function (b) {
+      var on = b.dataset.tasktab === tab;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
     });
 
-    $('#tasksList').innerHTML = all.length
-      ? all.map(function (t) { return taskRow(t); }).join('')
-      : emptyState('אין משימות', 'כל משימה שתוסיף תופיע כאן, מסודרת לפי תאריך יעד.');
+    $$('[data-taskcount]').forEach(function (el) {
+      var key = el.dataset.taskcount;
+      el.textContent = all.filter(function (x) { return taskMatchesTab(x, key, today); }).length;
+    });
+
+    $('#tasksList').innerHTML = shown.length
+      ? shown.map(function (t) { return taskRow(t); }).join('')
+      : emptyState('אין משימות בתצוגה הזו', TASK_TAB_EMPTY[tab] || TASK_TAB_EMPTY.all);
+
     $('#tasksMeta').textContent = all.length
-      ? all.filter(function (t) { return !t.done; }).length + ' פתוחות מתוך ' + all.length
+      ? all.filter(function (t) { return !isClosed(t.status); }).length + ' פתוחות מתוך ' + all.length
       : '';
 
-    var lists = pick('lists'), notes = pick('notes');
-    var html = lists.map(listRow).join('') + notes.map(noteRow).join('');
-    $('#notesList').innerHTML = html || emptyState('אין רשימות או פתקים', 'רשימות קניות, צ׳ק־ליסטים ופתקים מהירים — הכול כאן.');
+    renderLists();
+    renderNotes();
+  }
+
+  /* ------------------------------------------------- smart checklist lists */
+
+  function renderLists() {
+    var lists = pick('lists').slice().sort(function (a, b) {
+      var da = a.date || '9999-99-99', db = b.date || '9999-99-99';
+      if (da !== db) return da < db ? -1 : 1;
+      return (b.updatedAt || 0) - (a.updatedAt || 0);
+    });
+
+    $('#listsList').innerHTML = lists.length
+      ? lists.map(listRow).join('')
+      : emptyState('אין רשימות', 'רשימות קניות, ציוד לסטודיו וצ׳ק־ליסטים לפרויקט — הכול כאן.');
+
+    var items = 0, done = 0;
+    lists.forEach(function (l) {
+      var p = listProgress(l);
+      items += p.total; done += p.done;
+    });
+    $('#listsMeta').textContent = lists.length
+      ? plural(lists.length, 'רשימה אחת', 'רשימות') + ' · ' + done + '/' + items + ' הושלמו'
+      : '';
   }
 
   function listRow(l) {
-    var items = Array.isArray(l.items) ? l.items : [];
-    return '<div class="row">' +
+    var p = listProgress(l);
+    var complete = p.total > 0 && p.done === p.total;
+
+    return '<div class="row list' + (complete ? ' is-complete' : '') + '">' +
       '<div class="row-body">' +
       '<div class="row-title">☰ ' + esc(l.title) + '</div>' +
       '<div class="row-meta">' + catTag(l.category) +
-      (items.length ? esc(items.length + ' פריטים · ' + items.slice(0, 3).join(', ')) : 'רשימה ריקה') +
-      '</div></div>' +
+      (l.date
+        ? '<span class="badge dated">' + esc(relDay(l.date)) + '</span>'
+        : '<span class="badge timeless">ללא תאריך</span>') +
+      (complete ? '<span class="badge st-done">הרשימה הושלמה</span>' : '') +
+      '</div>' +
+      (p.total
+        ? checklist(p, l.items, 'listitem', l.id)
+        : '<div class="row-meta">רשימה ריקה</div>') +
+      '</div>' +
       delBtn('lists', l.id) +
       '</div>';
   }
 
+  /* -------------------------------------------------------- quick notes */
+
+  function renderNotes() {
+    var notes = sortNotes(pick('notes'));
+
+    $('#notesList').innerHTML = notes.length
+      ? notes.map(noteRow).join('')
+      : emptyState('אין פתקים', 'רעיון, מספר טלפון או משפט מהלקוח — כתוב עכשיו, תסדר אחר כך.');
+
+    var pinned = notes.filter(function (n) { return n.pinned; }).length;
+    $('#notesMeta').textContent = notes.length
+      ? plural(notes.length, 'פתק אחד', 'פתקים') + (pinned ? ' · ' + pinned + ' מוצמדים' : '')
+      : '';
+  }
+
   function noteRow(n) {
-    return '<div class="row">' +
+    return '<div class="row note' + (n.pinned ? ' is-pinned' : '') + '">' +
       '<div class="row-body">' +
-      '<div class="row-title">✎ ' + esc(n.title || 'פתק') + '</div>' +
-      '<div class="row-meta">' + catTag(n.category) + esc((n.body || '').slice(0, 90)) + '</div>' +
+      '<div class="row-title">' + (n.pinned ? '📌 ' : '✎ ') + esc(n.title || 'פתק') + '</div>' +
+      '<div class="row-meta">' + catTag(n.category) +
+      (n.pinned ? '<span class="badge pinned">מוצמד</span>' : '') + '</div>' +
+      '<p class="note-body">' + esc(n.body || '') + '</p>' +
+      '<div class="quick-acts">' +
+      '<button type="button" class="mini" data-pin="' + n.id + '">' +
+      (n.pinned ? '📌 בטל הצמדה' : '📌 הצמד למעלה') + '</button>' +
+      '<button type="button" class="mini" data-convert="task:' + n.id + '">➜ הפוך למשימה</button>' +
+      '<button type="button" class="mini" data-convert="event:' + n.id + '">➜ הפוך לאירוע</button>' +
+      '</div>' +
       '</div>' +
       delBtn('notes', n.id) +
       '</div>';
@@ -1041,10 +1430,17 @@
         f('due', 'תאריך יעד', '<input class="input" type="date" name="due" value="' + todayISO() + '">') +
         f('time', 'שעה (לא חובה)', '<input class="input" type="time" name="time">') +
         '</div>' +
+        '<div class="field-row">' +
+        f('status', 'סטטוס', picker('status', TASK_STATUSES, STATUS_LABEL, 'new')) +
+        f('priority', 'עדיפות', picker('priority', PRIORITIES, PRIORITY_LABEL, 'medium')) +
+        '</div>' +
+        f('nextAction', 'הפעולה הבאה', '<input class="input" name="nextAction" placeholder="להתקשר ללקוח ולאשר מידות">') +
+        f('subtasks', 'תת־משימות (שורה לכל אחת)', '<textarea class="textarea" name="subtasks" placeholder="לאסוף מידות&#10;לחשב תמחור"></textarea>') +
         f('notes', 'הערות', '<textarea class="textarea" name="notes"></textarea>');
     },
     list: function () {
       return f('title', 'שם הרשימה', '<input class="input" name="title" placeholder="קניות לשבת…" required>') +
+        f('date', 'תאריך (לא חובה — רשימה יכולה להיות ללא תאריך)', '<input class="input" type="date" name="date">') +
         f('items', 'פריטים (שורה לכל פריט)', '<textarea class="textarea" name="items" placeholder="חלב&#10;לחם&#10;ביצים"></textarea>');
     },
     note: function () {
@@ -1065,8 +1461,26 @@
 
   function f(name, label, control) {
     return '<div class="field"><label class="field-label" for="fld_' + name + '">' + label + '</label>' +
-      control.replace('<input', '<input id="fld_' + name + '"').replace('<textarea', '<textarea id="fld_' + name + '"') +
+      control
+        .replace('<input', '<input id="fld_' + name + '"')
+        .replace('<textarea', '<textarea id="fld_' + name + '"')
+        .replace('<select', '<select id="fld_' + name + '"') +
       '</div>';
+  }
+
+  /** a labelled <select> built straight off a vocabulary + its Hebrew labels */
+  function picker(name, values, labels, current) {
+    return '<select class="select" name="' + name + '">' +
+      values.map(function (v) {
+        return '<option value="' + v + '"' + (v === current ? ' selected' : '') + '>' +
+          esc(labels[v]) + '</option>';
+      }).join('') +
+      '</select>';
+  }
+
+  /** free text → checklist rows; blank lines are dropped, order is preserved */
+  function parseChecklist(text, prefix) {
+    return normItems(String(text == null ? '' : text).split('\n'), prefix);
   }
 
   function openForm(type) {
@@ -1112,20 +1526,23 @@
       if (!v.title) return warn('צריך שם למשימה');
       Store.add('tasks', {
         type: 'task', title: v.title, category: cat,
-        due: v.due || todayISO(), time: v.time || '', done: false, notes: v.notes || ''
+        due: v.due || todayISO(), time: v.time || '',
+        status: v.status || 'new', priority: v.priority || 'medium',
+        nextAction: v.nextAction || '', subtasks: parseChecklist(v.subtasks, 'st'),
+        done: false, notes: v.notes || ''
       });
       label = 'המשימה נוספה';
     } else if (type === 'list') {
       if (!v.title) return warn('צריך שם לרשימה');
       Store.add('lists', {
         type: 'list', title: v.title, category: cat,
-        items: (v.items || '').split('\n').map(function (s) { return s.trim(); }).filter(Boolean)
+        date: v.date || '', items: parseChecklist(v.items, 'li')
       });
       label = 'הרשימה נוספה';
     } else if (type === 'note') {
       if (!v.body) return warn('הפתק ריק');
       Store.add('notes', {
-        type: 'note', title: v.title || 'פתק', category: cat, body: v.body
+        type: 'note', title: v.title || 'פתק', category: cat, body: v.body, pinned: false
       });
       label = 'הפתק נשמר';
     } else if (type === 'client') {
@@ -1335,7 +1752,8 @@
       });
 
       Store.data.tasks.forEach(function (x) {
-        if (x.done || x.due !== t || !x.time) return;
+        // הושלם and בוטל are both closed — neither deserves a reminder
+        if (isClosed(x.status) || x.due !== t || !x.time) return;
         var gap = timeToMinutes(x.time) - mins;
         if (gap < 0 || gap > lead) return;
         out.push({
@@ -1413,7 +1831,8 @@
   function onClick(e) {
     var el = e.target.closest ? e.target.closest(
       '[data-nav],[data-action],[data-type],[data-filter],[data-cat],[data-toggle],[data-del],' +
-      '[data-calview],[data-calnav],[data-calslot]') : null;
+      '[data-calview],[data-calnav],[data-calslot],' +
+      '[data-tasktab],[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert]') : null;
     if (!el) return;
 
     if (el.dataset.action === 'master-add') { openTypeSheet(); return; }
@@ -1431,11 +1850,85 @@
       return;
     }
 
+    if (el.dataset.tasktab) { setTaskTab(el.dataset.tasktab); return; }
+
     if (el.dataset.nav) { setView(el.dataset.nav); return; }
 
     if (el.dataset.toggle) {
       var t = Store.find('tasks', el.dataset.toggle);
-      if (t) { t.done = !t.done; t.updatedAt = Date.now(); Store.save(); render(); }
+      if (t) {
+        toggleTaskDone(t);
+        Store.save();
+        render();
+        toast(t.done ? 'המשימה הושלמה ✓' : 'המשימה חזרה ל' + STATUS_LABEL[t.status]);
+      }
+      return;
+    }
+
+    if (el.dataset.cycle) {
+      var ct = Store.find('tasks', el.dataset.cycle);
+      if (ct) {
+        setTaskStatus(ct, nextStatus(ct.status));
+        Store.save();
+        render();
+        toast('סטטוס: ' + STATUS_LABEL[ct.status]);
+      }
+      return;
+    }
+
+    if (el.dataset.subtask) {
+      var sp = el.dataset.subtask.split(':');
+      var st = Store.find('tasks', sp[0]);
+      if (st) {
+        var sprog = toggleItem(st.subtasks, sp[1]);
+        // a checklist that just filled up completes its task in one move
+        if (sprog.total && sprog.done === sprog.total && !isClosed(st.status)) {
+          setTaskStatus(st, 'done');
+          toast('כל תת־המשימות הושלמו — המשימה נסגרה');
+        } else {
+          st.updatedAt = Date.now();
+        }
+        Store.save();
+        render();
+      }
+      return;
+    }
+
+    if (el.dataset.listitem) {
+      var lp = el.dataset.listitem.split(':');
+      var lst = Store.find('lists', lp[0]);
+      if (lst) {
+        var lprog = toggleItem(lst.items, lp[1]);
+        lst.updatedAt = Date.now();
+        Store.save();
+        render();
+        if (lprog.total && lprog.done === lprog.total) toast('הרשימה הושלמה 🎉');
+      }
+      return;
+    }
+
+    if (el.dataset.pin) {
+      var note = Store.find('notes', el.dataset.pin);
+      if (note) {
+        note.pinned = !note.pinned;
+        note.updatedAt = Date.now();
+        Store.save();
+        render();
+        toast(note.pinned ? 'הפתק הוצמד למעלה' : 'ההצמדה בוטלה');
+      }
+      return;
+    }
+
+    if (el.dataset.convert) {
+      var cp = el.dataset.convert.split(':');
+      var src = Store.find('notes', cp[1]);
+      if (src) {
+        if (cp[0] === 'task') Store.add('tasks', noteToTask(src));
+        else Store.add('events', noteToEvent(src));
+        Store.remove('notes', src.id);
+        render();
+        toast(cp[0] === 'task' ? 'הפתק הפך למשימה' : 'הפתק הפך לאירוע');
+      }
       return;
     }
 
@@ -1475,6 +1968,42 @@
   window.APP = {
     Store: Store, isoDate: isoDate, plural: plural, normCat: normCat,
     STORE_KEY: STORE_KEY, Notify: Notify, Cal: Cal,
+
+    // pure tasks / lists / notes engine — the healthcheck drives it directly
+    tasks: {
+      STATUSES: TASK_STATUSES,
+      STATUS_LABEL: STATUS_LABEL,
+      STATUS_CYCLE: STATUS_CYCLE,
+      PRIORITIES: PRIORITIES,
+      PRIORITY_LABEL: PRIORITY_LABEL,
+      TABS: TASK_TABS,
+      normStatus: normStatus,
+      normPriority: normPriority,
+      isClosed: isClosed,
+      migrateTask: migrateTask,
+      setTaskStatus: setTaskStatus,
+      toggleTaskDone: toggleTaskDone,
+      nextStatus: nextStatus,
+      subtaskProgress: subtaskProgress,
+      taskMatchesTab: taskMatchesTab,
+      sortTasks: sortTasks
+    },
+
+    lists: {
+      migrateList: migrateList,
+      normItems: normItems,
+      parseChecklist: parseChecklist,
+      listProgress: listProgress,
+      progressOf: progressOf,
+      toggleItem: toggleItem
+    },
+
+    notes: {
+      migrateNote: migrateNote,
+      sortNotes: sortNotes,
+      noteToTask: noteToTask,
+      noteToEvent: noteToEvent
+    },
 
     // pure date math — no DOM, no store; the healthcheck exercises it directly
     dates: {

@@ -373,6 +373,52 @@ active pane is the only one rendered.
   weeks start Sunday for `he-IL`, and all dates are computed in local time — never `toISOString()`.
   `healthcheck.js` executes these helpers directly out of `window.APP.dates`.
 
+### 7.4b Tasks Engine, Smart Checklist Lists & Quick Notes (shipped — Sprint 3)
+
+The `משימות` section is one screen carrying three stacked modules: tasks, lists, notes.
+
+**Tasks Engine (משימות)**
+
+| Field | Values |
+|---|---|
+| `title` | free text (required) |
+| `category` | `personal` / `business` (§0.2) |
+| `due` + `time` | date required, time optional |
+| `priority` | `high` גבוהה · `medium` בינונית · `low` נמוכה |
+| `status` | `new` חדש · `todo` לביצוע · `progress` בתהליך · `waiting` ממתין ללקוח · `done` הושלם · `cancelled` בוטל |
+| `nextAction` | **הפעולה הבאה** — the single next physical move, rendered as a gold callout |
+| `subtasks` | `{id,title,done}[]` checklist with its own progress bar |
+
+- **`status` is the source of truth; the Sprint-1 `done` boolean is derived from it** and kept
+  in lockstep by `setTaskStatus()`, so every selector written before this sprint keeps working.
+  A store written by Sprint 1 migrates on load: `done:true → הושלם`, `done:false → חדש`.
+- **ממתין ללקוח** is the one status that shouts — its own `--waiting` token, a bordered badge
+  with a halo, an ⏳ glyph, a rail on the row itself and a dedicated attention card on "היום שלי".
+- **One-tap operation:** the round check-off completes a task and remembers the status it came
+  from, so un-checking restores it (never a blind reset to "new"). The status chip itself is a
+  button that walks the working loop חדש → לביצוע → בתהליך → ממתין ללקוח → חדש; closed statuses
+  re-enter the loop at לביצוע. Checking the last sub-task closes the whole task.
+- **Quick sub-tabs:** `הכל · היום · באיחור · ממתין · הושלם`, each carrying a live count. The
+  selection persists in `prefs.taskTab`. `בוטל` counts as closed — it never leaks into a work tab.
+
+**Smart Checklist Lists (רשימות)**
+- Shopping, studio equipment and project to-dos: `{id,title,done}[]` items with a real-time
+  progress bar showing both the percentage fill and the `3/5 הושלמו` count.
+- Lists are **timeless by default** and optionally date-bound (`date: 'YYYY-MM-DD'`, rendered
+  through `relDay()`); a timeless list is badged `ללא תאריך`.
+- v1 stores kept list items as plain strings — `migrateList()` adopts them into checklist rows
+  on load, so no historical list is lost.
+
+**Quick Notes (פתקים)**
+- Free-text cards with the same `אישי / עסקי` tag as everything else.
+- **הצמד למעלה** pins a note; pinned notes sort first, newest first inside each band.
+- Quick action menu converts a note into a **task** (lands as `לביצוע`, due today) or an
+  **event** (today, 09:00–10:00). Title, body and category all survive the type change.
+
+**Persistence** — every mutation above (status cycle, check-off, sub-task, list item, pin,
+conversion) writes through `Store.save()` to `localStorage` and repaints immediately.
+`healthcheck.js` executes the whole engine out of `window.APP.tasks / .lists / .notes`.
+
 ### 7.4 General layout
 
 **Layout direction:** RTL by default (`dir="rtl"`), with LTR fallback driven by locale.

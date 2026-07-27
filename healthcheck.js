@@ -685,6 +685,314 @@ check('day view: overlapping events share lanes instead of hiding', () => {
   return true;
 });
 
+/* ====== 16. tasks engine / smart lists / quick notes (Sprint 3) ========== */
+
+/* ---- 16a. structure ---- */
+
+check('tasks view exposes the four mandated quick sub-tabs', () => {
+  const view = (html.match(/<section class="view" id="view-tasks"[\s\S]*?<\/section>/) || [''])[0];
+  if (!view) return 'no #view-tasks section';
+  ['today', 'late', 'waiting', 'done'].forEach(t => {
+    if (view.indexOf('data-tasktab="' + t + '"') === -1) throw new Error('no sub-tab for ' + t);
+  });
+  ['היום', 'באיחור', 'ממתין', 'הושלם'].forEach(l => {
+    if (view.indexOf('>' + l + ' <') === -1) throw new Error('missing sub-tab label ' + l);
+  });
+  if (view.indexOf('role="tablist"') === -1) return 'sub-tabs are not exposed as a tablist';
+  if (!/TASK_TABS = \['all', 'today', 'late', 'waiting', 'done'\]/.test(js)) return 'TASK_TABS vocabulary changed';
+  return true;
+});
+
+check('tasks / lists / notes each own a container and a renderer', () => {
+  ['tasksList', 'tasksMeta', 'listsList', 'listsMeta', 'notesList', 'notesMeta'].forEach(id => {
+    if (html.indexOf('id="' + id + '"') === -1) throw new Error('no #' + id);
+    if (js.indexOf("$('#" + id + "')") === -1) throw new Error('#' + id + ' is never painted');
+  });
+  ['function renderTasks', 'function renderLists', 'function renderNotes'].forEach(fn => {
+    if (js.indexOf(fn) === -1) throw new Error('no ' + fn + '()');
+  });
+  return true;
+});
+
+check('the six task statuses ship with their Hebrew labels', () => {
+  if (!/TASK_STATUSES = \['new', 'todo', 'progress', 'waiting', 'done', 'cancelled'\]/.test(js)) {
+    return 'status vocabulary changed';
+  }
+  ['חדש', 'לביצוע', 'בתהליך', 'ממתין ללקוח', 'הושלם', 'בוטל'].forEach(l => {
+    if (js.indexOf("'" + l + "'") === -1) throw new Error('missing status label ' + l);
+  });
+  ['גבוהה', 'בינונית', 'נמוכה'].forEach(l => {
+    if (js.indexOf("'" + l + "'") === -1) throw new Error('missing priority label ' + l);
+  });
+  return true;
+});
+
+check('"ממתין ללקוח" carries a visually distinct badge', () => {
+  if (!/\.st-waiting\{[\s\S]*?background:var\(--waiting-soft\)/.test(css)) return 'no dedicated waiting badge rule';
+  if (!/--waiting:\s*#[0-9a-f]{3,8}/i.test(css)) return 'no --waiting token';
+  if (!/\.st-waiting\{[\s\S]*?border-color:var\(--waiting-edge\)/.test(css)) return 'waiting badge has no distinct border';
+  if (!/\.row\.is-waiting\{/.test(css)) return 'the waiting row itself is not marked';
+  if (js.indexOf("status === 'waiting' ? ' is-waiting' : ''") === -1) return 'is-waiting is never applied';
+  return true;
+});
+
+check('one-tap completion and one-tap status toggle are both wired', () => {
+  if (js.indexOf('data-toggle="') === -1) return 'no check-off control';
+  if (js.indexOf('data-cycle="') === -1) return 'no status toggle control';
+  if (js.indexOf('[data-cycle]') === -1) return 'status toggle is not delegated';
+  if (!/function toggleTaskDone/.test(js)) return 'no toggleTaskDone()';
+  if (!/function nextStatus/.test(js)) return 'no nextStatus()';
+  return true;
+});
+
+check('task form collects status, priority, next action and sub-tasks', () => {
+  const form = (js.match(/task: function \(\)[\s\S]*?\n    \},/) || [''])[0];
+  if (!form) return 'no FIELDS.task builder';
+  ["picker('status'", "picker('priority'", 'name="nextAction"', 'name="subtasks"'].forEach(n => {
+    if (form.indexOf(n) === -1) throw new Error('the form does not collect ' + n);
+  });
+  if (form.indexOf('הפעולה הבאה') === -1) return 'next-action label missing';
+  const save = (js.match(/Store\.add\('tasks',\s*\{[\s\S]*?\}\);/) || [''])[0];
+  ['status:', 'priority:', 'nextAction:', 'subtasks:'].forEach(k => {
+    if (save.indexOf(k) === -1) throw new Error('the save branch drops ' + k);
+  });
+  return true;
+});
+
+check('smart lists render a real progress bar with a count', () => {
+  if (!/function progressBar/.test(js)) return 'no progressBar()';
+  if (js.indexOf(" הושלמו'") === -1) return 'the "N/M הושלמו" counter copy is missing';
+  if (js.indexOf('prog-fill') === -1 || !/\.prog-fill\{/.test(css)) return 'no rendered fill element';
+  if (js.indexOf("inline-size:' + p.pct + '%") === -1) return 'the bar is not driven by the real percentage';
+  if (js.indexOf("checklist(p, l.items, 'listitem', l.id)") === -1) return 'list items render no checklist';
+  if (js.indexOf('[data-listitem]') === -1) return 'list item taps are not delegated';
+  if (js.indexOf("checklist(prog, t.subtasks, 'subtask', t.id)") === -1) return 'sub-tasks render no checklist';
+  return true;
+});
+
+check('lists support both timeless and date-bound forms', () => {
+  const save = (js.match(/Store\.add\('lists',\s*\{[\s\S]*?\}\);/) || [''])[0];
+  if (save.indexOf('date:') === -1) return 'the list save branch drops the date';
+  if (js.indexOf('ללא תאריך') === -1) return 'no timeless affordance in the UI';
+  if (!/l\.date = typeof l\.date === 'string' \? l\.date : ''/.test(js)) return 'list date is not normalised on load';
+  return true;
+});
+
+check('notes support pin-to-top and conversion into a task or an event', () => {
+  if (js.indexOf('הצמד למעלה') === -1) return 'mandated pin copy missing';
+  if (js.indexOf('data-pin="') === -1 || js.indexOf('[data-pin]') === -1) return 'pin toggle is not wired';
+  if (js.indexOf('data-convert="task:') === -1) return 'no note→task action';
+  if (js.indexOf('data-convert="event:') === -1) return 'no note→event action';
+  if (!/function noteToTask/.test(js) || !/function noteToEvent/.test(js)) return 'no conversion mappers';
+  if (js.indexOf("Store.add('tasks', noteToTask(src))") === -1) return 'conversion never writes a task';
+  return true;
+});
+
+check('every Sprint 3 write path goes through localStorage', () => {
+  ['data-cycle', 'data-subtask', 'data-listitem', 'data-pin', 'data-convert'].forEach(k => {
+    const branch = (js.match(new RegExp('el\\.dataset\\.' + k.replace('data-', '') + '\\)\\s*\\{[\\s\\S]*?\\n      return;')) || [''])[0];
+    if (!branch) throw new Error('no delegated branch for ' + k);
+    if (branch.indexOf('Store.save()') === -1 && branch.indexOf('Store.add(') === -1) {
+      throw new Error(k + ' mutates memory without persisting');
+    }
+    if (branch.indexOf('render()') === -1) throw new Error(k + ' does not repaint');
+  });
+  return true;
+});
+
+/* ---- 16b. the engine, executed for real ---- */
+
+let T = null, L = null, N = null;
+
+check('app.js exports the tasks / lists / notes engine', () => {
+  const APP = loadApp();
+  T = APP.tasks; L = APP.lists; N = APP.notes;
+  if (!T || !L || !N) return 'APP.tasks / APP.lists / APP.notes are not all exported';
+  ['normStatus', 'nextStatus', 'setTaskStatus', 'toggleTaskDone', 'migrateTask',
+    'subtaskProgress', 'taskMatchesTab', 'sortTasks', 'isClosed'].forEach(k => {
+      if (typeof T[k] !== 'function') throw new Error('APP.tasks.' + k + ' is missing');
+    });
+  ['migrateList', 'listProgress', 'progressOf', 'toggleItem', 'parseChecklist'].forEach(k => {
+    if (typeof L[k] !== 'function') throw new Error('APP.lists.' + k + ' is missing');
+  });
+  ['migrateNote', 'sortNotes', 'noteToTask', 'noteToEvent'].forEach(k => {
+    if (typeof N[k] !== 'function') throw new Error('APP.notes.' + k + ' is missing');
+  });
+  return true;
+});
+
+check('status transitions: the working loop cycles and closed statuses re-enter', () => {
+  if (T.nextStatus('new') !== 'todo') return 'חדש → לביצוע broken';
+  if (T.nextStatus('todo') !== 'progress') return 'לביצוע → בתהליך broken';
+  if (T.nextStatus('progress') !== 'waiting') return 'בתהליך → ממתין ללקוח broken';
+  if (T.nextStatus('waiting') !== 'new') return 'the loop does not close';
+  if (T.nextStatus('done') !== 'todo') return 'a completed task must re-enter at לביצוע';
+  if (T.nextStatus('cancelled') !== 'todo') return 'a cancelled task must re-enter at לביצוע';
+  if (T.nextStatus('גיבריש') !== 'todo') return 'an unknown status is not recovered';
+  return true;
+});
+
+check('status transitions: status and the legacy done flag never drift apart', () => {
+  const t = T.migrateTask({ title: 'x' });
+  if (t.status !== 'new' || t.done !== false) return 'a fresh task is not (חדש, open)';
+
+  T.setTaskStatus(t, 'waiting');
+  if (t.done !== false) return 'ממתין ללקוח must not read as done';
+  if (!T.isClosed('done') || !T.isClosed('cancelled')) return 'closed statuses are wrong';
+  if (T.isClosed('waiting')) return 'ממתין ללקוח must stay open';
+
+  T.setTaskStatus(t, 'done');
+  if (t.done !== true) return 'done flag not raised with the status';
+
+  T.toggleTaskDone(t);                          // un-check
+  if (t.status !== 'waiting') return 'un-checking did not restore the previous status, got ' + t.status;
+  if (t.done !== false) return 'done flag not lowered';
+
+  T.toggleTaskDone(t);                          // one-tap completion
+  if (t.status !== 'done' || t.done !== true) return 'one-tap completion broken';
+
+  // a v1 record carries only `done` — the migration must invent the status
+  const legacy = T.migrateTask({ title: 'old', done: true });
+  if (legacy.status !== 'done') return 'a legacy completed task did not migrate to הושלם';
+  const legacyOpen = T.migrateTask({ title: 'old', done: false });
+  if (legacyOpen.status !== 'new') return 'a legacy open task did not migrate to חדש';
+  if (T.migrateTask({ title: 'x', status: 'nonsense' }).status !== 'new') return 'garbage status not normalised';
+  if (T.migrateTask({ title: 'x', priority: 'nonsense' }).priority !== 'medium') return 'garbage priority not normalised';
+  return true;
+});
+
+check('sub-task arithmetic is exact, including the empty and full cases', () => {
+  const empty = T.subtaskProgress(T.migrateTask({ title: 'x' }));
+  if (empty.total !== 0 || empty.done !== 0 || empty.pct !== 0) return 'an empty checklist is not 0/0 · 0%';
+
+  const t = T.migrateTask({
+    title: 'x',
+    subtasks: [{ title: 'a', done: true }, { title: 'b' }, { title: 'c', done: true }, 'd']
+  });
+  if (t.subtasks.length !== 4) return 'a plain string item was not adopted, got ' + t.subtasks.length;
+  if (t.subtasks.some(s => !s.id)) return 'a sub-task shipped without an id';
+
+  const p = T.subtaskProgress(t);
+  if (p.done !== 2 || p.total !== 4) return 'count is ' + p.done + '/' + p.total + ', expected 2/4';
+  if (p.pct !== 50) return '2 of 4 is ' + p.pct + '%';
+
+  const full = T.subtaskProgress(T.migrateTask({ title: 'x', subtasks: [{ title: 'a', done: true }] }));
+  if (full.pct !== 100) return 'a fully checked list is not 100%';
+
+  const third = L.progressOf([{ done: true }, {}, {}]);
+  if (third.pct !== 33) return '1 of 3 rounds to ' + third.pct + '%, expected 33';
+  return true;
+});
+
+check('list progress state tracks real item toggles', () => {
+  const l = L.migrateList({ title: 'קניות', items: ['חלב', 'לחם', { title: 'ביצים', done: true }] });
+  if (l.items.length !== 3) return 'v1 string items were not migrated, got ' + l.items.length;
+  if (l.date !== '') return 'a timeless list did not normalise to an empty date';
+
+  let p = L.listProgress(l);
+  if (p.done !== 1 || p.total !== 3) return 'initial progress is ' + p.done + '/' + p.total;
+
+  p = L.toggleItem(l.items, l.items[0].id);
+  if (p.done !== 2) return 'toggling an item did not advance progress';
+  if (l.items[0].done !== true) return 'the toggle did not stick on the record';
+
+  p = L.toggleItem(l.items, l.items[0].id);          // toggling back
+  if (p.done !== 1) return 'a checklist item does not un-check';
+
+  p = L.toggleItem(l.items, 'no-such-id');
+  if (p.done !== 1) return 'an unknown id changed the progress';
+
+  const dated = L.migrateList({ title: 'x', date: '2026-07-27', items: [] });
+  if (dated.date !== '2026-07-27') return 'a date-bound list lost its date';
+  if (L.listProgress(dated).pct !== 0) return 'an empty list is not 0%';
+
+  const parsed = L.parseChecklist('חלב\n\n  לחם  \n', 'li');
+  if (parsed.length !== 2) return 'blank lines were not dropped, got ' + parsed.length;
+  if (parsed[1].title !== 'לחם') return 'checklist items are not trimmed';
+  return true;
+});
+
+check('task sub-tabs select exactly the right rows', () => {
+  const today = '2026-07-27';
+  const rows = [
+    T.migrateTask({ id: 'a', title: 'due today', status: 'todo', due: today }),
+    T.migrateTask({ id: 'b', title: 'overdue', status: 'progress', due: '2026-07-20' }),
+    T.migrateTask({ id: 'c', title: 'waiting + overdue', status: 'waiting', due: '2026-07-01' }),
+    T.migrateTask({ id: 'd', title: 'finished', status: 'done', due: today }),
+    T.migrateTask({ id: 'e', title: 'dropped', status: 'cancelled', due: '2026-07-01' }),
+    T.migrateTask({ id: 'f', title: 'no due date', status: 'new', due: '' })
+  ];
+  const ids = tab => rows.filter(r => T.taskMatchesTab(r, tab, today)).map(r => r.id).join('');
+
+  if (ids('today') !== 'a') return 'היום selected [' + ids('today') + '], expected [a]';
+  if (ids('late') !== 'bc') return 'באיחור selected [' + ids('late') + '], expected [bc]';
+  if (ids('waiting') !== 'c') return 'ממתין selected [' + ids('waiting') + '], expected [c]';
+  if (ids('done') !== 'd') return 'הושלם selected [' + ids('done') + '], expected [d]';
+  if (ids('all') !== 'abcdef') return 'הכל dropped rows: [' + ids('all') + ']';
+  // a cancelled task is neither open nor complete — it must not surface in a work tab
+  if (ids('late').indexOf('e') !== -1) return 'a cancelled task leaked into באיחור';
+  return true;
+});
+
+check('task ordering puts open work first, then due date, then priority', () => {
+  const order = T.sortTasks([
+    { id: 'done', status: 'done', due: '2026-01-01', priority: 'high' },
+    { id: 'low', status: 'todo', due: '2026-07-27', priority: 'low' },
+    { id: 'high', status: 'todo', due: '2026-07-27', priority: 'high' },
+    { id: 'soon', status: 'waiting', due: '2026-07-01', priority: 'low' }
+  ]).map(t => t.id).join(',');
+  return order === 'soon,high,low,done' ? true : 'order is ' + order;
+});
+
+check('notes: pinned float to the top, newest first inside each band', () => {
+  const order = N.sortNotes([
+    { id: 'old', pinned: false, updatedAt: 1 },
+    { id: 'pin-old', pinned: true, updatedAt: 2 },
+    { id: 'new', pinned: false, updatedAt: 9 },
+    { id: 'pin-new', pinned: true, updatedAt: 5 }
+  ]).map(n => n.id).join(',');
+  if (order !== 'pin-new,pin-old,new,old') return 'order is ' + order;
+  if (N.migrateNote({ body: 'x' }).pinned !== false) return 'pinned is not normalised to a boolean';
+  if (N.migrateNote({ pinned: 1 }).pinned !== true) return 'a truthy pin did not become true';
+  return true;
+});
+
+check('note conversion preserves the text and the category', () => {
+  const note = { title: 'רעיון', body: 'לצלם תהליך עבודה', category: 'business' };
+  const task = N.noteToTask(note);
+  if (task.type !== 'task') return 'conversion did not produce a task';
+  if (task.title !== 'רעיון') return 'the task lost the note title';
+  if (task.notes !== note.body) return 'the task lost the note body';
+  if (task.category !== 'business') return 'the task lost the category';
+  if (task.status !== 'todo') return 'a converted note should land as לביצוע';
+
+  const ev = N.noteToEvent(note);
+  if (ev.type !== 'event' || ev.category !== 'business') return 'the event conversion is wrong';
+  if (!ev.date || !ev.start) return 'the converted event has no slot';
+
+  const bodyOnly = N.noteToTask({ body: 'רק גוף', category: 'personal' });
+  if (bodyOnly.title !== 'רק גוף') return 'a title-less note did not fall back to its body';
+  return true;
+});
+
+/* ------------------------------------------- 17. Sprint 3 spec & delivery */
+
+check('service worker cache version was bumped for this sprint', () => {
+  const m = sw.match(/CACHE_VERSION = '(v\d+)'/);
+  if (!m) return 'no CACHE_VERSION';
+  const n = parseInt(m[1].slice(1), 10);
+  return n >= 3 ? true : 'CACHE_VERSION is ' + m[1] + ', expected v3 or later';
+});
+
+check('PROJECT_PLAN documents the Sprint 3 engine', () => {
+  const required = [
+    'Tasks Engine', 'Smart Checklist Lists', 'Quick Notes',
+    'ממתין ללקוח', 'הפעולה הבאה', 'הצמד למעלה'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
 /* --------------------------------------------------------------- report */
 
 report();
