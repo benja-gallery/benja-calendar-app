@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#12161f">
+<title>המרכז שלי — יומן, משימות ולקוחות</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ============ DESKTOP SIDE RAIL (visually right in RTL) ============ -->
+  <aside class="rail" aria-label="ניווט ראשי">
+    <div class="rail-brand">
+      <span class="rail-mark">B</span>
+      <span class="rail-name">המרכז שלי</span>
+    </div>
+    <nav class="rail-nav">
+      <button class="rail-item is-active" data-nav="today"   type="button"><span class="ico">☀</span><span>היום</span></button>
+      <button class="rail-item"           data-nav="calendar" type="button"><span class="ico">▦</span><span>יומן</span></button>
+      <button class="rail-item rail-add"  data-action="master-add" type="button"><span class="ico">＋</span><span>הוספה</span></button>
+      <button class="rail-item"           data-nav="tasks"   type="button"><span class="ico">✓</span><span>משימות</span></button>
+      <button class="rail-item"           data-nav="clients" type="button"><span class="ico">☺</span><span>לקוחות</span></button>
+    </nav>
+    <div class="rail-user">
+      <span class="avatar" aria-hidden="true">ב</span>
+      <span class="rail-user-meta">
+        <b id="railUserName">בן פרץ</b>
+        <small>מחובר מקומית</small>
+      </span>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main class="main">
+
+    <header class="topbar">
+      <div class="topbar-row">
+        <div class="topbar-title">
+          <h1 id="viewTitle">היום שלי</h1>
+          <p id="todayLabel" class="topbar-sub"></p>
+        </div>
+        <span class="avatar avatar-sm topbar-avatar" aria-hidden="true">ב</span>
+      </div>
+
+      <!-- Global category filter -->
+      <div class="segmented" role="tablist" aria-label="סינון לפי קטגוריה">
+        <button class="seg is-active" role="tab" aria-selected="true"  data-filter="all"      type="button">הכל</button>
+        <button class="seg"           role="tab" aria-selected="false" data-filter="personal" type="button">אישי</button>
+        <button class="seg"           role="tab" aria-selected="false" data-filter="business" type="button">עסקי</button>
+      </div>
+    </header>
+
+    <!-- ---------- VIEW: MY DAY ---------- -->
+    <section class="view is-active" id="view-today" aria-label="היום שלי">
+
+      <!-- 1. Smart summary -->
+      <div class="summary card">
+        <p class="summary-greet" id="summaryGreeting">בוקר טוב בן</p>
+        <p class="summary-line" id="summaryLine"></p>
+        <div class="summary-chips" id="summaryChips"></div>
+      </div>
+
+      <!-- 4. Attention cards -->
+      <div class="attention" id="attentionCards"></div>
+
+      <!-- 2. Timeline -->
+      <section class="block" aria-label="ציר הזמן של היום">
+        <div class="block-head">
+          <h2>ציר הזמן של היום</h2>
+          <span class="block-meta" id="timelineMeta"></span>
+        </div>
+        <div class="timeline card" id="timeline"></div>
+      </section>
+
+      <!-- 3. Unscheduled to-do today -->
+      <section class="block" aria-label="לביצוע היום">
+        <div class="block-head">
+          <h2>לביצוע היום</h2>
+          <span class="block-meta" id="todoMeta"></span>
+        </div>
+        <div class="todo card" id="todoToday"></div>
+      </section>
+
+      <div class="scroll-tail"></div>
+    </section>
+
+    <!-- ---------- VIEW: CALENDAR ---------- -->
+    <section class="view" id="view-calendar" aria-label="יומן">
+      <div class="block">
+        <div class="block-head">
+          <h2>הימים הקרובים</h2>
+          <span class="block-meta" id="calendarMeta"></span>
+        </div>
+        <div id="calendarList"></div>
+      </div>
+      <div class="scroll-tail"></div>
+    </section>
+
+    <!-- ---------- VIEW: TASKS ---------- -->
+    <section class="view" id="view-tasks" aria-label="משימות">
+      <div class="block">
+        <div class="block-head">
+          <h2>כל המשימות</h2>
+          <span class="block-meta" id="tasksMeta"></span>
+        </div>
+        <div class="card" id="tasksList"></div>
+      </div>
+      <div class="block">
+        <div class="block-head"><h2>רשימות ופתקים</h2></div>
+        <div class="card" id="notesList"></div>
+      </div>
+      <div class="scroll-tail"></div>
+    </section>
+
+    <!-- ---------- VIEW: CLIENTS ---------- -->
+    <section class="view" id="view-clients" aria-label="לקוחות">
+      <div class="block">
+        <div class="block-head">
+          <h2>לקוחות</h2>
+          <span class="block-meta" id="clientsMeta"></span>
+        </div>
+        <div class="card" id="clientsList"></div>
+      </div>
+      <div class="scroll-tail"></div>
+    </section>
+
+  </main>
+
+  <!-- ============ MOBILE BOTTOM BAR ============ -->
+  <nav class="tabbar" aria-label="ניווט תחתון">
+    <button class="tab is-active" data-nav="today"   type="button"><span class="ico">☀</span><span class="tab-label">היום</span></button>
+    <button class="tab"           data-nav="calendar" type="button"><span class="ico">▦</span><span class="tab-label">יומן</span></button>
+    <button class="tab tab-add"   data-action="master-add" type="button" aria-label="הוספה חדשה">
+      <span class="tab-add-btn">＋</span><span class="tab-label">הוספה</span>
+    </button>
+    <button class="tab"           data-nav="tasks"   type="button"><span class="ico">✓</span><span class="tab-label">משימות</span></button>
+    <button class="tab"           data-nav="clients" type="button"><span class="ico">☺</span><span class="tab-label">לקוחות</span></button>
+  </nav>
+
+</div>
+
+<!-- ============ MASTER ADD — floating CTA ============ -->
+<button class="fab" id="fab" data-action="master-add" type="button">＋ הוספה חדשה</button>
+
+<!-- ============ BOTTOM SHEETS ============ -->
+<div class="backdrop" id="backdrop" hidden></div>
+
+<!-- type chooser -->
+<div class="sheet" id="typeSheet" role="dialog" aria-modal="true" aria-labelledby="typeSheetTitle" hidden>
+  <div class="sheet-grab" aria-hidden="true"></div>
+  <div class="sheet-head">
+    <h2 id="typeSheetTitle">מה נוסיף?</h2>
+    <button class="sheet-x" data-action="close-sheet" type="button" aria-label="סגירה">✕</button>
+  </div>
+  <div class="type-grid">
+    <button class="type-btn" data-type="event"  type="button"><span class="type-ico">▦</span><span>אירוע / פגישה</span></button>
+    <button class="type-btn" data-type="task"   type="button"><span class="type-ico">✓</span><span>משימה</span></button>
+    <button class="type-btn" data-type="list"   type="button"><span class="type-ico">☰</span><span>רשימה</span></button>
+    <button class="type-btn" data-type="note"   type="button"><span class="type-ico">✎</span><span>פתק</span></button>
+    <button class="type-btn" data-type="client" type="button"><span class="type-ico">☺</span><span>לקוח חדש</span></button>
+  </div>
+  <div class="sheet-tail"></div>
+</div>
+
+<!-- typed form -->
+<div class="sheet" id="formSheet" role="dialog" aria-modal="true" aria-labelledby="formSheetTitle" hidden>
+  <div class="sheet-grab" aria-hidden="true"></div>
+  <div class="sheet-head">
+    <h2 id="formSheetTitle">פריט חדש</h2>
+    <button class="sheet-x" data-action="close-sheet" type="button" aria-label="סגירה">✕</button>
+  </div>
+  <form id="entityForm" novalidate>
+    <div id="formFields"></div>
+
+    <div class="field">
+      <label class="field-label">קטגוריה</label>
+      <div class="segmented segmented-cat" id="catPicker">
+        <button class="seg is-active" data-cat="personal" type="button">אישי</button>
+        <button class="seg"           data-cat="business" type="button">עסקי</button>
+      </div>
+    </div>
+
+    <div class="sheet-actions">
+      <button class="btn btn-ghost" data-action="close-sheet" type="button">ביטול</button>
+      <button class="btn btn-gold" type="submit">שמירה</button>
+    </div>
+  </form>
+  <div class="sheet-tail"></div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>

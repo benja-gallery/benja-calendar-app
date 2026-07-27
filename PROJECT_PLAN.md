@@ -1,33 +1,89 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Initial specification, v0.1
+> **Status:** Core product specification injected, v0.2
 > **Repository:** `C:\calendar-app` (fresh, independent git repo — no relationship to `benja-gallery`)
-> **Created:** 2026-07-27
+> **Created:** 2026-07-27 · **Spec injected:** 2026-07-27 (Sprint 1)
 
 ---
 
-## 0. Note on the source specification
+## 0. Core Product Specification (authoritative)
 
-The initializing directive instructed to "paste the full app specifications into it", but no
-specification document was transmitted with the directive. This file therefore contains a
-**complete, self-contained specification authored from the stated scope ("calendar app")**,
-written to the same engineering standards used across this workspace (RTL-first Hebrew UI,
-Cloudflare Workers/Pages + D1 backend, offline-first persistence, zero-bug policy).
+This section is the **authoritative product definition**. Where any later section conflicts
+with it, this section wins.
 
-If an authoritative spec document exists elsewhere, it should replace sections 2–8 verbatim.
-Sections 1 and 9–11 are process scaffolding and remain valid either way.
+### 0.1 Core Vision
+
+A **Unified Personal & Business Productivity Center** — a single app that replaces the
+scattered set of tools currently used for the same day. It combines, in one shell:
+
+| Pillar | Hebrew | Role |
+|---|---|---|
+| Calendar | יומן | Scheduled events and meetings on a timeline |
+| Tasks | משימות | Actionable to-dos, dated or undated |
+| Lists | רשימות | Checklists (shopping, packing, project steps) |
+| Notes | פתקים | Free-form captured text |
+| Clients (CRM) | לקוחות | People and businesses, with follow-up state |
+| Next Actions | צעדים הבאים | The single next action owed on any client or project |
+| Reminders | תזכורות | Time-anchored nudges attached to any entity |
+
+The product is not a calendar with extras bolted on — it is one **day-centric** surface where
+personal life and business pipeline coexist without collapsing into each other.
+
+### 0.2 Dual-Category Engine (non-negotiable)
+
+**Every entity — Event, Task, List, Note, Client — MUST carry a `category` field with the
+value `'personal'` or `'business'`.** There is no third state and no null. Category is:
+
+- Assigned at creation time (the create form always exposes it, defaulted, never hidden).
+- Persisted with the record.
+- Carried through every read path, every render, and every export.
+- Represented visually by a colour tag *and* a text label — colour is never the sole carrier.
+
+Any entity created without a valid category is a bug, not a variant. The persistence layer
+normalises unknown/missing values to `'personal'` on load so legacy rows can never crash a
+render, but writers must always supply it explicitly.
+
+### 0.3 Global Category Filter
+
+A persistent, always-reachable three-way filter in the app shell:
+
+```
+[ הכל ]   [ אישי ]   [ עסקי ]
+```
+
+- Applies globally across every view simultaneously (My Day, Calendar, Tasks, Clients).
+- Selection persists across sessions (stored with the local state).
+- `הכל` is the default.
+- Counters, summaries and empty states all respect the active filter — a filtered view never
+  reports numbers from outside the filter.
+
+### 0.4 Auth Model (V1)
+
+- **V1 is a local single-user session:** user **Ben Perez** (בן פרץ), established locally with
+  no network round-trip and no credential prompt.
+- All application state persists to **`localStorage`** under a single versioned key, and the
+  app is fully usable with no network at all.
+- The session object and the store are shaped deliberately for a later migration to
+  **Cloudflare D1 + Worker** with server-side auth and site-admin integration: every record
+  carries a stable string `id`, a `createdAt`/`updatedAt` pair, and an `ownerId`, so rows can
+  be lifted into D1 tables without a data rewrite.
+- **No credential check ever runs in client JS.** V1 has no credential check at all; when
+  auth arrives it arrives server-side (§4).
 
 ---
 
 ## 1. Vision & Goals
 
-**Product:** A fast, keyboard-driven calendar and scheduling application.
+**Product:** A unified personal & business productivity center (§0.1), day-centric and RTL-native.
 
 **Primary goals**
-1. **Speed of capture** — creating an event must take under 3 seconds from any screen.
-2. **Trustworthy time** — correct timezone, DST, and recurrence handling with zero drift.
-3. **Offline-first** — the app is fully usable with no network; sync reconciles on reconnect.
-4. **RTL-native** — Hebrew is a first-class layout direction, not a retrofit.
+1. **Speed of capture** — creating *any* entity must take under 3 seconds from any screen,
+   via a single always-visible Master Add control.
+2. **One honest day view** — "My Day" answers *what do I owe today* across all seven pillars.
+3. **Clean separation without silos** — personal and business live together, separable by one tap.
+4. **Offline-first** — the app is fully usable with no network; sync reconciles on reconnect.
+5. **RTL-native** — Hebrew is a first-class layout direction, not a retrofit.
+6. **Trustworthy time** — correct timezone, DST, and recurrence handling with zero drift.
 
 **Non-goals (v1)**
 - Video-conferencing hosting (only join-link storage).
@@ -245,6 +301,52 @@ CREATE TABLE sync_ops (
 
 ## 7. UI / UX Specification
 
+### 7.0 Design System — "Luxury Dark & Champagne Minimalist"
+
+| Token | Value | Use |
+|---|---|---|
+| `--surface` | `#12161f` | App background |
+| `--card` | `#1a202c` | Card / panel background |
+| `--gold` | `#e4c278` | Champagne gold — primary accent, CTAs, active nav |
+| `--business` | `#4a90e2` | Soft muted blue — business category tag |
+| `--personal` | `#50c878` | Warm emerald — personal category tag |
+
+Supporting tokens (`--ink`, `--muted`, `--line`, radii, shadows, spacing) derive from these
+five and live in `styles.css` under `:root`. **No colour literal is written outside `:root`.**
+
+### 7.1 Shell Architecture
+
+- **Mobile (< 900px):** fixed **bottom navigation bar**, 5 items —
+  `[היום] [יומן] [＋ הוספה] [משימות] [לקוחות]`, the centre item being the raised Master Add CTA.
+- **Desktop (≥ 900px):** fixed **side rail** (visually right in RTL) carrying the same five
+  items, same order, same labels. Bottom bar is hidden; rail is hidden on mobile.
+- The global category filter (§0.3) sits in the top bar and is visible in every view.
+
+### 7.2 Touch & Input Standard
+
+- Every interactive target is **≥ 44×44 px**.
+- Every `input`, `select` and `textarea` is locked to **16px** font-size to prevent iOS
+  auto-zoom on focus.
+- **Zero horizontal scroll** at any viewport ≥ 320px (`overflow-x: hidden` on the root plus
+  no fixed-width children).
+- Safe-area insets respected on the bottom bar (`env(safe-area-inset-bottom)`).
+
+### 7.3 "My Day" (היום שלי) — the core screen
+
+1. **Smart summary box** — greeting banner, time-of-day aware:
+   `"בוקר טוב בן, יש לך היום X פגישות, Y משימות ו-Z מעקבים."`
+   X/Y/Z are live counts under the active category filter.
+2. **Today's timeline** — chronological hourly grid **08:00 → 22:00**, today's scheduled
+   events and meetings placed in their hour row, current hour highlighted.
+3. **Unscheduled "לביצוע היום"** — dedicated container for tasks dated today with no time.
+4. **Attention cards** — highlighted counters for **overdue tasks** and **pending client
+   follow-ups**, each tapping through to the relevant view.
+5. **Master Add** — prominent centre-floating `[＋ הוספה חדשה]` CTA opening a bottom-sheet
+   type chooser: `אירוע / פגישה · משימה · רשימה · פתק · לקוח חדש`, then a typed form sheet.
+   The form always exposes the category selector (§0.2).
+
+### 7.4 General layout
+
 **Layout direction:** RTL by default (`dir="rtl"`), with LTR fallback driven by locale.
 Time grids mirror correctly — "later in the day" flows downward in both directions;
 only the day-column order mirrors.
@@ -351,7 +453,9 @@ C:\calendar-app\
 
 ## 12. Open Questions
 
-1. Authentication model — shared-password (workspace precedent) or per-user accounts?
+0. ~~Authentication model for V1~~ — **resolved (§0.4):** local single-user session (Ben Perez)
+   on `localStorage`, shaped for a later server-side D1/Worker migration.
+1. Authentication model *post-V1* — shared-password (workspace precedent) or per-user accounts?
 2. Is multi-user attendee invitation in v1 scope, or single-user-first?
 3. Email reminder delivery — which provider binding?
 4. Should subscribed ICS calendars land in v1 rather than v1.1?
