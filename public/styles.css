@@ -494,7 +494,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   background:transparent; border:1.5px solid var(--faint);
   color:var(--surface); font-size:14px; line-height:1;
   display:grid; place-items:center;
-  transition:background .16s, border-color .16s;
+  transition:background .22s ease, border-color .22s ease, transform .22s ease;
 }
 .check-tap{
   /* 44x44 hit area around a 26px dot */
@@ -503,6 +503,95 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   background:transparent; border:0; padding:0;
 }
 .row.is-done .check{ background:var(--personal); border-color:var(--personal); }
+
+/* ==========================================================================
+   The completion gesture (Sprint 8)
+
+   The ✓ is an SVG path that is ALWAYS in the DOM and always the right shape.
+   It is held invisible by its own stroke-dash and released — drawn, left to
+   right, in real time — the instant the row carries .is-completing (the 400ms
+   celebration) or .is-done (the settled state, including on a fresh reload).
+   A glyph swapped in at completion time could only ever appear; this draws.
+
+   The strikethrough is a sweeping bar rather than text-decoration, for the
+   same reason: `line-through` cannot be animated. The real
+   `.row.is-done .row-title{ text-decoration:line-through }` above takes over
+   the moment the record settles, so the bar hands off to it without a flicker.
+   ========================================================================== */
+
+.check-mark{
+  display:block;
+  width:17px; height:17px;
+  overflow:visible;
+}
+.check-mark path{
+  /* comfortably longer than the path itself (~21 units), so the offset can
+     never leave a stub of stroke showing at rest */
+  stroke-dasharray:26;
+  stroke-dashoffset:26;
+  transition:stroke-dashoffset .34s cubic-bezier(.65,0,.35,1);
+}
+.row.is-done .check-mark path,
+.row.is-completing .check-mark path{ stroke-dashoffset:0; }
+
+/* the circle fills and swells under the finger while the mark is being drawn */
+.row.is-completing .check{
+  background:var(--personal); border-color:var(--personal);
+  transform:scale(1.12);
+}
+
+/* the sweeping strikethrough */
+.row-title{ position:relative; }
+.row-title::after{
+  content:"";
+  position:absolute; inset-inline-start:0; top:calc(50% - 1px);
+  inline-size:0; block-size:2px;
+  border-radius:2px;
+  background:currentColor;
+  pointer-events:none;
+  transition:inline-size .36s cubic-bezier(.65,0,.35,1);
+}
+.row.is-completing .row-title::after{ inline-size:100%; }
+
+/* ...and the card recedes to exactly where a finished card lives, so the
+   hand-off to .is-done at the end of the 400ms is invisible */
+.row.is-completing{
+  opacity:var(--dim-done);
+  transition:opacity .3s ease;
+}
+.row.is-completing .row-title{ color:var(--faint); }
+
+/* ==========================================================================
+   Entrance and exit (Sprint 8)
+
+   A card never blinks out of existence. It collapses: height to nothing,
+   opacity to nothing, a slight shrink — and only then does the store move
+   under it. Arriving cards rise the same distance in the opposite direction.
+   ========================================================================== */
+
+.row.is-leaving,
+.ev.is-leaving,
+.cl-card.is-leaving{
+  overflow:hidden;
+  pointer-events:none;
+  animation:card-out .24s cubic-bezier(.4,0,1,1) both;
+}
+@keyframes card-out{
+  /* comfortably taller than the tallest card in the app (a pinned note with a
+     long body): a `from` below the natural height would clip it on frame one */
+  from{ opacity:1; max-height:900px; transform:none; }
+  to{
+    opacity:0; max-height:0; transform:scale(.96);
+    padding-block:0; margin-block:0; border-width:0;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference){
+  /* transform only, deliberately: an opacity keyframe with a fill would
+     out-rank `opacity:var(--dim-done)` and un-dim every finished card */
+  .row, .ev, .trash-row{ animation:card-in .22s cubic-bezier(.2,.8,.25,1); }
+}
+@keyframes card-in{ from{ transform:translateY(7px); } to{ transform:none; } }
 
 .empty{
   padding:26px 16px; text-align:center;
@@ -732,6 +821,67 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 
 /* the batch bar is two rows tall — the toast steps over it rather than onto it */
 body.is-selecting .toast{ bottom:calc(var(--bar-h) + var(--safe-b) + 132px); }
+
+/* ==========================================================================
+   סל מחזור — the 10-day recycle bin (Sprint 8)
+   ========================================================================== */
+
+.trash-btn{
+  flex:0 0 auto;
+  position:relative;
+  display:inline-flex; align-items:center; justify-content:center; gap:7px;
+  margin-top:14px;
+  padding:0 14px; height:var(--tap); min-height:var(--tap);
+  background:var(--card); border:1px solid var(--line-soft);
+  border-radius:999px;
+  color:var(--muted); font-size:12.5px; font-weight:700; white-space:nowrap;
+  transition:color .18s, background .18s, border-color .18s;
+}
+.trash-btn:hover{ color:var(--ink); border-color:var(--gold-edge); }
+/* holding something is the only state worth colouring — an empty bin is quiet */
+.trash-btn.is-full{ color:var(--gold); border-color:var(--gold-edge); }
+.trash-ico{ font-size:14px; line-height:1; }
+.trash-count{
+  display:inline-grid; place-items:center;
+  min-width:19px; height:19px; padding:0 5px;
+  border-radius:999px;
+  background:var(--gold); color:var(--surface);
+  font-size:11px; font-weight:800;
+  font-variant-numeric:tabular-nums;
+}
+/* a display rule must never defeat the hidden attribute it ships with */
+.trash-count[hidden]{ display:none; }
+
+.trash[hidden]{ display:none; }
+.trash-hint{
+  margin-bottom:12px;
+  font-size:12.5px; line-height:1.65; color:var(--faint);
+}
+.trash-list{ display:flex; flex-direction:column; gap:8px; }
+
+.trash-row{
+  display:flex; align-items:center; flex-wrap:wrap; gap:8px;
+  padding:11px 13px;
+  background:var(--card-2); border:1px solid var(--line-soft);
+  border-radius:var(--r-md);
+}
+.trash-body{ flex:1 1 190px; min-width:0; }
+.trash-title{
+  font-size:14px; font-weight:700; line-height:1.4;
+  overflow-wrap:anywhere;
+}
+.trash-meta{ display:flex; flex-wrap:wrap; gap:7px; margin-top:5px; }
+.trash-acts{ display:flex; gap:7px; flex-wrap:wrap; }
+/* the one button in the app with nothing behind it — it is coloured like it */
+.mini.is-danger{ color:var(--danger); border-color:var(--danger-edge); }
+.mini.is-danger:hover{ color:var(--danger); background:var(--danger-soft); }
+
+/* the narrowest phones keep the pill square, exactly like בחירה מרובה */
+@media (max-width:420px){
+  .trash-label{ display:none; }
+  .trash-btn{ padding:0; width:var(--tap); min-width:var(--tap); }
+  .trash-count{ position:absolute; top:2px; inset-inline-end:2px; }
+}
 
 /* ---------- quick notes ---------- */
 .row.note{ align-items:flex-start; }
@@ -1385,7 +1535,7 @@ body.is-selecting .fab{ opacity:0; pointer-events:none; }
 
 button, .tap, .qa, .cl-open, .att, .type-btn, .seg, .cl-item,
 .mini, .badge-btn, .cal-cell, .wk-cell, .dv-slot, .toast-undo,
-.row-edit, .batch-btn, .select-btn{
+.row-edit, .batch-btn, .select-btn, .trash-btn{
   transition:transform .1s ease;
   -webkit-tap-highlight-color:transparent;
   touch-action:manipulation;                 /* no 300ms double-tap-zoom delay */
@@ -1394,9 +1544,14 @@ button, .tap, .qa, .cl-open, .att, .type-btn, .seg, .cl-item,
 button:active, .tap:active, .qa:active, .cl-open:active, .att:active,
 .type-btn:active, .seg:active, .cl-item:active, .mini:active,
 .badge-btn:active, .cal-cell:active, .wk-cell:active, .dv-slot:active,
-.toast-undo:active, .row-edit:active, .batch-btn:active, .select-btn:active{
+.toast-undo:active, .row-edit:active, .batch-btn:active, .select-btn:active,
+.trash-btn:active{
   transform:scale(.97);
 }
+
+/* Sprint 8 — a card body is a tap target now (tap-to-edit), so it answers a
+   press like every other control does: a small, immediate compression */
+.row:active, .ev:active{ transform:scale(.995); }
 
 /* the calendar stage owns the horizontal axis — its swipe navigation must not
    be handed to the browser by the blanket touch-action above */

@@ -98,6 +98,13 @@
           <span class="select-ico" aria-hidden="true">☑</span>
           <span class="select-label" id="selectLabel">בחירה מרובה</span>
         </button>
+        <!-- סל מחזור — every deletion waits here 10 days before it is final -->
+        <button class="trash-btn" id="trashBtn" data-action="trash" type="button"
+                aria-haspopup="dialog" aria-label="סל מחזור">
+          <span class="trash-ico" aria-hidden="true">🗑</span>
+          <span class="trash-label">סל מחזור</span>
+          <b class="trash-count" id="trashCount" hidden>0</b>
+        </button>
       </div>
     </header>
 
@@ -292,10 +299,28 @@
   <div class="sheet-tail"></div>
 </div>
 
+<!-- ============ סל מחזור — THE 10-DAY RECYCLE BIN (Sprint 8) ============
+     Sits BEFORE the confirmation sheet on purpose: both are .sheet at the same
+     z-index, so document order is what puts "מחק לצמיתות?" above the bin it
+     was asked from. -->
+<div class="sheet trash" id="trashSheet" role="dialog" aria-modal="true" aria-labelledby="trashTitle" hidden>
+  <div class="sheet-grab" aria-hidden="true"></div>
+  <div class="sheet-head">
+    <h2 id="trashTitle">🗑 סל מחזור</h2>
+    <button class="sheet-x" data-action="close-sheet" type="button" aria-label="סגירה">✕</button>
+  </div>
+  <p class="trash-hint">
+    כל פריט שנמחק ממתין כאן 10 ימים. אפשר לשחזר אותו למקום שממנו נמחק,
+    או למחוק אותו לצמיתות כבר עכשיו. אחרי 10 ימים הוא נמחק אוטומטית.
+  </p>
+  <div class="trash-list" id="trashList"></div>
+  <div class="sheet-tail"></div>
+</div>
+
 <!-- ============ DELETE CONFIRMATION ============
      Sprint 7 deleted first and asked afterwards. The mandate asks explicitly,
      and the אחזר window still arms behind it — a confirmed deletion is still
-     recoverable for five seconds. -->
+     recoverable for five seconds, and for ten days in סל מחזור after that. -->
 <div class="sheet confirm" id="confirmSheet" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" hidden>
   <div class="sheet-grab" aria-hidden="true"></div>
   <div class="sheet-head">
@@ -303,12 +328,13 @@
     <button class="sheet-x" data-action="close-confirm" type="button" aria-label="סגירה">✕</button>
   </div>
   <p class="confirm-what" id="confirmWhat"></p>
-  <p class="confirm-hint">מיד לאחר המחיקה יופיע כפתור "אחזר" — יש חמש שניות לחזור אחורה.</p>
+  <p class="confirm-hint">מיד לאחר המחיקה יופיע כפתור "אחזר" — יש חמש שניות לחזור אחורה,
+    ואחר כך הפריט ממתין 10 ימים בסל המחזור.</p>
   <div class="sheet-actions">
     <!-- close-confirm, not close-sheet: a note deleted from inside a client
          file must leave that file open behind the question -->
     <button class="btn btn-ghost" data-action="close-confirm" type="button">ביטול</button>
-    <button class="btn btn-danger" id="confirmYes" data-confirmdel="1" type="button">כן, מחק</button>
+    <button class="btn btn-danger" id="confirmYes" data-confirmdel="1" type="button">אישור מחיקה</button>
   </div>
   <div class="sheet-tail"></div>
 </div>

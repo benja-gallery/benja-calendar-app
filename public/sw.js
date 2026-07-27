@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v10';  // Waves 1–3 — scroll-aware CTA, confirm + edit, multi-select
+var CACHE_VERSION = 'v11';  // Sprint 8 — checkmark gesture, recycle bin, tap-to-edit
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */

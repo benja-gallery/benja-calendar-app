@@ -2501,10 +2501,20 @@ check('navigator.vibrate is called from exactly one guarded place', () => {
 check('every delegated tap gets a pulse, and only after a control matched', () => {
   const onClick = (js.match(/function onClick\(e\) \{[\s\S]*?\n  \}\n/) || [''])[0];
   if (!onClick) return 'no onClick delegate';
-  const guard = onClick.indexOf('if (!el) return;');
+  // Sprint 8 turned the unmatched-tap guard into a block: a tap that hit no
+  // control but landed on a card now opens that card for editing, so the gate
+  // is `if (!el) {` rather than a bare return. The rule it protects is
+  // unchanged — nothing buzzes until the tap has been resolved to something.
+  const guard = onClick.indexOf('if (!el) {');
   const pulse = onClick.indexOf('Haptics.light()');
   if (pulse === -1) return 'no haptic on the delegated tap path';
-  if (guard === -1 || pulse < guard) return 'the pulse fires before a control was even matched';
+  if (guard === -1) return 'the delegate no longer gates on an unmatched tap';
+  if (pulse < guard) return 'the pulse fires before a control was even matched';
+  // ...and the check circle is the ONE control that declines the light pulse:
+  // it fires its own dual pattern, which a light beat 10ms earlier would clip
+  if (onClick.indexOf('if (!el.dataset.toggle) Haptics.light();') === -1) {
+    return 'the control path lost its pulse, or the check circle no longer owns its own';
+  }
   if (js.indexOf('Haptics.done()') === -1) return 'nothing marks a completion with the second beat';
   // the one control that mutates outside onClick is the client status <select>
   const onChange = (js.match(/function onChange\(e\) \{[\s\S]*?\n  \}\n/) || [''])[0];
@@ -2756,7 +2766,9 @@ const CONTROLS = [
   'qa', 'qa-mini', 'cal-arrow', 'cal-today', 'cal-cell', 'wk-cell', 'dv-slot',
   'cl-open', 'badge-btn', 'toast-undo',
   // Waves 2–3: universal editing, the multi-select gate and the batch bar
-  'row-edit', 'select-btn', 'batch-btn'
+  'row-edit', 'select-btn', 'batch-btn',
+  // Sprint 8: the recycle bin pill
+  'trash-btn'
 ];
 
 /** chips that stay visually small and clear the floor with a hit expander */
@@ -3105,7 +3117,8 @@ const CONFIRM_Q = 'האם אתה בטוח שברצונך למחוק?';
 check('every destructive tap asks the mandated question first', () => {
   if (html.indexOf(CONFIRM_Q) === -1) return 'the confirmation sheet does not carry the mandated question';
   if (js.indexOf(CONFIRM_Q) === -1) return 'the question is not the one the code paints';
-  ['id="confirmSheet"', 'id="confirmWhat"', 'data-confirmdel', '>כן, מחק<', '>ביטול<'].forEach(n => {
+  // Sprint 8 renamed the accept button to the label the mandate names verbatim
+  ['id="confirmSheet"', 'id="confirmWhat"', 'data-confirmdel', '>אישור מחיקה<', '>ביטול<'].forEach(n => {
     if (html.indexOf(n) === -1) throw new Error('missing ' + n);
   });
   if (html.indexOf('role="dialog"') === -1) return 'the confirmation is not a dialog';
@@ -3476,6 +3489,477 @@ check('PROJECT_PLAN documents waves 1–3', () => {
   const required = [
     'גל 1', 'גל 2', 'גל 3', 'pointer-events', 'Fab.decide', 'timelineKeys',
     CONFIRM_Q, 'mergeChecklist', 'softDeleteMany', '--dim-done', 'v10'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ==========================================================================
+   24. Sprint 8 — the completion gesture, סל מחזור, universal tap-to-edit
+
+   §1  a task is completed by a 400ms gesture: the ✓ draws itself, the title
+       strikes through, the card dims, a dual pulse fires — THEN it files
+   §2  the mandated confirmation carries the mandated button labels, and the
+       one deletion with no net behind it asks like every other
+   §3  a deleted record waits ten days in סל מחזור, counting down, restorable
+       into the exact slot it left, and auto-purged on the next app start
+   §4  a tap on a card body opens that card's own form, pre-filled
+   §5  cards arrive and leave with a collapse, never a blink
+   ========================================================================== */
+
+/* ---- 24a. the completion gesture, executed ---- */
+
+check('completing a task is a gesture, not an instant state change', () => {
+  const U = loadApp().ui;
+  const C = U.Complete;
+  if (!C || typeof C.plan !== 'function') return 'no APP.ui.Complete.plan()';
+
+  if (U.COMPLETE_MS !== 400) return 'the celebration window is ' + U.COMPLETE_MS + 'ms, not 400ms';
+  if (U.HAPTIC_CHECK.join(',') !== '15,30,15') {
+    return 'the dual pulse is [' + U.HAPTIC_CHECK.join(',') + '], not [15,30,15]';
+  }
+
+  const open = C.plan({ id: 't1', status: 'todo' });
+  if (!open.closing) return 'closing an open task is not treated as a completion';
+  if (open.delay !== 400) return 'the gesture waits ' + open.delay + 'ms before the record moves';
+  if (!open.haptic || open.haptic.join(',') !== '15,30,15') return 'the completion fires no dual pulse';
+
+  // re-opening a finished task is a correction, not an achievement: running
+  // the celebration backwards would read as the app undoing the user
+  const shut = C.plan({ id: 't1', status: 'done' });
+  if (shut.closing) return 'un-checking a done task still celebrates';
+  if (shut.delay !== 0) return 'un-checking is delayed by ' + shut.delay + 'ms for no reason';
+  if (shut.haptic) return 'un-checking fires the completion pulse';
+
+  if (C.plan(null) !== null) return 'plan() invented a gesture for no task';
+  return true;
+});
+
+check('the gesture buzzes once, commits once, and never runs backwards', () => {
+  const APP = loadApp({ navigator: { vibrate: p => { APP.__buzz.push(p); return true; } } });
+  APP.__buzz = [];
+  const U = APP.ui, C = U.Complete;
+
+  // nothing is on screen in a headless run, so run() degrades to a straight
+  // synchronous commit — the deletion/completion semantics must be identical
+  let ran = 0;
+  const plan = C.run({ id: 'x1', status: 'todo' }, () => { ran++; });
+  if (!plan || !plan.closing) return 'run() did not plan a completion';
+  if (ran !== 1) return 'the commit ran ' + ran + ' times off screen';
+  if (APP.__buzz.length !== 1) return 'the completion fired ' + APP.__buzz.length + ' haptic patterns';
+  if (APP.__buzz[0].join(',') !== '15,30,15') return 'the pulse was not the mandated dual beat';
+
+  APP.__buzz.length = 0;
+  let back = 0;
+  C.run({ id: 'x1', status: 'done' }, () => { back++; });
+  if (back !== 1) return 'un-checking did not commit';
+  if (APP.__buzz.length) return 'un-checking buzzed like a completion';
+
+  if (C.run({ id: 'x1', status: 'todo' }, null)) return 'a gesture was armed with nothing to commit';
+  return true;
+});
+
+check('the ✓ is always in the DOM, and CSS is what draws it', () => {
+  // a glyph swapped in at completion time can only appear; a stroke-dashed
+  // path can be drawn, which is what the mandate asks for
+  if (js.indexOf("var CHECK_MARK =") === -1) return 'no CHECK_MARK fragment';
+  if (js.indexOf('<span class="check">' + "' + CHECK_MARK + '") === -1) {
+    return 'the check circle does not always carry the mark';
+  }
+  if (/\(t\.done \? '✓' : ''\)/.test(js)) return 'the circle still swaps a glyph in and out';
+  if (!/stroke="currentColor"/.test(js)) return 'the mark cannot inherit the circle colour';
+
+  const mark = (css.match(/\.check-mark path\{[^}]*\}/) || [''])[0];
+  if (!mark) return 'no .check-mark path rule';
+  if (!/stroke-dasharray:\s*\d+/.test(mark)) return 'the path is not dashed, so it cannot be drawn';
+  if (!/stroke-dashoffset:\s*\d+/.test(mark)) return 'the path is not held back at rest';
+  if (!/transition:\s*stroke-dashoffset/.test(mark)) return 'the offset snaps instead of drawing';
+
+  const drawn = (css.match(/\.row\.is-done \.check-mark path,\s*\n\.row\.is-completing \.check-mark path\{[^}]*\}/) || [''])[0];
+  if (!drawn) return 'nothing releases the path';
+  if (!/stroke-dashoffset:\s*0/.test(drawn)) return 'the released path is still held back';
+  return true;
+});
+
+check('the gesture strikes the title through and dims the card while it runs', () => {
+  const rules = cssRules(css);
+
+  const sweep = rules.filter(r => r.sel === '.row-title::after')[0];
+  if (!sweep) return 'no sweeping strikethrough element';
+  if (!/inline-size:\s*0/.test(sweep.body)) return 'the strikethrough starts drawn';
+  if (!/transition:\s*inline-size/.test(sweep.body)) return 'the strikethrough snaps instead of sweeping';
+  const run = rules.filter(r => r.sel === '.row.is-completing .row-title::after')[0];
+  if (!run || !/inline-size:\s*100%/.test(run.body)) return 'the strikethrough never crosses the title';
+
+  // ...and the settled state is the real text-decoration the mandate names,
+  // so the sweep hands off to it instead of competing with it
+  if (!/\.row\.is-done \.row-title\{[^}]*text-decoration:\s*line-through/.test(css)) {
+    return 'a finished title carries no text-decoration:line-through';
+  }
+
+  const dim = rules.filter(r => r.sel === '.row.is-completing')[0];
+  if (!dim || !/opacity:\s*var\(--dim-done\)/.test(dim.body)) {
+    return 'the card does not recede to where a finished card lives';
+  }
+  const circle = rules.filter(r => r.sel === '.row.is-completing .check')[0];
+  if (!circle || !/background:\s*var\(--personal\)/.test(circle.body)) {
+    return 'the circle does not fill while the mark is drawn';
+  }
+  return true;
+});
+
+check('the check circle hands the record over only after the gesture', () => {
+  const branch = (js.match(/if \(el\.dataset\.toggle\) \{[\s\S]*?\n    \}/) || [''])[0];
+  if (!branch) return 'no toggle branch in the delegate';
+  if (branch.indexOf('Complete.run(') === -1) return 'the tap still mutates the store immediately';
+  if (branch.indexOf('toggleTaskDone(') === -1) return 'the commit no longer closes the task';
+  const paint = bodyOf(js, 'paint: function (id)');
+  if (!paint || paint.indexOf("classList.add('is-completing')") === -1) {
+    return 'the gesture is never painted onto the live node';
+  }
+  return true;
+});
+
+/* ---- 24b. the confirmation modal, with the mandated labels ---- */
+
+check('the confirmation carries the two mandated buttons, and only one destroys', () => {
+  const sheet = (html.match(/<div class="sheet confirm"[\s\S]*?<\/div>\s*<\/div>/) || [''])[0];
+  if (!sheet) return 'no confirmation sheet';
+  if (sheet.indexOf('>אישור מחיקה<') === -1) return 'the accept button is not labelled אישור מחיקה';
+  if (sheet.indexOf('>ביטול<') === -1) return 'the cancel button is not labelled ביטול';
+  if (!/class="btn btn-danger"[^>]*data-confirmdel/.test(sheet)) {
+    return 'the destructive button does not read as destructive';
+  }
+  if (!/class="btn btn-ghost"[^>]*close-confirm/.test(sheet)) return 'ביטול is not the neutral button';
+  if (!/\.btn-danger\{\s*background:var\(--danger\)/.test(css)) return 'the danger button has no danger colour';
+  if (!/\.confirm-what\{[^}]*border:1px solid var\(--danger-edge\)/.test(css)) {
+    return 'the confirmation panel is not the dark-gold/danger surface it was specified as';
+  }
+  return true;
+});
+
+check('a permanent deletion asks before it destroys the last copy', () => {
+  const door = bodyOf(js, 'function runTrashAction(');
+  if (!door) return 'no runTrashAction()';
+  if (door.indexOf('confirmDelete(') === -1) return 'מחק לצמיתות destroys without asking';
+  if (door.indexOf('trashPurge(') === -1) return 'the confirmed purge does not reach the bin';
+  // the confirmation must sit ABOVE the bin it was asked from — same z-index,
+  // so document order is the only thing deciding it
+  if (html.indexOf('id="trashSheet"') > html.indexOf('id="confirmSheet"')) {
+    return 'the confirmation would open behind the recycle bin';
+  }
+  if (js.indexOf("if (el.dataset.trash) {") === -1) return 'the bin actions are not in the click delegate';
+  return true;
+});
+
+/* ---- 24c. the 10-day recycle bin, executed ---- */
+
+check('the bin holds every deletable type for exactly ten days', () => {
+  const U = loadApp().ui;
+  if (U.TRASH_DAYS !== 10) return 'the retention window is ' + U.TRASH_DAYS + ' days, not 10';
+  if (U.DAY_MS !== 86400000) return 'a day is not a day';
+  ['events', 'tasks', 'lists', 'notes', 'clients'].forEach(c => {
+    if (!U.TRASH_LABEL[c]) throw new Error(c + ' has no label in the bin');
+  });
+  if (html.indexOf('id="trashSheet"') === -1) return 'no סל מחזור surface';
+  if (html.indexOf('id="trashBtn"') === -1) return 'the bin is not reachable from the header';
+  if (html.indexOf('data-action="trash"') === -1) return 'the bin pill is not wired';
+  if (html.indexOf('סל מחזור') === -1) return 'the bin is not named in Hebrew';
+  if (js.indexOf('data-trash="restore:') === -1) return 'no שחזר action';
+  if (js.indexOf('data-trash="purge:') === -1) return 'no מחק לצמיתות action';
+  return true;
+});
+
+check('the countdown never claims more time than an entry actually has', () => {
+  const U = loadApp().ui;
+  const DAY = U.DAY_MS;
+  const now = 1800000000000;               // a fixed clock — no wall time in a test
+  const at = d => ({ collection: 'tasks', id: 't', rec: {}, index: 0, deletedAt: now - d });
+
+  const cases = [
+    [0, 10, 'the moment it was deleted'],
+    [DAY * 0.5, 10, 'half a day in'],
+    [DAY * 1, 9, 'one full day in'],
+    [DAY * 9, 1, 'the last day'],
+    [DAY * 9.99, 1, 'the last hour'],
+    [DAY * 10, 0, 'exactly ten days'],
+    [DAY * 12, 0, 'long past due']
+  ];
+  for (const [age, want, why] of cases) {
+    const got = U.trashDaysLeft(at(age), now);
+    if (got !== want) return why + ': ' + got + ' days left, expected ' + want;
+  }
+
+  if (U.trashExpired(at(DAY * 9.99), now)) return 'an entry with hours left was called expired';
+  if (!U.trashExpired(at(DAY * 10), now)) return 'an entry at exactly ten days was not expired';
+
+  // and the sentence the mandate asks for, in all three of its shapes
+  if (U.trashCountdown(10).indexOf('יימחק לצמיתות בעוד 10 ימים') === -1) {
+    return 'the countdown does not read "יימחק לצמיתות בעוד 10 ימים"';
+  }
+  if (U.trashCountdown(1).indexOf('יום אחד') === -1) return 'the last day is not declined in Hebrew';
+  if (U.trashCountdown(0).indexOf('היום') === -1) return 'the final day says nothing';
+  return true;
+});
+
+check('a deletion moves the record into the bin with the slot it left', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+
+  const ids = Store.data.tasks.map(t => t.id);
+  if (ids.length < 3) return 'the seeded store is too small';
+  const victim = ids[1];
+  const before = Date.now();
+
+  U.softDelete('tasks', victim);
+  U.Undo.commit();                          // the five seconds ran out
+
+  if (Store.find('tasks', victim)) return 'the record never left its collection';
+  const entry = U.trashFind(victim);
+  if (!entry) return 'the deleted record is not in the bin';
+  if (entry.collection !== 'tasks') return 'the bin forgot which collection it came from';
+  if (entry.index !== 1) return 'the bin recorded slot ' + entry.index + ', not 1';
+  if (!(entry.deletedAt >= before)) return 'the entry carries no deletion stamp';
+  if (U.trashDaysLeft(entry) !== 10) return 'a fresh entry does not start at ten days';
+
+  // ...and the cloud already knows: the record leaving its collection is what
+  // queues the tombstone D1 writes into deleted_at
+  const op = Store.data.sync.queue.filter(o => o.id === victim && o.action === 'delete')[0];
+  if (!op) return 'the deletion never reached the outbox as a tombstone';
+  return true;
+});
+
+check('שחזר puts the record back in the exact slot it came from', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store, S = APP.sync;
+  Store.load();
+
+  const ids = Store.data.tasks.map(t => t.id);
+  const victim = ids[1];
+
+  // drain the outbox first, so the ops this test reads are its own
+  const batch = Store.data.sync.queue.slice();
+  S.Sync.settle(batch, { applied: batch.map(o => o.opId), rejected: [], changes: {}, cursor: '' });
+
+  U.softDelete('tasks', victim);
+  U.Undo.commit();
+
+  const back = U.trashRestore(victim);
+  if (!back) return 'the bin refused to restore a live entry';
+  if (Store.data.tasks.map(t => t.id).join(',') !== ids.join(',')) {
+    return 'the restored record came back in the wrong slot';
+  }
+  if (U.trashFind(victim)) return 'the entry stayed in the bin after being restored';
+
+  // the restore must REPLACE the queued tombstone, or it would sync as a delete
+  const ops = Store.data.sync.queue.filter(o => o.id === victim);
+  if (ops.length !== 1) return 'the outbox holds ' + ops.length + ' ops for one record';
+  if (ops[0].action !== 'upsert') return 'the restored record would still sync as a deletion';
+
+  if (U.trashRestore(victim)) return 'a second restore invented an entry';
+  return true;
+});
+
+check('מחק לצמיתות is the one deletion with nothing behind it', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+
+  const victim = Store.data.notes[0];
+  if (!victim) return 'no seeded note';
+
+  U.softDelete('notes', victim.id);
+  U.Undo.commit();
+  if (!U.trashFind(victim.id)) return 'the note never reached the bin';
+
+  const gone = U.trashPurge(victim.id);
+  if (!gone) return 'the purge refused a live entry';
+  if (U.trashFind(victim.id)) return 'the entry survived its own permanent deletion';
+  if (Store.find('notes', victim.id)) return 'the record came back from a permanent deletion';
+  if (U.trashRestore(victim.id)) return 'a purged record is still restorable';
+  if (U.trashPurge(victim.id)) return 'a second purge invented an entry';
+  return true;
+});
+
+check('the bin empties itself on the way in, before a single row is painted', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+  const DAY = U.DAY_MS;
+
+  // the auto-purge must run inside load(), not on some later timer: an expired
+  // record may never be offered for restore, not even for one frame
+  const load = bodyOf(js, 'load: function ()');
+  if (!load || load.indexOf('purgeTrash()') === -1) return 'nothing purges the bin at start-up';
+  if (load.indexOf('normTrash(') === -1) return 'a corrupt bin would reach a render';
+
+  Store.data.trash = U.normTrash([
+    { collection: 'tasks', id: 'old', rec: { id: 'old', title: 'ישן' }, index: 0, deletedAt: Date.now() - DAY * 11 },
+    { collection: 'notes', id: 'edge', rec: { id: 'edge', title: 'בדיוק' }, index: 0, deletedAt: Date.now() - DAY * 10 },
+    { collection: 'tasks', id: 'fresh', rec: { id: 'fresh', title: 'טרי' }, index: 0, deletedAt: Date.now() - DAY * 9 }
+  ]);
+  if (Store.data.trash.length !== 3) return 'normTrash dropped a valid entry';
+
+  const went = U.purgeTrash();
+  if (went !== 2) return 'the purge took ' + went + ' entries, not the 2 that were due';
+  if (U.trashCount() !== 1) return 'the bin holds ' + U.trashCount() + ' entries after the purge';
+  if (!U.trashFind('fresh')) return 'the purge took an entry that still had a day left';
+
+  // and a bin full of garbage is dropped rather than rendered
+  const clean = U.normTrash([
+    null, 'nope', { collection: 'tasks' }, { id: 'x', collection: 'nothing', rec: {} },
+    { id: 'y', collection: 'tasks', rec: { id: 'y' } }                     // no stamp
+  ]);
+  if (clean.length !== 1) return 'normTrash kept ' + clean.length + ' of 5 malformed rows';
+  if (!(clean[0].deletedAt > 0)) return 'a stamp-less entry was not given one';
+  return true;
+});
+
+check('the bin lists newest first and counts down on every row', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+  const DAY = U.DAY_MS, now = Date.now();
+
+  Store.data.trash = U.normTrash([
+    { collection: 'tasks', id: 'a', rec: { id: 'a', title: 'ישן יותר' }, index: 0, deletedAt: now - DAY * 4 },
+    { collection: 'notes', id: 'b', rec: { id: 'b', title: 'נמחק עכשיו' }, index: 0, deletedAt: now }
+  ]);
+
+  const list = U.trashList();
+  if (list[0].id !== 'b') return 'the bin does not put the newest deletion on top';
+
+  const row = U.trashRow(list[0], now);
+  if (row.indexOf('נמחק עכשיו') === -1) return 'the row does not name the record';
+  if (row.indexOf('יימחק לצמיתות בעוד 10 ימים') === -1) return 'the row shows no countdown';
+  if (row.indexOf('data-trash="restore:b"') === -1) return 'the row offers no שחזר';
+  if (row.indexOf('data-trash="purge:b"') === -1) return 'the row offers no מחק לצמיתות';
+  if (row.indexOf('פתק') === -1) return 'the row does not say what kind of record it holds';
+
+  // an entry in its last 48 hours reads as urgent, not as one more grey chip
+  const urgent = U.trashRow(U.normTrash([
+    { collection: 'tasks', id: 'c', rec: { id: 'c', title: 'כמעט' }, index: 0, deletedAt: now - DAY * 9 }
+  ])[0], now);
+  if (urgent.indexOf('pr-high') === -1) return 'an entry about to be purged looks like any other';
+  return true;
+});
+
+check('אחזר and the bin are one move seen at two timescales', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+
+  const ids = Store.data.tasks.map(t => t.id);
+  U.softDelete('tasks', ids[0]);
+  if (!U.trashFind(ids[0])) return 'the five-second window bypassed the bin';
+  if (!U.Undo.has()) return 'the deletion armed no undo';
+
+  U.Undo.fire();
+  if (!Store.find('tasks', ids[0])) return 'אחזר did not bring the record back';
+  if (U.trashFind(ids[0])) return 'אחזר left a duplicate entry in the bin';
+  if (Store.data.tasks.map(t => t.id).join(',') !== ids.join(',')) return 'אחזר restored to the wrong slot';
+
+  // ...and the same holds for a whole batch
+  const keys = [ids[0], ids[2]].map(i => 'tasks:' + i);
+  U.softDeleteMany(keys);
+  if (U.trashCount() !== 2) return 'a batch deletion put ' + U.trashCount() + ' of 2 records in the bin';
+  U.Undo.fire();
+  if (U.trashCount()) return 'the batch undo left entries behind in the bin';
+  if (Store.data.tasks.map(t => t.id).join(',') !== ids.join(',')) return 'the batch came back out of order';
+  return true;
+});
+
+check('a stale cloud row cannot resurrect a record that is sitting in the bin', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store, S = APP.sync;
+  Store.load();
+
+  const victim = Store.data.tasks[0];
+  const row = S.toRow('tasks', victim);
+
+  U.softDelete('tasks', victim.id);
+  U.Undo.commit();
+
+  // the server has not seen the tombstone yet and pushes the record back
+  row.updated_at = S.toISOStamp(Date.now() - 60000);
+  S.Sync.merge({ tasks: [row] });
+  if (Store.find('tasks', victim.id)) return 'a stale server copy walked back onto the board';
+  if (!U.trashFind(victim.id)) return 'the bin lost the entry it was holding';
+
+  // ...but a genuinely newer server copy means the record is alive again, and
+  // the bin must step aside rather than keep offering to destroy it
+  row.updated_at = S.toISOStamp(Date.now() + 60000);
+  S.Sync.merge({ tasks: [row] });
+  if (!Store.find('tasks', victim.id)) return 'a newer server copy was blocked by the bin';
+  if (U.trashFind(victim.id)) return 'the record is live AND still purgeable from the bin';
+  return true;
+});
+
+/* ---- 24d. universal tap-to-edit ---- */
+
+check('a tap on a card body opens that card for editing', () => {
+  const U = loadApp().ui;
+  ['events', 'tasks', 'lists', 'notes'].forEach(c => {
+    if (U.TAP_EDIT.indexOf(c) === -1) throw new Error(c + ' cards cannot be opened by tapping them');
+  });
+  // a client card opens the full client file — a richer surface than the form
+  if (U.TAP_EDIT.indexOf('clients') !== -1) return 'tapping a client card no longer opens its file';
+
+  const gate = bodyOf(js, 'function tapEditKey(');
+  if (!gate) return 'no tapEditKey()';
+  if (gate.indexOf("closest('[data-rec]')") === -1) return 'the tap is not resolved to a record';
+  if (gate.indexOf('Select.on') === -1) return 'a tap in selection mode would open a form';
+  if (gate.indexOf('Confirm.isOpen()') === -1) return 'a tap behind the confirmation would open a form';
+  if (gate.indexOf("$('#formSheet').hidden") === -1) return 'a tap inside an open form would open a second one';
+  if (gate.indexOf('is-leaving') === -1) return 'a card mid-collapse is still editable';
+
+  const onClick = (js.match(/function onClick\(e\) \{[\s\S]*?\n  \}\n/) || [''])[0];
+  if (onClick.indexOf('tapEditKey(e.target)') === -1) return 'the delegate never asks the edit gate';
+  if (onClick.indexOf('openEdit(') === -1) return 'the tap does not reach the typed form';
+  // the controls INSIDE a card must keep winning: the gate only ever sees a
+  // tap that matched no control at all
+  const gateAt = onClick.indexOf('if (!el) {');
+  if (gateAt === -1 || onClick.indexOf('tapEditKey(e.target)') < gateAt) {
+    return 'the edit gate runs before the control branches it is supposed to yield to';
+  }
+  return true;
+});
+
+/* ---- 24e. cards arrive and leave, and the shipped shell ---- */
+
+check('a card collapses and fades out instead of blinking away', () => {
+  const out = (css.match(/@keyframes card-out\{[\s\S]*?\n\}/) || [''])[0];
+  if (!out) return 'no exit animation';
+  if (!/opacity:\s*0/.test(out)) return 'the card does not fade out';
+  if (!/max-height:\s*0/.test(out)) return 'the card does not collapse its height';
+  const leaving = cssRules(css).filter(r => r.sel.indexOf('.row.is-leaving') !== -1)[0];
+  if (!leaving) return 'nothing wears the leaving state';
+  if (!/animation:\s*card-out/.test(leaving.body)) return 'the leaving card is not animated out';
+  if (!/pointer-events:\s*none/.test(leaving.body)) return 'a card on its way out still takes taps';
+
+  if (!/@keyframes card-in\{/.test(css)) return 'no entrance animation';
+  // an opacity keyframe with a fill would out-rank opacity:var(--dim-done)
+  // and silently un-dim every finished card on the board
+  const inKf = (css.match(/@keyframes card-in\{[\s\S]*?\n\}/) || [''])[0];
+  if (/opacity:/.test(inKf)) return 'the entrance animates opacity and would defeat --dim-done';
+
+  const door = bodyOf(js, 'function leaveThen(');
+  if (!door) return 'no leaveThen()';
+  if (door.indexOf("classList.add('is-leaving')") === -1) return 'the collapse is never painted';
+  if (door.indexOf('if (!nodes.length) { run(); return false; }') === -1) {
+    return 'a headless deletion would wait on a timer that never fires';
+  }
+  if (bodyOf(js, 'function askDelete(').indexOf('leaveThen(') === -1) {
+    return 'a deleted row still blinks out of its list';
+  }
+  return true;
+});
+
+check('the service worker cache version was bumped for Sprint 8', () => {
+  const m = read('sw.js').match(/CACHE_VERSION\s*=\s*'v(\d+)'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[1], 10) < 11) return 'the cache is still v' + m[1] + ' — returning phones keep the old shell';
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 8', () => {
+  const required = [
+    'Sprint 8', 'סל מחזור', 'Complete.plan', 'stroke-dashoffset', 'HAPTIC_CHECK',
+    'trashRestore', 'purgeTrash', 'tapEditKey', 'אישור מחיקה', 'v11'
   ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;

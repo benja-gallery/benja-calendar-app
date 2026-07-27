@@ -198,6 +198,42 @@
   /** a press that travels further than this is a scroll, not a long press */
   var LONG_PRESS_SLOP = 12;
 
+  /* --- Sprint 8: the completion gesture, the recycle bin, tap-to-edit --- */
+
+  /**
+   * The dual pulse the mandate specifies for a completed task: a short beat,
+   * a gap you can feel, then a second beat. Deliberately distinct from
+   * HAPTIC_DONE — that one acknowledges, this one congratulates.
+   */
+  var HAPTIC_CHECK = [15, 30, 15];
+
+  /**
+   * How long the ✓ draws itself, the title strikes through and the card dims
+   * BEFORE the record moves. Tapping the circle must not make the row vanish
+   * from under the finger: the accomplishment is seen and felt, then filed.
+   */
+  var COMPLETE_MS = 400;
+
+  /** and how long a card takes to collapse out of its list on the way out */
+  var LEAVE_MS = 240;
+
+  /* --- סל מחזור: the 10-day recycle bin --- */
+
+  var DAY_MS = 86400000;
+  /** a deleted record waits exactly this long before it is gone for good */
+  var TRASH_DAYS = 10;
+  /** what the bin calls each kind of record it is holding */
+  var TRASH_LABEL = {
+    events: 'אירוע', tasks: 'משימה', lists: 'רשימה', notes: 'פתק', clients: 'לקוח'
+  };
+
+  /**
+   * The card types a tap on the BODY itself opens for editing. A client card is
+   * deliberately absent: tapping one opens the full client file, which is a
+   * richer surface than the create form and already the established gesture.
+   */
+  var TAP_EDIT = ['events', 'tasks', 'lists', 'notes'];
+
   /* ------------------------------------------------------------- utilities */
 
   function $(sel, root) { return (root || document).querySelector(sel); }
@@ -227,7 +263,14 @@
     light: function () { return Haptics.fire(HAPTIC_LIGHT); },
 
     /** something completed — a task closed, a checklist filled up */
-    done: function () { return Haptics.fire(HAPTIC_DONE); }
+    done: function () { return Haptics.fire(HAPTIC_DONE); },
+
+    /**
+     * The check circle specifically (Sprint 8): a dual pulse fired at the
+     * START of the gesture, so the buzz lands with the ✓ being drawn rather
+     * than after the card has already moved.
+     */
+    check: function () { return Haptics.fire(HAPTIC_CHECK); }
   };
 
   /* ==========================================================================
@@ -826,6 +869,8 @@
           notify: { on: false, lead: 10 }, fired: {}
         },
         events: [], tasks: [], lists: [], notes: [], clients: [],
+        // סל מחזור (Sprint 8) — deleted records wait here for ten days
+        trash: [],
         sync: blankSync(),
         gcal: blankGCal(),
         seeded: false
@@ -844,6 +889,7 @@
             ['events', 'tasks', 'lists', 'notes', 'clients'].forEach(function (k) {
               if (Array.isArray(parsed[k])) d[k] = parsed[k];
             });
+            if (Array.isArray(parsed.trash)) d.trash = parsed.trash;
             if (parsed.prefs && typeof parsed.prefs === 'object') d.prefs = parsed.prefs;
             if (parsed.sync && typeof parsed.sync === 'object') d.sync = parsed.sync;
             if (parsed.gcal && typeof parsed.gcal === 'object') d.gcal = parsed.gcal;
@@ -895,7 +941,17 @@
       // cached "last synced" stamp is what the header renders while offline
       d.gcal = normGCal(d.gcal);
 
+      // Sprint 8: the bin is absent in every pre-recycle store, and a malformed
+      // entry is dropped rather than allowed to crash a render
+      d.trash = normTrash(d.trash);
+
       this.data = d;
+
+      // "Auto-purge items older than 10 days during app initialization" — this
+      // is that initialization, and it runs before a single row is painted, so
+      // an expired record is never offered for restore even for one frame.
+      if (purgeTrash()) { this.save(); }
+
       if (!d.seeded) { this.seed(); }
       return d;
     },
@@ -1495,6 +1551,21 @@
           var incoming = fromRow(t, row);
           if (!incoming) return;
 
+          // Sprint 8 — a record sitting in סל מחזור is gone from its collection
+          // but NOT gone from the cloud until its tombstone lands. Without this
+          // guard the very next pull would push it straight back onto the board
+          // while its own bin entry still offered to restore it: two copies of
+          // one record, one of them unreachable.
+          var held = trashFind(row.id);
+          if (held && held.collection === t) {
+            // the bin is the newer fact — the server has not seen the deletion yet
+            if (held.deletedAt >= stamp) return;
+            // ...and it steps aside when the cloud proves the record is alive
+            // again, rather than leaving a bin entry that could "permanently
+            // delete" something still sitting on the board
+            d.trash.splice(d.trash.indexOf(held), 1);
+          }
+
           if (!local) { arr.push(incoming); touched++; }
           else if ((local.updatedAt || 0) < stamp) { arr[arr.indexOf(local)] = incoming; touched++; }
 
@@ -2087,8 +2158,9 @@
     return '<div class="' + cls + '" data-rec="tasks:' + t.id + '"' +
       (compact ? ' data-compact="1"' : '') + '>' +
       selBox('tasks', t.id) +
-      '<button type="button" class="check-tap" data-toggle="' + t.id + '" aria-label="סימון כבוצע">' +
-      '<span class="check">' + (t.done ? '✓' : '') + '</span></button>' +
+      '<button type="button" class="check-tap" data-toggle="' + t.id + '"' +
+      ' aria-pressed="' + (t.done ? 'true' : 'false') + '" aria-label="סימון כבוצע">' +
+      '<span class="check">' + CHECK_MARK + '</span></button>' +
       '<div class="row-body">' +
       '<div class="row-title">' + esc(t.title) + '</div>' +
       '<div class="row-meta">' +
@@ -3052,6 +3124,18 @@
     return '<span class="tag tag-' + cat + '">' + CAT_LABEL[cat] + '</span>';
   }
 
+  /**
+   * The ✓ that draws itself (Sprint 8). It is always in the DOM — a glyph
+   * swapped in at completion time can only ever appear, never draw. CSS holds
+   * the path hidden behind its own stroke-dash and releases it the moment the
+   * row carries .is-completing or .is-done, so the same markup covers the
+   * gesture, the finished state and a page reloaded on an already-done task.
+   */
+  var CHECK_MARK =
+    '<svg class="check-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+    '<path d="M5 12.5 10.5 18 19 6.5" fill="none" stroke="currentColor" stroke-width="3.2"' +
+    ' stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
   function delBtn(collection, id) {
     return '<button type="button" class="sheet-x" data-del="' + collection + ':' + id + '" aria-label="מחיקה">✕</button>';
   }
@@ -3084,6 +3168,55 @@
     return '<div class="empty"><b>' + esc(title) + '</b>' + esc(hint) + '</div>';
   }
 
+  /* --------------------------------------------------- render: סל מחזור */
+
+  /**
+   * One binned record: what it was, what it was called, how long it has left
+   * and the two things that can still be done to it. The countdown badge turns
+   * urgent in its last 48 hours — a bin you never look at is a bin that
+   * silently loses things.
+   */
+  function trashRow(entry, now) {
+    var days = trashDaysLeft(entry, now);
+    var title = recTitle(entry.collection, entry.rec) || 'ללא כותרת';
+
+    return '<div class="trash-row" data-trashid="' + entry.id + '">' +
+      '<div class="trash-body">' +
+      '<div class="trash-title">' + esc(title) + '</div>' +
+      '<div class="trash-meta">' +
+      '<span class="badge">' + esc(TRASH_LABEL[entry.collection] || 'פריט') + '</span>' +
+      '<span class="badge ' + (days <= 2 ? 'pr-high' : 'timeless') + '">' +
+      esc(trashCountdown(days)) + '</span>' +
+      '</div></div>' +
+      '<div class="trash-acts">' +
+      '<button type="button" class="mini" data-trash="restore:' + entry.id + '">↺ שחזר</button>' +
+      '<button type="button" class="mini is-danger" data-trash="purge:' + entry.id +
+      '">🗑 מחק לצמיתות</button>' +
+      '</div></div>';
+  }
+
+  function renderTrash() {
+    var rows = trashList();
+    var now = Date.now();
+
+    var badge = $('#trashCount');
+    if (badge) {
+      badge.textContent = rows.length;
+      badge.hidden = !rows.length;
+    }
+    var btn = $('#trashBtn');
+    if (btn) btn.classList.toggle('is-full', !!rows.length);
+
+    var box = $('#trashList');
+    if (box) {
+      box.innerHTML = rows.length
+        ? rows.map(function (e) { return trashRow(e, now); }).join('')
+        : emptyState('סל המחזור ריק',
+          'כל פריט שתמחק ימתין כאן ' + TRASH_DAYS + ' ימים לפני שיימחק לצמיתות.');
+    }
+    return rows.length;
+  }
+
   /* ------------------------------------------------------------ render: all */
 
   /** the full repaint — view switches, filter changes, boot, a cloud merge */
@@ -3098,6 +3231,7 @@
     renderNotes();
     renderClients();
     renderDrawer();
+    renderTrash();
     Sync.paint();
     $('#todayLabel').textContent = hebDate(todayISO());
     $('#railUserName').textContent = OWNER.name;
@@ -3262,9 +3396,170 @@
     return rec.updatedAt;
   }
 
+  /* ==========================================================================
+     סל מחזור — the 10-day recycle bin (Sprint 8)
+
+     Sprint 7 gave a deletion five seconds of regret. Five seconds only covers
+     the tap you knew was wrong the instant you made it; it does nothing for
+     the one you notice on Thursday. The bin is the second, slower net:
+
+       delete  →  the record leaves its collection at once (every view is
+                  honest immediately) and lands in Store.data.trash with the
+                  slot it came from and the moment it left
+       10 days →  it can be restored into that exact slot, or destroyed early
+       after   →  purgeTrash() drops it on the next app start, for good
+
+     The cloud half needs no new schema. A record that leaves its collection is
+     already diffed into the outbox as a tombstone, and D1 already carries a
+     deleted_at column on every table (migration 0001) — the server marks it
+     deleted the moment the bin accepts it. A restore calls touch(), so the
+     queued tombstone is REPLACED by an upsert and the row comes back to life
+     on every device. The bin itself is deliberately local: it is a client-side
+     grace period over a deletion the cloud has already recorded.
+
+     Every function here is pure store work — no DOM, no toast, no timer — so
+     healthcheck.js can drive a whole delete → count-down → restore → purge
+     cycle head-lessly.
+     ========================================================================== */
+
+  /** whatever localStorage handed back, made safe to render */
+  function normTrash(rows) {
+    return (Array.isArray(rows) ? rows : []).filter(function (e) {
+      return e && typeof e === 'object' &&
+        e.rec && typeof e.rec === 'object' &&
+        typeof e.id === 'string' && e.id &&
+        SELECTABLE.indexOf(e.collection) !== -1;
+    }).map(function (e) {
+      return {
+        collection: e.collection,
+        id: e.id,
+        rec: e.rec,
+        index: typeof e.index === 'number' && e.index >= 0 ? e.index : 0,
+        // an entry with no stamp is treated as deleted right now rather than
+        // as infinitely old: losing a record to a corrupt field is worse than
+        // holding it ten days too long
+        deletedAt: typeof e.deletedAt === 'number' && e.deletedAt > 0 ? e.deletedAt : Date.now()
+      };
+    });
+  }
+
+  /** milliseconds left before the auto-purge takes this entry */
+  function trashLeftMs(entry, now) {
+    if (!entry) return 0;
+    return (entry.deletedAt + TRASH_DAYS * DAY_MS) - (typeof now === 'number' ? now : Date.now());
+  }
+
+  /**
+   * The number the badge shows. Rounded UP, so the day of the deletion reads
+   * "בעוד 10 ימים" and the final day reads "בעוד יום אחד" — the count never
+   * claims more time than the entry actually has.
+   */
+  function trashDaysLeft(entry, now) {
+    var left = trashLeftMs(entry, now);
+    return left <= 0 ? 0 : Math.ceil(left / DAY_MS);
+  }
+
+  function trashExpired(entry, now) { return trashLeftMs(entry, now) <= 0; }
+
+  /** "יימחק לצמיתות בעוד 10 ימים" */
+  function trashCountdown(days) {
+    if (days <= 0) return 'יימחק לצמיתות היום';
+    if (days === 1) return 'יימחק לצמיתות בעוד יום אחד';
+    return 'יימחק לצמיתות בעוד ' + days + ' ימים';
+  }
+
+  function trashRows() {
+    var d = Store.data;
+    return d && Array.isArray(d.trash) ? d.trash : [];
+  }
+
+  /** newest deletion first — what was just lost is what is looked for */
+  function trashList() {
+    return trashRows().slice().sort(function (a, b) { return b.deletedAt - a.deletedAt; });
+  }
+
+  function trashFind(id) {
+    return trashRows().filter(function (e) { return e.id === id; })[0] || null;
+  }
+
+  function trashCount() { return trashRows().length; }
+
+  /** everything past its ten days leaves — returns how many went */
+  function purgeTrash(now) {
+    var d = Store.data;
+    if (!d || !Array.isArray(d.trash)) return 0;
+    var before = d.trash.length;
+    d.trash = d.trash.filter(function (e) { return !trashExpired(e, now); });
+    return before - d.trash.length;
+  }
+
+  /**
+   * The record moved out of its collection and into the bin. Caller owns the
+   * splice out of the live list and the Store.save() — this is the bookkeeping
+   * only, so one save covers the whole move.
+   */
+  function trashPut(collection, rec, index, now) {
+    var d = Store.data;
+    if (!d || !rec || SELECTABLE.indexOf(collection) === -1) return null;
+    if (!Array.isArray(d.trash)) d.trash = [];
+
+    var entry = {
+      collection: collection,
+      id: rec.id,
+      rec: rec,
+      index: typeof index === 'number' && index >= 0 ? index : 0,
+      deletedAt: typeof now === 'number' ? now : Date.now()
+    };
+    // one entry per record: deleting, restoring and deleting again must not
+    // leave two rows in the bin racing each other to purge
+    for (var i = 0; i < d.trash.length; i++) {
+      if (d.trash[i].id === entry.id) { d.trash[i] = entry; return entry; }
+    }
+    d.trash.push(entry);
+    return entry;
+  }
+
+  /** [שחזר] — back into its own collection, in the slot it left */
+  function trashRestore(id) {
+    var d = Store.data;
+    var entry = trashFind(id);
+    if (!entry) return null;
+
+    d.trash.splice(d.trash.indexOf(entry), 1);
+
+    var live = d[entry.collection];
+    // a record the cloud already pushed back is not restored twice
+    if (live && !Store.find(entry.collection, entry.id)) {
+      // the newer stamp is what makes the outbox REPLACE the tombstone it
+      // queued with an upsert — without it the restore would sync as a delete
+      touch(entry.rec);
+      live.splice(Math.min(entry.index, live.length), 0, entry.rec);
+    }
+    Store.save();
+    return entry;
+  }
+
+  /**
+   * [מחק לצמיתות] — the record left its collection when it was binned and its
+   * tombstone is already queued, so dropping the entry IS the permanent
+   * deletion. Nothing else in the app can reach it afterwards.
+   */
+  function trashPurge(id) {
+    var d = Store.data;
+    var entry = trashFind(id);
+    if (!entry) return null;
+    d.trash.splice(d.trash.indexOf(entry), 1);
+    Store.save();
+    return entry;
+  }
+
   /**
    * Remove a record and arm its undo. Pure store work — no DOM, no toast — so
    * the healthcheck can drive the whole delete/restore cycle head-lessly.
+   *
+   * Sprint 8 — the record now lands in סל מחזור on the way out, so the five
+   * second אחזר window and the ten day bin are the same single move seen at
+   * two timescales. Undo simply restores from the bin.
    */
   function softDelete(collection, id) {
     var list = Store.data && Store.data[collection];
@@ -3276,18 +3571,12 @@
 
     var rec = list[index];
     list.splice(index, 1);
+    trashPut(collection, rec, index);
     Store.save();
 
     var entry = { collection: collection, id: id, index: index, label: DELETED_LABEL[collection] || 'הפריט' };
 
-    Undo.arm(entry, function () {
-      var live = Store.data[collection];
-      // the newer stamp is what makes the outbox REPLACE the tombstone it just
-      // queued with an upsert — without it the restore would sync as a delete
-      touch(rec);
-      live.splice(Math.min(index, live.length), 0, rec);
-      Store.save();
-    });
+    Undo.arm(entry, function () { trashRestore(id); });
 
     return entry;
   }
@@ -3356,6 +3645,8 @@
     // the record actually came from by the time the next splice runs
     slots.slice().sort(function (a, b) { return b.index - a.index; })
       .forEach(function (s) { Store.data[s.collection].splice(s.index, 1); });
+    // ...and every one of them lands in סל מחזור, exactly like a single row
+    slots.forEach(function (s) { trashPut(s.collection, s.rec, s.index); });
     Store.save();
 
     var entry = {
@@ -3368,16 +3659,104 @@
       // ascending, so each record lands back in its own slot rather than
       // shifting the ones that follow it
       slots.slice().sort(function (a, b) { return a.index - b.index; })
-        .forEach(function (s) {
-          var live = Store.data[s.collection];
-          if (!live || Store.find(s.collection, s.id)) return;
-          touch(s.rec);                       // replaces the queued tombstone
-          live.splice(Math.min(s.index, live.length), 0, s.rec);
-        });
+        .forEach(function (s) { trashRestore(s.id); });
       Store.save();
     });
 
     return entry;
+  }
+
+  /* ==========================================================================
+     The completion gesture (Sprint 8)
+
+     Tapping the empty circle used to close the task, save, repaint and toast
+     inside one synchronous tick: by the time the finger lifted, the row had
+     already dimmed, re-sorted and — in "לביצוע היום" — left the list entirely.
+     The most satisfying moment in the app was invisible.
+
+     It is now a 400ms gesture with three simultaneous channels:
+
+       see    the ✓ draws itself inside the circle (an SVG path released from
+              its stroke-dash) and a line sweeps across the title while the
+              card dims — .is-completing, painted on the live node
+       feel   a dual haptic pulse [15,30,15], fired at the START so the buzz
+              lands with the drawing, not after it
+       then   the store moves, the card slides into "הושלם", the toast lands
+
+     plan() is pure and takes only the task: un-checking a finished task is NOT
+     a celebration and skips the whole gesture, which is what stops the animation
+     from running backwards. run() is the only part that touches a timer, and it
+     degrades to a straight synchronous commit when nothing is on screen — so
+     the headless path and the finger path delete and complete identically.
+     ========================================================================== */
+
+  var Complete = {
+    /** id → timer, so a double tap cannot schedule two commits */
+    pending: {},
+
+    /**
+     * What this tap should do. Pure: no DOM, no timer, no store.
+     * @returns {{closing:boolean, delay:number, haptic:(number[]|null)}}
+     */
+    plan: function (task) {
+      if (!task) return null;
+      var closing = normStatus(task.status) !== 'done';
+      return {
+        closing: closing,
+        delay: closing ? COMPLETE_MS : 0,
+        haptic: closing ? HAPTIC_CHECK : null
+      };
+    },
+
+    /** paint the gesture onto every node standing for this task, in place */
+    paint: function (id) {
+      var nodes = $$('[data-rec="tasks:' + id + '"]');
+      nodes.forEach(function (n) {
+        if (n.classList) n.classList.add('is-completing');
+      });
+      return nodes.length;
+    },
+
+    /** the whole gesture: draw, buzz, wait, then hand over to `commit` */
+    run: function (task, commit) {
+      var plan = Complete.plan(task);
+      if (!plan || typeof commit !== 'function') return null;
+
+      // re-opening a closed task is a correction, not an achievement: no
+      // celebration, no delay, no second pulse
+      if (!plan.closing) { commit(); return plan; }
+
+      Haptics.check();
+      var painted = Complete.paint(task.id);
+      if (!painted) { commit(); return plan; }   // off screen — nothing to watch
+
+      var id = task.id;
+      if (Complete.pending[id]) clearTimeout(Complete.pending[id]);
+      Complete.pending[id] = setTimeout(function () {
+        delete Complete.pending[id];
+        commit();
+      }, plan.delay);
+      return plan;
+    }
+  };
+
+  /**
+   * Collapse a card out of its list before the store moves under it (Sprint 8).
+   *
+   * Same contract as Complete.run(): with no matching node on screen the work
+   * runs immediately and synchronously, so a headless caller — and every
+   * healthcheck — sees the identical deletion semantics with no timer at all.
+   */
+  function leaveThen(keys, run) {
+    var nodes = [];
+    (Array.isArray(keys) ? keys : [keys]).forEach(function (key) {
+      nodes = nodes.concat($$('[data-rec="' + key + '"]'));
+    });
+
+    if (!nodes.length) { run(); return false; }
+    nodes.forEach(function (n) { if (n.classList) n.classList.add('is-leaving'); });
+    setTimeout(run, LEAVE_MS);
+    return true;
   }
 
   /* ==========================================================================
@@ -3627,12 +4006,15 @@
       }
 
       if (action === 'delete') {
-        confirmDelete(plural(keys.length, 'פריט אחד', 'פריטים') + ' ייצאו מהרשימה', function () {
-          var gone = softDeleteMany(keys);
-          Select.setMode(false);
-          if (!gone) { toast('לא נמחק דבר'); return; }
-          // a whole batch is a bigger loss — the net stays open longer
-          toast(gone.count + ' פריטים נמחקו', UNDO_LABEL, UNDO_BATCH_MS);
+        confirmDelete(plural(keys.length, 'פריט אחד', 'פריטים') + ' יעברו לסל המחזור', function () {
+          // every picked card collapses together, then the whole batch moves
+          leaveThen(keys, function () {
+            var gone = softDeleteMany(keys);
+            Select.setMode(false);
+            if (!gone) { toast('לא נמחק דבר'); return; }
+            // a whole batch is a bigger loss — the net stays open longer
+            toast(gone.count + ' פריטים הועברו לסל המחזור', UNDO_LABEL, UNDO_BATCH_MS);
+          });
         });
       }
     },
@@ -3707,6 +4089,7 @@
     $('#typeSheet').hidden = true;
     $('#formSheet').hidden = true;
     $('#confirmSheet').hidden = true;
+    $('#trashSheet').hidden = true;
     Drawer.close();
     document.body.style.overflow = '';
     PREFILL = null;
@@ -3715,7 +4098,19 @@
 
   /** is anything else still layered over the app? */
   function anySheetOpen() {
-    return !$('#typeSheet').hidden || !$('#formSheet').hidden || Drawer.isOpen();
+    return !$('#typeSheet').hidden || !$('#formSheet').hidden ||
+      !$('#trashSheet').hidden || Drawer.isOpen();
+  }
+
+  /** סל מחזור — opened from the header pill, painted fresh every time */
+  function openTrash() {
+    // an entry that expired while the app was left open must not be offered
+    // for restore just because the tab never reloaded
+    if (purgeTrash()) Store.save();
+    renderTrash();
+    $('#typeSheet').hidden = true;
+    $('#formSheet').hidden = true;
+    openSheet('trashSheet');
   }
 
   /**
@@ -3742,10 +4137,13 @@
     if (!rec) { toast('הפריט לא נמצא'); return false; }
 
     return !!confirmDelete(recSummary(parts[0], rec), function () {
-      var gone = softDelete(parts[0], parts[1]);
-      if (!gone) return;
-      render();                              // the row is leaving — membership moved
-      toast(gone.label + ' נמחק', UNDO_LABEL);
+      // Sprint 8 — the card collapses and fades out first, THEN the store moves
+      leaveThen(parts[0] + ':' + parts[1], function () {
+        var gone = softDelete(parts[0], parts[1]);
+        if (!gone) return;
+        render();                            // the row is leaving — membership moved
+        toast(gone.label + ' הועבר לסל המחזור', UNDO_LABEL);
+      });
     });
   }
 
@@ -4453,6 +4851,59 @@
 
   /* ------------------------------------------------------------- delegation */
 
+  /**
+   * Universal tap-to-edit (Sprint 8). Given the element a tap landed on,
+   * returns the record key whose form should open, or '' for "not an edit".
+   *
+   * A tap qualifies only when it landed inside a card, that card is one of the
+   * four types the mandate names, and no form is already layered over the app —
+   * a tap inside an open form must never open a second one behind it. The
+   * client drawer is deliberately NOT a blocker: the cards inside a client file
+   * are real cards and editing them from there is the whole point. A client
+   * card itself is excluded — tapping one opens the full client file instead.
+   */
+  function tapEditKey(target) {
+    if (!target || !target.closest) return '';
+    if (Select.on || Confirm.isOpen()) return '';
+    if (!$('#typeSheet').hidden || !$('#formSheet').hidden || !$('#trashSheet').hidden) return '';
+
+    var card = target.closest('[data-rec]');
+    var key = card && card.dataset ? card.dataset.rec : '';
+    if (!key) return '';
+    // a card mid-collapse is on its way out; it is not editable
+    if (card.classList && card.classList.contains('is-leaving')) return '';
+    return TAP_EDIT.indexOf(String(key).split(':')[0]) === -1 ? '' : key;
+  }
+
+  /** [שחזר] / [מחק לצמיתות] inside the bin */
+  function runTrashAction(action, id) {
+    var entry = trashFind(id);
+    if (!entry) { renderTrash(); toast('הפריט כבר לא בסל המחזור'); return false; }
+
+    if (action === 'restore') {
+      var back = trashRestore(id);
+      if (!back) { renderTrash(); return false; }
+      Haptics.done();
+      // the restored record re-enters a list it left — the membership moved
+      render();
+      toast((TRASH_LABEL[back.collection] || 'הפריט') + ' שוחזר');
+      return true;
+    }
+
+    if (action !== 'purge') return false;
+
+    // the one deletion in the app with no net behind it — it asks like every
+    // other destructive tap, and this time the answer really is final
+    return !!confirmDelete(
+      (TRASH_LABEL[entry.collection] || 'הפריט') + ' · ' +
+      (recTitle(entry.collection, entry.rec) || 'ללא כותרת') + ' — לצמיתות, ללא שחזור',
+      function () {
+        if (!trashPurge(id)) return;
+        renderTrash();
+        toast('הפריט נמחק לצמיתות');
+      });
+  }
+
   function onClick(e) {
     // selection mode owns every tap that lands on a card (Wave 3), so it is
     // asked before any control branch below can act on that card
@@ -4464,12 +4915,26 @@
       '[data-tasktab],[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
       '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
       '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo],' +
-      '[data-edit],[data-batch],[data-confirmdel]') : null;
-    if (!el) return;
+      '[data-edit],[data-batch],[data-confirmdel],[data-trash]') : null;
+
+    // Sprint 8 · universal tap-to-edit — a tap that hit no control at all, but
+    // landed on a card, opens that card's own form pre-filled. The check circle,
+    // the ✕, the ✎ and every chip inside the row are controls and were matched
+    // above, so this can only ever be the card BODY.
+    if (!el) {
+      var open = tapEditKey(e.target);
+      if (open) {
+        Haptics.light();
+        if (!openEdit(open.split(':')[0], open.split(':')[1])) toast('הפריט לא נמצא');
+      }
+      return;
+    }
 
     // one light pulse for every control in the app — button taps, tab switches
-    // and status toggles all come through this one delegate
-    Haptics.light();
+    // and status toggles all come through this one delegate. The check circle
+    // is the exception: it fires its own dual pulse, and a light beat 10ms
+    // earlier would truncate the first beat of it.
+    if (!el.dataset.toggle) Haptics.light();
 
     if (el.dataset.undo) {
       var back = Undo.fire();
@@ -4496,6 +4961,7 @@
 
     if (el.dataset.action === 'select-mode') { Select.toggleMode(); return; }
     if (el.dataset.action === 'close-confirm') { closeConfirm(); return; }
+    if (el.dataset.action === 'trash') { openTrash(); return; }
 
     if (el.dataset.action === 'master-add') { openTypeSheet(); return; }
     if (el.dataset.action === 'close-sheet') { closeSheets(); return; }
@@ -4575,12 +5041,23 @@
     if (el.dataset.toggle) {
       var t = Store.find('tasks', el.dataset.toggle);
       if (t) {
-        toggleTaskDone(t);
-        Store.save();
-        if (t.done) Haptics.done();           // a second beat: this one is finished
-        Patch.apply('tasks', t.id);
-        toast(t.done ? 'המשימה הושלמה ✓' : 'המשימה חזרה ל' + STATUS_LABEL[t.status]);
+        // Sprint 8 — the ✓ draws, the title strikes through and the dual pulse
+        // fires FIRST; only when the gesture has been seen does the record move
+        Complete.run(t, function () {
+          toggleTaskDone(t);
+          Store.save();
+          Patch.apply('tasks', t.id);
+          toast(t.done ? 'המשימה הושלמה ✓' : 'המשימה חזרה ל' + STATUS_LABEL[t.status]);
+        });
       }
+      return;
+    }
+
+    /* ---------- סל מחזור (Sprint 8) ---------- */
+
+    if (el.dataset.trash) {
+      var tp = el.dataset.trash.split(':');
+      runTrashAction(tp[0], tp[1]);
       return;
     }
 
@@ -4753,7 +5230,35 @@
       applyEdit: applyEdit,
       TO_FORM: TO_FORM,
       EDIT_TYPE: EDIT_TYPE,
-      COLLECTION_OF: COLLECTION_OF
+      COLLECTION_OF: COLLECTION_OF,
+
+      // Sprint 8 — the completion gesture, the 10-day recycle bin and the
+      // tap-to-edit gate. plan(), the whole trash layer and the countdown math
+      // are pure: healthcheck.js drives a full delete → count-down → restore →
+      // purge cycle with no DOM, no timer and no clock of its own.
+      HAPTIC_CHECK: HAPTIC_CHECK,
+      COMPLETE_MS: COMPLETE_MS,
+      LEAVE_MS: LEAVE_MS,
+      TRASH_DAYS: TRASH_DAYS,
+      DAY_MS: DAY_MS,
+      TRASH_LABEL: TRASH_LABEL,
+      TAP_EDIT: TAP_EDIT,
+      CHECK_MARK: CHECK_MARK,
+      Complete: Complete,
+      leaveThen: leaveThen,
+      normTrash: normTrash,
+      trashLeftMs: trashLeftMs,
+      trashDaysLeft: trashDaysLeft,
+      trashExpired: trashExpired,
+      trashCountdown: trashCountdown,
+      trashList: trashList,
+      trashFind: trashFind,
+      trashCount: trashCount,
+      trashPut: trashPut,
+      trashRestore: trashRestore,
+      trashPurge: trashPurge,
+      purgeTrash: purgeTrash,
+      trashRow: trashRow
     },
 
     // cloud sync engine — schema, serialisers, outbox and merge, all pure

@@ -1,7 +1,8 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Waves 1–3 shipped (§7.4g) — breakage fixes, delete confirmation, universal edit,
-> multi-select & batch actions, v0.7.3. Sprint 7 before them — haptics, targeted DOM updates, undo.
+> **Status:** Sprint 8 shipped (§7.4h) — the 400ms completion gesture, the 10-day סל מחזור,
+> universal tap-to-edit and card enter/exit animation, v0.8.0. Waves 1–3 before it (§7.4g) —
+> breakage fixes, delete confirmation, universal edit, multi-select & batch actions.
 > **Repository:** `C:\calendar-app` (fresh, independent git repo — no relationship to `benja-gallery`)
 > **Created:** 2026-07-27 · **Spec injected:** 2026-07-27 (Sprint 1)
 
@@ -878,6 +879,104 @@ record mid-window, the confirmation's accept/dismiss/no-double-run contract, `TO
 cross-checked field-by-field against the form builders, an edit round-trip that proves the
 record count never moves and the checklist keeps its ticks, and a mixed batch
 delete → restore cycle including the outbox tombstone replacement.
+
+### 7.4h Sprint 8 — the completion gesture, סל מחזור & universal tap-to-edit (shipped)
+
+Sprint 7 made the app fast. Sprint 8 makes it *feel* like something happened — and gives every
+deletion a second, slower net behind the five-second one.
+
+**1 · The completion gesture (`Complete`)**
+
+Tapping the empty circle used to close the task, save, repaint and toast inside one synchronous
+tick: by the time the finger lifted the row had already dimmed, re-sorted and — in "לביצוע
+היום" — left the list entirely. The most satisfying moment in the app was invisible.
+
+It is now a **400ms** (`COMPLETE_MS`) gesture with three channels running at once:
+
+| Channel | What happens | How |
+|---|---|---|
+| see | the ✓ **draws itself** inside the circle, left to right | `CHECK_MARK` is an SVG path that is *always* in the DOM, held invisible by `stroke-dasharray:26; stroke-dashoffset:26` and released to `stroke-dashoffset:0` — with a `.34s` transition — the moment the row carries `.is-completing` or `.is-done`. A glyph swapped in at completion time can only ever *appear*; a dashed path can be *drawn* |
+| see | the title strikes through and the card dims | `.row-title::after` is a bar that sweeps `inline-size:0 → 100%`, because `text-decoration:line-through` cannot be animated. The settled `.row.is-done .row-title{ text-decoration:line-through }` takes over at the end, so the sweep hands off without a flicker. The card fades to `--dim-done` — exactly where a finished card lives — so the hand-off is invisible |
+| feel | a **dual haptic pulse** `HAPTIC_CHECK = [15, 30, 15]` | fired at the **start** via `Haptics.check()`, so the buzz lands with the drawing rather than after it. The check circle is the one control in the delegate that declines the blanket `Haptics.light()` — a light beat 10ms earlier would clip the first of the two |
+| then | the store moves, the card slides into "הושלם", the toast lands | the commit closure passed to `Complete.run()` |
+
+`Complete.plan(task)` is pure and drives all of it: **un-checking a finished task is not an
+achievement** and skips the gesture entirely (`closing:false, delay:0, haptic:null`), which is
+what stops the animation from ever running backwards. `Complete.run()` degrades to a straight
+synchronous commit when the task is not on screen, so the headless path and the finger path
+have identical semantics.
+
+**2 · Explicit delete confirmation**
+
+The door built in גל 2 is unchanged in structure and now carries the mandated labels:
+**`אישור מחיקה`** (`.btn-danger`) and **`ביטול`** (`.btn-ghost`), under the question
+`האם אתה בטוח שברצונך למחוק?` and the name of the record on a `--danger-edge` panel. Nothing
+in the app deletes without passing through `confirmDelete(what, run)` — including
+`מחק לצמיתות` inside the bin, which is the only deletion with nothing behind it.
+
+**3 · סל מחזור — the 10-day recycle bin**
+
+```
+delete   →  the record leaves its collection at once (every view stays honest)
+            and lands in Store.data.trash with { collection, id, rec, index, deletedAt }
+5 sec    →  אחזר  — Undo.arm() now restores through trashRestore()
+10 days  →  שחזר (back into the exact slot) or מחק לצמיתות (trashPurge())
+after    →  purgeTrash() drops it on the next app start, for good
+```
+
+- Reached from the header pill **`🗑 סל מחזור`** (`#trashBtn`, with a live count badge that
+  colours the pill gold while it is holding anything) which opens the `#trashSheet` dialog.
+- Every row names the record, says what kind it is, and shows
+  **`יימחק לצמיתות בעוד N ימים`** — `trashDaysLeft()` rounds **up**, so the day of deletion
+  reads 10 and the final day reads `יום אחד`; the badge turns `pr-high` in its last 48 hours.
+- **Auto-purge runs inside `Store.load()`**, before a single row is painted, so an expired
+  record is never offered for restore even for one frame. `openTrash()` purges again on the way
+  in, for a tab that was left open across the boundary.
+- **No migration was needed.** A record leaving its collection is already diffed into the outbox
+  as a tombstone and D1 already carries `deleted_at` on every table (migration 0001) — the
+  server marks it deleted the moment the bin accepts it. `trashRestore()` calls `touch()`, so
+  the queued tombstone is **replaced** by an upsert and the row comes back to life everywhere.
+  The bin itself is deliberately local: a client-side grace period over a deletion the cloud
+  has already recorded.
+- `Sync.merge()` gained a bin guard. A stale server copy of a binned record used to walk
+  straight back onto the board while its own bin entry still offered to restore it — two copies
+  of one record, one unreachable. The bin now wins while `deletedAt >= stamp`, and **steps
+  aside** (dropping its entry) when a genuinely newer server copy proves the record is alive
+  again, rather than leaving something purgeable that is still on the board.
+- `normTrash()` drops malformed entries on load, and stamps a stamp-less one with `Date.now()`
+  — losing a record to a corrupt field is worse than holding it ten days too long.
+
+**4 · Universal tap-to-edit**
+
+`tapEditKey(target)` is asked only when a tap matched **no control at all** — the check circle,
+the ✕, the ✎ and every chip inside a row are controls and are matched first — and returns the
+record key whose typed form should open, pre-filled by the existing `TO_FORM` / `openEdit()`
+path. It yields to selection mode, to an open confirmation, to an open form or bin sheet, and
+to a card mid-collapse. `TAP_EDIT` covers **event, task, list and note**; a client card is
+excluded on purpose, because tapping one opens the full client file, which is richer.
+
+**5 · Entrance & exit**
+
+`leaveThen(keys, run)` paints `.is-leaving` on every node standing for the record(s), waits
+`LEAVE_MS = 240`, and only then lets the store move — so a deleted card **collapses** (`card-out`:
+`max-height → 0`, `opacity → 0`, `scale(.96)`) instead of blinking away. Like `Complete.run()`,
+it runs synchronously when nothing is on screen. Arriving cards rise through `card-in`, which is
+**transform-only on purpose**: an opacity keyframe with a fill would out-rank
+`opacity:var(--dim-done)` and silently un-dim every finished card on the board. `.row` and `.ev`
+also answer a press with their own `scale(.995)` compression, now that a card body is a tap target.
+
+**Shipped shell** — `sw.js` is bumped to `v11`.
+
+**Verification** — `healthcheck.js` §24 adds 20 checks: the `Complete.plan` decision table in
+both directions, `Complete.run()` driven against a stubbed vibration motor (one pattern, one
+commit, no buzz on an un-check), the `stroke-dashoffset` draw contract read off the CSS, the
+sweeping strikethrough and its hand-off to the real `text-decoration`, the confirmation's
+mandated labels and z-order against the bin, the countdown math across seven points of the
+ten-day window, a delete → bin → restore cycle that proves the slot *and* the outbox tombstone
+replacement, a permanent purge that cannot be undone, the start-up auto-purge (one expired, one
+exactly at the boundary, one with a day left), `normTrash()` against five malformed rows, the
+batch path through the bin, the `Sync.merge()` bin guard in both directions, the `tapEditKey`
+gate and its position in the delegate, and the collapse/entrance animation contracts.
 
 ### 7.4 General layout
 
