@@ -1713,12 +1713,17 @@ check('the outbox holds one op per record — a re-edit replaces, never appends'
   Store.save();
   if (c.queue.length) return 'an unchanged store re-queued ' + c.queue.length + ' ops';
 
+  // The edit must stamp strictly newer than what settle() just shadowed. Store.load()
+  // and this line can share a millisecond, and Date.now() would then reproduce the
+  // shadowed stamp exactly — capture() would rightly see no change and enqueue nothing.
+  // In the app a network round-trip always separates a settle from the next edit.
   const task = Store.data.tasks[0];
-  task.title = 'שינוי ראשון'; task.updatedAt = Date.now();
+  const shadowed = c.shadow.tasks[task.id] || Date.now();
+  task.title = 'שינוי ראשון'; task.updatedAt = shadowed + 1000;
   Store.save();
   if (c.queue.length !== 1) return 'one edit produced ' + c.queue.length + ' ops';
 
-  task.title = 'שינוי שני'; task.updatedAt = Date.now() + 1;
+  task.title = 'שינוי שני'; task.updatedAt = shadowed + 1001;
   Store.save();
   if (c.queue.length !== 1) return 'a second edit appended instead of replacing';
   if (c.queue[0].row.title !== 'שינוי שני') return 'the outbox carries a stale payload';

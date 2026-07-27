@@ -20,5 +20,5 @@ pages_build_output_dir = "."
 [[d1_databases]]
 binding = "DB"
 database_name = "benja-calendar"
-database_id = ""            # ← set from `wrangler d1 create benja-calendar`
+database_id = "fa6d103d-b10d-4db0-a719-1c8420d2053a"
 migrations_dir = "migrations"

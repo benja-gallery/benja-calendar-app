@@ -578,6 +578,19 @@ its caches: a cached delta would hand the client stale rows and silently stall t
 Until `database_id` is filled in, `/api/*` answers `500 no_binding`, the badge sits on
 🔴 and the app is entirely usable on its local store.
 
+**Live as of 2026-07-27** — the binding is filled in and the cloud layer is activated:
+
+| | |
+|---|---|
+| D1 database | `benja-calendar` · `fa6d103d-b10d-4db0-a719-1c8420d2053a` · region `EEUR` |
+| Migration state | `0001_sprint5_init.sql` applied `--remote` (18 statements) |
+| Pages project | `benja-calendar-app`, production branch `main` |
+| Production URL | `https://benja-calendar-app.pages.dev` |
+
+`SYNC_ENDPOINT` stays relative (`'api'`), so the client resolves `/api/sync` against
+whatever origin it was served from — Pages root, a Pages preview alias, or a GitHub
+Pages sub-path — with no per-environment build step.
+
 **Verification** — `healthcheck.js` §19 executes the engine head-lessly: it cross-checks
 the column list across all three artefacts (SQL ↔ Worker ↔ client), round-trips every
 pillar through `toRow`/`fromRow`, drives the outbox through edit / re-edit / delete /
