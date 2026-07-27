@@ -623,8 +623,8 @@ functions/    ← stays at the ROOT on purpose: Pages compiles Functions from th
 
 `pages_build_output_dir = "public"` is the single line that enforces it, and
 `healthcheck.js` §20 asserts both halves — every published asset is in `public/`, and no
-config file has leaked into it. `tools/gen-icons.js` writes to `public/icons/` so a
-regeneration cannot resurrect the old root copy.
+config file has leaked into it. Icon regeneration writes to `public/icons/` so it cannot
+resurrect the old root copy.
 
 > **Consequence for GitHub Pages:** the branch-root deploy documented in the README no
 > longer serves the app, because the shell now sits one directory down. Cloudflare Pages
@@ -789,8 +789,10 @@ only the day-column order mirrors.
 - `manifest.json`: `display: standalone`, `start_url: ./index.html`, `scope: ./`, RTL Hebrew,
   background `#12161f`, theme `#e4c278`. Every path is **relative** so the app installs
   correctly from a GitHub Pages sub-path as well as from a domain root.
-- Icons are generated deterministically by `tools/gen-icons.js` (dependency-free PNG encoder)
+- Icons are rendered from the photographic brand mark archived at `tools/brand-mark.jpg`
   — 32 / 180 / 192 / 512 `any` plus a 512 `maskable` whose mark sits inside the 80% safe zone.
+  The Sprint-2 procedural generator (`tools/gen-icons.js`) was deleted in Sprint 7 so it can
+  never overwrite the shipped set.
 - iOS install tags: `apple-mobile-web-app-capable`, `apple-mobile-web-app-status-bar-style`,
   `apple-mobile-web-app-title`, `apple-touch-icon`.
 
@@ -874,7 +876,7 @@ C:\calendar-app\
 │       ├── auth.js
 │       └── sync.js
 ├── migrations/                  ← D1 SQL migrations, numbered, append-only
-├── tools/gen-icons.js           ← regenerates public/icons/ from the brand tokens
+├── tools/brand-mark.jpg         ← icon source of truth; public/icons/ is rendered from it
 ├── PROJECT_PLAN.md              ← this file
 ├── README.md
 ├── healthcheck.js               ← repo-local verification suite (§10)

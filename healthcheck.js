@@ -1980,10 +1980,17 @@ check('functions/ stays at the project root, where Pages compiles it', () => {
   return true;
 });
 
-check('the icon generator writes into public/icons, not the old root', () => {
-  const gen = fs.readFileSync(path.join(ROOT, 'tools', 'gen-icons.js'), 'utf8');
-  if (!/path\.join\(__dirname, '\.\.', 'public'\)/.test(gen)) {
-    return 'gen-icons.js still targets the repo root — a regeneration would resurrect /icons';
+check('no procedural icon generator can overwrite the shipped brand mark', () => {
+  // Sprint 7: public/icons/ is rendered from tools/brand-mark.jpg. The old
+  // shape-based generator was removed so it can never be run by mistake.
+  if (fs.existsSync(path.join(ROOT, 'tools', 'gen-icons.js'))) {
+    return 'tools/gen-icons.js is back — running it would overwrite the brand-mark icons';
+  }
+  if (fs.existsSync(path.join(ROOT, 'icons'))) {
+    return 'the old root-level /icons directory was resurrected';
+  }
+  if (!fs.existsSync(path.join(ROOT, 'tools', 'brand-mark.jpg'))) {
+    return 'tools/brand-mark.jpg is gone — the icon source of truth';
   }
   return true;
 });

@@ -21,7 +21,7 @@ the public internet.
 | `public/app.js` | Store, views, Master Add, service-worker registration, notifications, cloud sync, Google Calendar bridge | ✅ |
 | `public/manifest.json` | PWA install descriptor (`standalone`, RTL Hebrew, relative paths) | ✅ |
 | `public/sw.js` | Offline cache of the core shell + `push` → `showNotification()` | ✅ |
-| `public/icons/` | Generated PNGs — **do not hand-edit**, run `node tools/gen-icons.js` | ✅ |
+| `public/icons/` | Generated PNGs — **do not hand-edit**, regenerate from `tools/brand-mark.jpg` | ✅ |
 | `functions/api/` | Worker routes, mounted at `/api/*`. Stays at the **root**: Pages compiles Functions from the project root, not from the output directory. | source ❌ |
 | `migrations/` | D1 SQL migrations, numbered and append-only | ❌ |
 | `wrangler.toml` | `pages_build_output_dir = "public"` + the D1 binding | ❌ |
@@ -40,11 +40,17 @@ The zero-regression rule applies: this must be green before anything is reported
 Among other things it fails the build if a config file ever leaks into `public/`, or if a
 published asset drifts back out of it.
 
-Regenerating icons after a brand-token change (writes into `public/icons/`):
+Regenerating icons after a brand-mark change (writes into `public/icons/`):
 
 ```bash
-node tools/gen-icons.js
+node ../benja-gallery/generate-icons.js tools/brand-mark.jpg --out public/icons
+# then rename apple-touch-icon.png -> apple-touch-icon-180.png and add
+# maskable-512.png (mark inside the 80% safe zone)
 ```
+
+The source of truth is the photographic brand mark at `tools/brand-mark.jpg`. The old
+shape-based `tools/gen-icons.js` was deleted in Sprint 7 — it rendered the superseded
+procedural glyph and would silently overwrite the shipped icons.
 
 ---
 
