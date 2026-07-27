@@ -235,11 +235,62 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 }
 @keyframes sync-pulse{ 0%,100%{ opacity:1; } 50%{ opacity:.35; } }
 
+/* ---------- Google Calendar connection (Sprint 6) ----------
+   Same pill as its two neighbours, so the top bar reads as one control strip.
+   The glyph carries the identity, the label carries the state — colour is
+   never the only signal.                                                    */
+.gcal-btn{
+  flex:0 0 auto;
+  display:inline-flex; align-items:center; gap:7px;
+  padding:0 13px; height:38px; min-height:38px;
+  background:var(--card-2); border:1px solid var(--line-soft);
+  border-radius:999px;
+  color:var(--muted); font-size:12.5px; font-weight:700; white-space:nowrap;
+  transition:color .18s, background .18s, border-color .18s;
+}
+.gcal-btn:hover{ color:var(--ink); border-color:var(--gold-edge); }
+.gcal-ico{ font-size:14px; line-height:1; }
+
+/* connected — tapping now runs a two-way cycle */
+.gcal-btn.is-on{
+  color:var(--gold); background:var(--gold-soft); border-color:var(--gold-edge);
+}
+/* a cycle is in flight */
+.gcal-btn.is-busy{
+  color:var(--waiting); background:var(--waiting-soft); border-color:var(--waiting-edge);
+}
+/* the deployment carries no Google credentials — nothing to connect to */
+.gcal-btn.is-na{
+  color:var(--faint); background:var(--card-2); border-color:var(--line-soft);
+  cursor:not-allowed;
+}
+
+/* "סונכרן לאחרונה מול גוגל: HH:MM" */
+.gcal-sync{
+  display:flex; align-items:center; gap:8px;
+  margin-top:8px;
+  color:var(--faint); font-size:12px;
+}
+.gcal-sync[hidden]{ display:none; }
+.gcal-unlink{
+  padding:2px 8px;
+  background:transparent; border:1px solid var(--line-soft); border-radius:999px;
+  color:var(--faint); font-size:11px; font-weight:700;
+}
+.gcal-unlink:hover{ color:var(--danger); border-color:var(--danger-edge); }
+.gcal-unlink[hidden]{ display:none; }
+
+@media (prefers-reduced-motion: no-preference){
+  .gcal-btn.is-busy .gcal-ico{ animation:sync-pulse 1.8s ease-in-out infinite; }
+}
+
 @media (max-width:420px){
   .push-label{ display:none; }
   .push-btn{ padding:0; width:38px; min-width:38px; justify-content:center; }
   .sync-label{ display:none; }
   .sync-btn{ padding:0; width:38px; min-width:38px; justify-content:center; }
+  .gcal-label{ display:none; }
+  .gcal-btn{ padding:0; width:38px; min-width:38px; justify-content:center; }
 }
 
 /* ---------- segmented control (global category filter) ---------- */

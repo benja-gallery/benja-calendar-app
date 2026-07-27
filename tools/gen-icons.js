@@ -189,14 +189,16 @@ const TARGETS = [
   { file: 'icons/favicon-32.png', size: 32, variant: 'rounded' }
 ];
 
-const root = path.join(__dirname, '..');
+/* Sprint 6: every browser-reachable asset lives under public/ — the repo root
+   is build/config territory and is not served (PROJECT_PLAN §11). */
+const root = path.join(__dirname, '..', 'public');
 fs.mkdirSync(path.join(root, 'icons'), { recursive: true });
 
 TARGETS.forEach(t => {
   const rgba = render(t.size, iconShapes(t.size, t.variant), null);
   const buf = encodePNG(t.size, t.size, rgba);
   fs.writeFileSync(path.join(root, t.file), buf);
-  console.log('  wrote ' + t.file + '  (' + t.size + 'x' + t.size + ', ' + buf.length + ' bytes)');
+  console.log('  wrote public/' + t.file + '  (' + t.size + 'x' + t.size + ', ' + buf.length + ' bytes)');
 });
 
 console.log('\n  ' + TARGETS.length + ' icons generated.\n');

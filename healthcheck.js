@@ -16,6 +16,21 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = __dirname;
+
+/**
+ * Sprint 6 split the repo in two (PROJECT_PLAN §11): everything a browser can
+ * fetch lives in public/, everything else (this file, PROJECT_PLAN.md,
+ * wrangler.toml, migrations/, functions/) stays at the root and is never
+ * uploaded. Paths are resolved public-first so every existing check keeps
+ * naming its file the way it always did.
+ */
+const PUBLIC = path.join(ROOT, 'public');
+
+function at(file) {
+  const inPublic = path.join(PUBLIC, file);
+  return fs.existsSync(inPublic) ? inPublic : path.join(ROOT, file);
+}
+
 const pass = [];
 const fail = [];
 
@@ -30,7 +45,7 @@ function check(name, fn) {
 }
 
 function read(file) {
-  return fs.readFileSync(path.join(ROOT, file), 'utf8');
+  return fs.readFileSync(at(file), 'utf8');
 }
 
 function must(hay, needle, label) {
@@ -39,15 +54,19 @@ function must(hay, needle, label) {
 
 /* -------------------------------------------------------------- 1. files */
 
+/** the published surface — every one of these must live in public/ (§11) */
 const REQUIRED = [
-  'index.html', 'styles.css', 'app.js', 'PROJECT_PLAN.md',
-  'manifest.json', 'sw.js',
+  'index.html', 'styles.css', 'app.js', 'manifest.json', 'sw.js',
   'icons/icon-192.png', 'icons/icon-512.png',
   'icons/maskable-512.png', 'icons/apple-touch-icon-180.png', 'icons/favicon-32.png'
 ];
 
+/** the unpublished surface — spec and tooling, at the root and never uploaded */
+const REQUIRED_ROOT = ['PROJECT_PLAN.md', 'wrangler.toml'];
+
 check('required files present', () => {
-  const missing = REQUIRED.filter(f => !fs.existsSync(path.join(ROOT, f)));
+  const missing = REQUIRED.filter(f => !fs.existsSync(path.join(PUBLIC, f)))
+    .concat(REQUIRED_ROOT.filter(f => !fs.existsSync(path.join(ROOT, f))));
   return missing.length ? 'missing: ' + missing.join(', ') : true;
 });
 
@@ -362,7 +381,7 @@ const sw = read('sw.js');
 
 /** real PNG dimensions straight out of the IHDR chunk */
 function pngSize(file) {
-  const buf = fs.readFileSync(path.join(ROOT, file));
+  const buf = fs.readFileSync(at(file));
   const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
   for (let i = 0; i < 8; i++) if (buf[i] !== sig[i]) throw new Error(file + ' is not a PNG');
   return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20), bytes: buf.length };
@@ -394,7 +413,7 @@ check('manifest ships 192 / 512 / maskable icons that really exist', () => {
   });
 
   icons.forEach(i => {
-    if (!fs.existsSync(path.join(ROOT, i.src))) throw new Error('missing file ' + i.src);
+    if (!fs.existsSync(at(i.src))) throw new Error('missing file ' + i.src);
     const dim = pngSize(i.src);
     const want = parseInt(i.sizes.split('x')[0], 10);
     if (dim.w !== want || dim.h !== want) {
@@ -1294,7 +1313,7 @@ check('service worker cache version was bumped for this sprint', () => {
   const m = sw.match(/CACHE_VERSION = '(v\d+)'/);
   if (!m) return 'no CACHE_VERSION';
   const n = parseInt(m[1].slice(1), 10);
-  return n >= 5 ? true : 'CACHE_VERSION is ' + m[1] + ', expected v5 or later';
+  return n >= 6 ? true : 'CACHE_VERSION is ' + m[1] + ', expected v6 or later';
 });
 
 check('PROJECT_PLAN documents the Sprint 3 engine', () => {
@@ -1323,10 +1342,11 @@ const WORKER_ROUTES = ['sync', 'events', 'tasks', 'lists', 'notes', 'clients'];
 const WORKER_FILES = ['_shared', '_collection'].concat(WORKER_ROUTES)
   .map(n => 'functions/api/' + n + '.js');
 const MIGRATION = 'migrations/0001_sprint5_init.sql';
+const MIGRATION_GCAL = 'migrations/0002_sprint6_gcal.sql';
 
 check('Sprint 5 artefacts are present (worker routes, migration, wrangler)', () => {
-  const wanted = WORKER_FILES.concat([MIGRATION, 'wrangler.toml']);
-  const missing = wanted.filter(f => !fs.existsSync(path.join(ROOT, f)));
+  const wanted = WORKER_FILES.concat([MIGRATION, MIGRATION_GCAL, 'wrangler.toml']);
+  const missing = wanted.filter(f => !fs.existsSync(at(f)));
   return missing.length ? 'missing: ' + missing.join(', ') : true;
 });
 
@@ -1369,16 +1389,30 @@ check('the six mandated /api routes each export the CRUD handlers', () => {
 /* ---- 19b. D1 schema ---- */
 
 const sql = read(MIGRATION);
+const sqlGcal = read(MIGRATION_GCAL);
 
-/** column names of one CREATE TABLE, in declaration order */
+/**
+ * Live column order of a table, rebuilt the way SQLite itself builds it:
+ * the CREATE TABLE declaration, then every ALTER TABLE ADD COLUMN in migration
+ * order. Sprint 6 appends three columns to `events` that way, so the Worker and
+ * the client have to list them in exactly that trailing position or the drift
+ * check below fires.
+ */
 function sqlColumns(table) {
   const m = sql.match(new RegExp('CREATE TABLE IF NOT EXISTS ' + table + '\\s*\\(([\\s\\S]*?)\\n\\);'));
   if (!m) throw new Error('no CREATE TABLE for ' + table);
-  return m[1].split('\n')
+  const declared = m[1].split('\n')
     .map(l => l.replace(/--.*$/, '').trim())
     .filter(Boolean)
     .map(l => l.split(/\s+/)[0].replace(/[(),]/g, ''))
     .filter(c => c && !/^(PRIMARY|FOREIGN|UNIQUE|CHECK|CONSTRAINT)$/i.test(c));
+
+  const added = [];
+  const re = new RegExp('ALTER TABLE ' + table + '\\s+ADD COLUMN\\s+(\\w+)', 'g');
+  let hit;
+  while ((hit = re.exec(sqlGcal)) !== null) added.push(hit[1]);
+
+  return declared.concat(added);
 }
 
 /** exactly the columns the Sprint 5 mandate names, in the order it names them */
@@ -1904,6 +1938,497 @@ check('PROJECT_PLAN documents the Sprint 5 cloud layer', () => {
     'D1', 'Cloudflare Worker', '/api/sync',
     'מסונכרן לענן', 'ממתין לסנכרון', 'אופליין',
     'last-write-wins', 'outbox'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ========== 20. public/ build directory & config shielding (Sprint 6) ===== */
+
+check('every browser-reachable asset lives under public/', () => {
+  const stray = REQUIRED.filter(f => fs.existsSync(path.join(ROOT, f)));
+  if (stray.length) return 'still served from the repo root: ' + stray.join(', ');
+  const missing = REQUIRED.filter(f => !fs.existsSync(path.join(PUBLIC, f)));
+  return missing.length ? 'missing from public/: ' + missing.join(', ') : true;
+});
+
+check('config and build files are outside the published directory', () => {
+  // the whole point of the refactor: none of these may be fetchable over HTTP
+  const secret = ['PROJECT_PLAN.md', 'healthcheck.js', 'wrangler.toml',
+    'README.md', 'migrations', 'functions', 'tools'];
+
+  const leaked = secret.filter(f => fs.existsSync(path.join(PUBLIC, f)));
+  if (leaked.length) return 'reachable over HTTP: public/' + leaked.join(', public/');
+
+  const orphaned = secret.filter(f => !fs.existsSync(path.join(ROOT, f)));
+  return orphaned.length ? 'vanished from the repo root: ' + orphaned.join(', ') : true;
+});
+
+check('wrangler publishes public/ and nothing above it', () => {
+  const toml = read('wrangler.toml');
+  const m = toml.match(/pages_build_output_dir\s*=\s*"([^"]*)"/);
+  if (!m) return 'no pages_build_output_dir';
+  if (m[1] !== 'public') return 'pages_build_output_dir is "' + m[1] + '", expected "public"';
+  return true;
+});
+
+check('functions/ stays at the project root, where Pages compiles it', () => {
+  // Pages resolves functions/ from the project root, NOT from the output dir —
+  // moving it into public/ would both unmount /api/* and publish its source
+  if (fs.existsSync(path.join(PUBLIC, 'functions'))) return 'functions/ was moved into public/';
+  if (!fs.existsSync(path.join(ROOT, 'functions', 'api', 'sync.js'))) return 'functions/api is gone';
+  return true;
+});
+
+check('the icon generator writes into public/icons, not the old root', () => {
+  const gen = fs.readFileSync(path.join(ROOT, 'tools', 'gen-icons.js'), 'utf8');
+  if (!/path\.join\(__dirname, '\.\.', 'public'\)/.test(gen)) {
+    return 'gen-icons.js still targets the repo root — a regeneration would resurrect /icons';
+  }
+  return true;
+});
+
+/* ============ 21. Google Calendar two-way sync (Sprint 6) ================= */
+
+/* ---- 21a. artefacts ---- */
+
+const GCAL_FILES = ['_gcal', '_token', 'auth', 'sync'].map(n => 'functions/api/gcal/' + n + '.js');
+
+check('Sprint 6 artefacts are present (gcal routes + migration)', () => {
+  const missing = GCAL_FILES.concat([MIGRATION_GCAL])
+    .filter(f => !fs.existsSync(path.join(ROOT, f)));
+  return missing.length ? 'missing: ' + missing.join(', ') : true;
+});
+
+check('every Google Calendar module parses (no syntax errors)', () => {
+  GCAL_FILES.forEach(f => { new vm.Script(stripModule(read(f)), { filename: f }); });
+  return true;
+});
+
+check('/api/gcal/auth and /api/gcal/sync export the mandated handlers', () => {
+  ['auth', 'sync'].forEach(r => {
+    const src = read('functions/api/gcal/' + r + '.js');
+    ['onRequestGet', 'onRequestPost', 'onRequestOptions'].forEach(h => {
+      if (src.indexOf('export const ' + h) === -1) {
+        throw new Error('/api/gcal/' + r + ' has no ' + h + ' handler');
+      }
+    });
+  });
+  return true;
+});
+
+check('no OAuth secret is hard-coded — credentials come from the environment', () => {
+  const creds = ['GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'];
+  GCAL_FILES.forEach(f => {
+    const src = read(f);
+    creds.forEach(c => {
+      // env.GOOGLE_CLIENT_ID is the only legal shape; a literal is a leak
+      const literal = new RegExp(c + "\\s*[:=]\\s*['\"]");
+      if (literal.test(src)) throw new Error(f + ' hard-codes ' + c);
+    });
+  });
+  // and the client half must never even name them
+  if (/GOOGLE_CLIENT_SECRET|refresh_token/.test(js)) {
+    return 'app.js references an OAuth secret — tokens must never reach the browser';
+  }
+  return true;
+});
+
+/* ---- 21b. D1: the Google link columns and the sync state ---- */
+
+check('migration 0002 appends the Google link to events without editing 0001', () => {
+  ['google_event_id', 'etag', 'google_calendar_id'].forEach(c => {
+    if (!new RegExp('ALTER TABLE events\\s+ADD COLUMN\\s+' + c + '\\b').test(sqlGcal)) {
+      throw new Error('events.' + c + ' is never added');
+    }
+    if (sql.indexOf(c) !== -1) throw new Error('0001 was edited to carry ' + c + ' — migrations are append-only');
+  });
+  if (sqlGcal.indexOf('idx_events_google') === -1) return 'no index on events(google_event_id)';
+  return true;
+});
+
+check('migration 0002 declares the OAuth account and per-calendar sync state', () => {
+  if (sqlGcal.indexOf('CREATE TABLE IF NOT EXISTS gcal_accounts') === -1) return 'no gcal_accounts table';
+  if (sqlGcal.indexOf('CREATE TABLE IF NOT EXISTS gcal_sync_state') === -1) return 'no gcal_sync_state table';
+  ['refresh_token', 'access_token', 'expires_at', 'auth_state'].forEach(c => {
+    if (sqlGcal.indexOf(c) === -1) throw new Error('gcal_accounts has no ' + c);
+  });
+  ['calendar_key', 'sync_token', 'last_sync_at'].forEach(c => {
+    if (sqlGcal.indexOf(c) === -1) throw new Error('gcal_sync_state has no ' + c);
+  });
+  return true;
+});
+
+check('a blank client payload can never erase the Google link', () => {
+  // app.js sends '' for google_event_id until a cycle has run; a plain
+  // `col = excluded.col` would orphan the Google event on the very next tap
+  const shared = read('functions/api/_shared.js');
+  ['google_event_id', 'etag', 'google_calendar_id'].forEach(c => {
+    if (shared.indexOf(c) === -1) throw new Error('_shared.js does not declare ' + c);
+  });
+  if (!/COALESCE\(NULLIF\(excluded\./.test(shared)) {
+    return 'the UPSERT overwrites the Google link with whatever the browser sends';
+  }
+  return true;
+});
+
+/* ---- 21c. the mapping module, executed for real ---- */
+
+/** _gcal.js is deliberately import-free, so stripping exports is enough to run it */
+function loadGcal() {
+  const src = stripModule(read('functions/api/gcal/_gcal.js'));
+  const sandbox = { console, Date, Math, JSON, RegExp, URLSearchParams, isNaN };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    src + '\n;globalThis.__gcal = { CALENDAR_KEYS, DEFAULT_TZ, GOOGLE_SCOPE, OWNER_PROP, ' +
+    'calendarKeyFor, categoryFor, calendarIdFor, isAllDay, addDays, minutesOf, shiftStamp, ' +
+    'isNewer, googleUpdated, toGoogleEvent, fromGoogleEvent, differs };',
+    sandbox, { filename: '_gcal.js' });
+  return sandbox.__gcal;
+}
+
+let G = null;
+
+check('the Google mapping module executes without a network or a binding', () => {
+  G = loadGcal();
+  if (!G) return '_gcal.js exported nothing';
+  ['toGoogleEvent', 'fromGoogleEvent', 'calendarKeyFor', 'categoryFor',
+    'calendarIdFor', 'addDays', 'isNewer', 'differs'].forEach(k => {
+      if (typeof G[k] !== 'function') throw new Error('_gcal.' + k + ' is missing');
+    });
+  if (G.CALENDAR_KEYS.join(',') !== 'personal,business') {
+    return 'CALENDAR_KEYS is ' + G.CALENDAR_KEYS.join(',');
+  }
+  return true;
+});
+
+check('calendar mapping: primary ↔ personal, business calendar ↔ business', () => {
+  if (G.calendarKeyFor('business') !== 'business') return 'business category maps elsewhere';
+  if (G.calendarKeyFor('personal') !== 'personal') return 'personal category maps elsewhere';
+  // §0.2 — there is no third category, so anything unknown must land on personal
+  if (G.calendarKeyFor('') !== 'personal' || G.calendarKeyFor('nonsense') !== 'personal') {
+    return 'an unknown category is not forced to personal';
+  }
+  if (G.categoryFor('business') !== 'business' || G.categoryFor('personal') !== 'personal') {
+    return 'the calendar → category inverse is broken';
+  }
+
+  if (G.calendarIdFor('personal', { GOOGLE_BUSINESS_CALENDAR_ID: 'biz@group' }) !== 'primary') {
+    return 'personal must always resolve to the primary calendar';
+  }
+  if (G.calendarIdFor('business', { GOOGLE_BUSINESS_CALENDAR_ID: 'biz@group' }) !== 'biz@group') {
+    return 'business does not resolve to GOOGLE_BUSINESS_CALENDAR_ID';
+  }
+  // a half-configured install must degrade to one calendar, not throw per request
+  if (G.calendarIdFor('business', {}) !== 'primary') return 'unconfigured business calendar does not fall back';
+  return true;
+});
+
+check('mapping math: all-day events cross Google\'s exclusive end correctly', () => {
+  const one = G.toGoogleEvent({ id: 'ev_1', title: 'יום כיף', start_time: '2026-07-27', end_time: '2026-07-27' });
+  if (!one.start.date || one.start.date !== '2026-07-27') return 'all-day start is ' + JSON.stringify(one.start);
+  if (one.end.date !== '2026-07-28') return 'a one-day event must end (exclusively) on the 28th, got ' + one.end.date;
+  if (one.start.dateTime || one.end.dateTime) return 'an all-day event was pushed with a clock';
+
+  const span = G.toGoogleEvent({ id: 'ev_2', start_time: '2026-07-27', end_time: '2026-07-29' });
+  if (span.end.date !== '2026-07-30') return 'multi-day exclusive end is ' + span.end.date;
+
+  // month, year and leap-day rollovers of the +1
+  if (G.toGoogleEvent({ id: 'a', start_time: '2026-07-31', end_time: '2026-07-31' }).end.date !== '2026-08-01') {
+    return 'month rollover of the exclusive end is broken';
+  }
+  if (G.toGoogleEvent({ id: 'b', start_time: '2026-12-31', end_time: '2026-12-31' }).end.date !== '2027-01-01') {
+    return 'year rollover of the exclusive end is broken';
+  }
+  if (G.toGoogleEvent({ id: 'c', start_time: '2024-02-28', end_time: '2024-02-28' }).end.date !== '2024-02-29') {
+    return 'leap day is skipped by the exclusive end';
+  }
+
+  // an end that predates the start is nonsense — it must not produce end < start
+  const bad = G.toGoogleEvent({ id: 'd', start_time: '2026-07-27', end_time: '2026-07-20' });
+  if (bad.end.date !== '2026-07-28') return 'a backwards all-day range was pushed as ' + bad.end.date;
+  return true;
+});
+
+check('mapping math: timed events carry a wall clock and a real duration', () => {
+  const g = G.toGoogleEvent({ id: 'ev_3', title: 'פגישה', start_time: '2026-07-27T10:00', end_time: '2026-07-27T11:30' });
+  if (g.start.dateTime !== '2026-07-27T10:00:00') return 'start is ' + g.start.dateTime;
+  if (g.end.dateTime !== '2026-07-27T11:30:00') return 'end is ' + g.end.dateTime;
+  if (g.start.timeZone !== 'Asia/Jerusalem') return 'timeZone is ' + g.start.timeZone;
+
+  // Google rejects an event whose end is not after its start, so a missing or
+  // inverted end has to become a real one rather than a 400 on every push
+  const open = G.toGoogleEvent({ id: 'ev_4', start_time: '2026-07-27T10:00', end_time: '' });
+  if (open.end.dateTime !== '2026-07-27T11:00:00') return 'an endless event became ' + open.end.dateTime;
+
+  const wrap = G.toGoogleEvent({ id: 'ev_5', start_time: '2026-07-27T23:30', end_time: '' });
+  if (wrap.end.dateTime !== '2026-07-28T00:30:00') return 'midnight wrap became ' + wrap.end.dateTime;
+
+  const inverted = G.toGoogleEvent({ id: 'ev_6', start_time: '2026-07-27T10:00', end_time: '2026-07-27T09:00' });
+  if (inverted.end.dateTime <= inverted.start.dateTime) return 'an inverted range was pushed as-is';
+
+  if (G.toGoogleEvent({ id: 'ev_7', start_time: '' }) !== null) return 'a dateless row was pushed anyway';
+  return true;
+});
+
+check('mapping math: local → Google → local round-trips without drift', () => {
+  const cases = [
+    { start_time: '2026-07-27', end_time: '2026-07-27' },        // one all-day
+    { start_time: '2026-07-27', end_time: '2026-07-29' },        // multi-day
+    { start_time: '2026-12-31', end_time: '2026-12-31' },        // year boundary
+    { start_time: '2026-07-27T10:00', end_time: '2026-07-27T11:30' },
+    { start_time: '2026-07-27T23:30', end_time: '2026-07-28T00:30' }
+  ];
+
+  cases.forEach((c, i) => {
+    const row = Object.assign({
+      id: 'ev_rt' + i, title: 'סבב ' + i, category: 'business',
+      location: 'סטודיו', notes: 'הערה'
+    }, c);
+
+    const g = G.toGoogleEvent(row);
+    // echo back what Google would return for that body
+    const back = G.fromGoogleEvent({
+      id: 'g_' + i, etag: '"abc"', status: 'confirmed',
+      updated: '2026-07-27T09:00:00.000Z',
+      summary: g.summary, description: g.description, location: g.location,
+      start: g.start, end: g.end, extendedProperties: g.extendedProperties
+    }, 'business');
+
+    if (!back) throw new Error('case ' + i + ' failed to map back');
+    if (back.row.start_time !== c.start_time) {
+      throw new Error('case ' + i + ' start drifted: ' + c.start_time + ' → ' + back.row.start_time);
+    }
+    if (back.row.end_time !== c.end_time) {
+      throw new Error('case ' + i + ' end drifted: ' + c.end_time + ' → ' + back.row.end_time);
+    }
+    if (back.row.title !== row.title || back.row.notes !== row.notes || back.row.location !== row.location) {
+      throw new Error('case ' + i + ' lost a text field');
+    }
+    if (back.row.category !== 'business') throw new Error('case ' + i + ' lost its category');
+    if (back.local_id !== row.id) throw new Error('case ' + i + ' lost the local id back-link');
+  });
+  return true;
+});
+
+check('serialisation: a Google event becomes a legal events row', () => {
+  const mapped = G.fromGoogleEvent({
+    id: 'gid_1', etag: '"e1"', status: 'confirmed', updated: '2026-07-27T09:00:00.000Z',
+    summary: 'סקיצה עם דנה', location: 'הסטודיו', description: 'להביא תיק עבודות',
+    start: { dateTime: '2026-07-27T10:00:00+03:00', timeZone: 'Asia/Jerusalem' },
+    end: { dateTime: '2026-07-27T11:00:00+03:00', timeZone: 'Asia/Jerusalem' }
+  }, 'personal');
+
+  if (!mapped) return 'a well-formed Google event mapped to null';
+  // the RFC-3339 offset is sliced off: this app stores wall clock, never UTC (§3)
+  if (mapped.row.start_time !== '2026-07-27T10:00') return 'start_time is ' + mapped.row.start_time;
+  if (mapped.row.end_time !== '2026-07-27T11:00') return 'end_time is ' + mapped.row.end_time;
+  if (mapped.row.category !== 'personal') return 'category is ' + mapped.row.category;
+  if (mapped.row.category_type !== 'event') return 'category_type is ' + mapped.row.category_type;
+  if (mapped.etag !== '"e1"') return 'the ETag was dropped — If-Match would be impossible';
+  if (mapped.updated !== '2026-07-27T09:00:00.000Z') return 'updated is ' + mapped.updated;
+  if (mapped.cancelled) return 'a confirmed event was read as cancelled';
+
+  // every column it emits must be a real events column, or the UPSERT throws
+  const cols = W.SCHEMA.events.columns;
+  const stray = Object.keys(mapped.row).filter(k => cols.indexOf(k) === -1);
+  if (stray.length) return 'maps unknown columns: ' + stray.join(', ');
+
+  // a delete made on the phone arrives as status:cancelled and must tombstone
+  const dead = G.fromGoogleEvent({ id: 'gid_2', status: 'cancelled', updated: '2026-07-27T09:00:00.000Z' }, 'personal');
+  if (!dead || !dead.cancelled) return 'a cancelled Google event is not read as a tombstone';
+
+  if (G.fromGoogleEvent({}, 'personal') !== null) return 'an id-less event was accepted';
+  if (G.fromGoogleEvent(null, 'personal') !== null) return 'null was accepted';
+  return true;
+});
+
+check('conflict resolution: last-write-wins compares ISO instants', () => {
+  if (!G.isNewer('2026-07-27T10:00:00.000Z', '2026-07-27T09:00:00.000Z')) return 'a later instant did not win';
+  if (G.isNewer('2026-07-27T09:00:00.000Z', '2026-07-27T10:00:00.000Z')) return 'an earlier instant won';
+  // equal stamps are not "newer" — the incoming write must not churn the row
+  if (G.isNewer('2026-07-27T09:00:00.000Z', '2026-07-27T09:00:00.000Z')) return 'an identical instant counted as newer';
+  if (!G.isNewer('2026-07-27T09:00:00.000Z', '')) return 'anything must beat an unknown stamp';
+  if (G.isNewer('', '2026-07-27T09:00:00.000Z')) return 'an unknown stamp beat a real one';
+
+  // Google renders `updated` with an offset sometimes — normalise before comparing
+  if (G.googleUpdated({ updated: '2026-07-27T12:00:00+03:00' }) !== '2026-07-27T09:00:00.000Z') {
+    return 'googleUpdated does not normalise to UTC: ' + G.googleUpdated({ updated: '2026-07-27T12:00:00+03:00' });
+  }
+  if (G.googleUpdated({}) !== '') return 'a missing updated is not empty';
+  return true;
+});
+
+check('a no-op push is suppressed, so the two sides cannot ping-pong', () => {
+  const row = {
+    id: 'ev_9', title: 'זהה', location: 'סטודיו', notes: 'הערה',
+    start_time: '2026-07-27T10:00', end_time: '2026-07-27T11:00'
+  };
+  const same = { row: { title: 'זהה', location: 'סטודיו', notes: 'הערה',
+    start_time: '2026-07-27T10:00', end_time: '2026-07-27T11:00' } };
+  if (G.differs(row, same)) return 'an identical pair was reported as changed';
+
+  if (!G.differs(row, { row: Object.assign({}, same.row, { title: 'אחר' }) })) return 'a title change went unnoticed';
+  if (!G.differs(row, { row: Object.assign({}, same.row, { start_time: '2026-07-27T12:00' }) })) {
+    return 'a time change went unnoticed';
+  }
+  return true;
+});
+
+/* ---- 21d. the sync engine's own guarantees, read off the source ---- */
+
+check('the pull is incremental and survives an expired sync token', () => {
+  const src = read('functions/api/gcal/sync.js');
+  if (src.indexOf('syncToken') === -1) return 'the pull never uses a syncToken';
+  if (src.indexOf('nextSyncToken') === -1) return 'the new syncToken is never stored';
+  if (src.indexOf('410') === -1) return 'an expired syncToken (410 GONE) is never handled';
+  if (src.indexOf('nextPageToken') === -1) return 'a paged result set is truncated';
+  if (src.indexOf('showDeleted') === -1) return "deletions made on Google never arrive (showDeleted)";
+  return true;
+});
+
+check('the push covers new, modified and deleted events', () => {
+  const src = read('functions/api/gcal/sync.js');
+  ['events.insert', 'events.patch', 'events.delete'].forEach(op => {
+    if (src.indexOf(op) === -1) throw new Error('no ' + op + ' path');
+  });
+  if (src.indexOf("'If-Match'") === -1) return 'a push never sends the ETag precondition';
+  if (src.indexOf('412') === -1) return 'a failed precondition is not resolved';
+  if (!/skip\.has\(row\.id\)/.test(src)) {
+    return 'a row the pull just wrote is pushed straight back at Google';
+  }
+  return true;
+});
+
+check('google bookkeeping never masquerades as a user edit', () => {
+  const src = read('functions/api/gcal/sync.js');
+  const m = src.match(/async function setGoogleRef[\s\S]*?\n\}/);
+  if (!m) return 'no setGoogleRef()';
+  if (/updated_at/.test(m[0])) {
+    return 'writing the Google link bumps updated_at — the row would re-push every cycle, forever';
+  }
+  return true;
+});
+
+/* ---- 21e. the client half ---- */
+
+check('app.js exports its Google Calendar bridge', () => {
+  const APP = loadApp();
+  const GC = APP && APP.gcal;
+  if (!GC) return 'no APP.gcal export';
+  ['blankGCal', 'normGCal'].forEach(k => {
+    if (typeof GC[k] !== 'function') throw new Error('APP.gcal.' + k + ' is missing');
+  });
+  if (!GC.GCal || typeof GC.GCal.sync !== 'function') return 'no APP.gcal.GCal engine';
+  if (GC.ENDPOINT !== 'api/gcal') return 'endpoint is ' + GC.ENDPOINT + ', expected the relative api/gcal';
+  if (/^https?:|^\//.test(GC.ENDPOINT)) return 'an absolute endpoint breaks a sub-path deploy';
+
+  // an unknown or hostile stored block must normalise, never crash the boot
+  const blank = GC.blankGCal();
+  if (blank.connected !== false || blank.lastSyncAt !== '') return 'blankGCal() is not blank';
+  if (GC.normGCal(null).connected !== false) return 'normGCal(null) did not fall back';
+  if (GC.normGCal({ lastSyncAt: 'לא תאריך' }).lastSyncAt !== '') return 'a junk stamp survived normalisation';
+  if (GC.normGCal({ lastSyncAt: '2026-07-27T09:00:00.000Z', connected: 1 }).lastSyncAt !== '2026-07-27T09:00:00.000Z') {
+    return 'a valid stamp was discarded';
+  }
+  return true;
+});
+
+check('the store persists the Google block across a reload', () => {
+  const APP = loadApp();
+  const blank = APP.Store.blank();
+  if (!blank.gcal || typeof blank.gcal !== 'object') return 'a new store carries no gcal block';
+  if (blank.gcal.lastSyncAt !== '') return 'a new store claims a sync that never happened';
+  // Sprint 5 stores have no gcal key at all — hydration must not throw on them
+  if (!/d\.gcal = normGCal\(d\.gcal\)/.test(js)) return 'a pre-Sprint-6 store is never migrated';
+  return true;
+});
+
+check('the connect CTA is present, in the mandated copy, and wired', () => {
+  if (html.indexOf('id="gcalBtn"') === -1) return 'no connection button';
+  if (html.indexOf('📅') === -1) return 'calendar affordance missing';
+  if (html.indexOf('התחבר ל-Google Calendar') === -1) return 'mandated CTA copy missing';
+  if (html.indexOf('id="gcalSync"') === -1) return 'no last-sync readout';
+  if (!/\$\('#gcalBtn'\)/.test(js)) return 'the button is not bound in app.js';
+  if (js.indexOf('auth?action=start') === -1) return 'the button never starts the OAuth flow';
+  return true;
+});
+
+check('the last-sync readout uses the mandated Hebrew line', () => {
+  if (js.indexOf('סונכרן לאחרונה מול גוגל: ') === -1) return 'mandated readout copy missing';
+  const APP = loadApp();
+  const GC = APP.gcal;
+
+  // drive the real painter's text source rather than trusting the literal
+  APP.Store.load();
+  APP.Store.data.gcal = { configured: true, connected: true, lastSyncAt: '2026-07-27T09:05:00.000Z' };
+  const line = GC.GCal.stampText();
+  if (line.indexOf('סונכרן לאחרונה מול גוגל: ') !== 0) return 'stampText() reads "' + line + '"';
+  if (!/\d{2}:\d{2}$/.test(line)) return 'the readout carries no HH:MM: "' + line + '"';
+
+  // connected but never synced must say so instead of showing a fake time
+  APP.Store.data.gcal.lastSyncAt = '';
+  if (/\d{2}:\d{2}/.test(GC.GCal.stampText())) return 'a never-synced connection shows a time anyway';
+  // disconnected shows nothing at all
+  APP.Store.data.gcal.connected = false;
+  if (GC.GCal.stampText() !== '') return 'a disconnected account still claims a sync';
+  return true;
+});
+
+check('the Google link round-trips through the client serialisers', () => {
+  const APP = loadApp();
+  const SYC = APP.sync;
+  const rec = {
+    type: 'event', id: 'ev_g1', title: 'פגישה', category: 'business',
+    date: '2026-07-27', start: '10:00', end: '11:00',
+    updatedAt: Date.parse('2026-07-27T09:00:00.000Z'),
+    createdAt: Date.parse('2026-07-27T08:00:00.000Z'),
+    googleEventId: 'gid_1', googleEtag: '"e1"', googleCalendarId: 'primary'
+  };
+
+  const row = SYC.toRow('events', rec);
+  if (row.google_event_id !== 'gid_1') return 'google_event_id was dropped on the way out';
+  if (row.etag !== '"e1"') return 'etag was dropped on the way out';
+  if (!SYC.validRow('events', row)) return 'the row no longer validates against SYNC_SCHEMA';
+
+  const back = SYC.fromRow('events', row);
+  if (back.googleEventId !== 'gid_1' || back.googleEtag !== '"e1"') return 'the link was lost coming back';
+  if (back.googleCalendarId !== 'primary') return 'the calendar id was lost coming back';
+
+  // a record this device created has no link yet, and that must still be legal
+  const fresh = SYC.toRow('events', Object.assign({}, rec, {
+    googleEventId: undefined, googleEtag: undefined, googleCalendarId: undefined
+  }));
+  if (fresh.google_event_id !== '') return 'an unlinked event emits ' + JSON.stringify(fresh.google_event_id);
+  if (!SYC.validRow('events', fresh)) return 'an unlinked event no longer validates';
+  return true;
+});
+
+check('the Worker still accepts a client row now that events grew', () => {
+  const row = {
+    id: 'ev_g2', title: 'פגישה', category: 'business',
+    start_time: '2026-07-27T10:00', end_time: '2026-07-27T11:00',
+    location: '', client_id: '', category_type: 'event',
+    updated_at: '2026-07-27T09:00:00.000Z', owner_id: 'ben-perez', notes: '',
+    created_at: '2026-07-27T08:00:00.000Z', deleted_at: null,
+    google_event_id: '', etag: '', google_calendar_id: ''
+  };
+  const out = W.sanitize('events', row);
+  if (!out.ok) return 'sanitize refused a legal Sprint 6 row: ' + out.error;
+  ['google_event_id', 'etag', 'google_calendar_id'].forEach(c => {
+    if (!(c in out.row)) throw new Error('sanitize dropped ' + c);
+  });
+  return true;
+});
+
+/* ---- 21f. the specification records the sprint ---- */
+
+check('PROJECT_PLAN documents the Sprint 6 Google Calendar layer', () => {
+  const required = [
+    'Google Calendar', '/api/gcal/auth', '/api/gcal/sync',
+    'syncToken', 'google_event_id', 'etag',
+    'התחבר ל-Google Calendar', 'סונכרן לאחרונה מול גוגל',
+    'public/', 'pages_build_output_dir'
   ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;

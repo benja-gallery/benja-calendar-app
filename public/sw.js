@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v5';   // Sprint 5 — D1 schema, Worker sync API, offline queue
+var CACHE_VERSION = 'v6';   // Sprint 6 — Google Calendar two-way sync, public/ build dir
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */

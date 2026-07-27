@@ -1,13 +1,30 @@
 # ===========================================================================
-# wrangler.toml — Cloudflare Pages + D1 (Sprint 5)
+# wrangler.toml — Cloudflare Pages + D1 (Sprint 6)
 #
-# The app ships flat at the repo root (PROJECT_PLAN §11), so the whole
-# directory is the Pages output and functions/api/* becomes /api/*.
+# Sprint 6 split the repo in two (PROJECT_PLAN §11):
+#   public/     → the only directory Pages uploads, i.e. the only directory a
+#                 browser can reach. index.html, styles.css, app.js,
+#                 manifest.json, sw.js and icons/ live here and nowhere else.
+#   repo root   → PROJECT_PLAN.md, healthcheck.js, wrangler.toml, migrations/,
+#                 tools/ — build and config artefacts. They are outside the
+#                 build output, so Pages never uploads them and no URL can
+#                 fetch them.
+#
+# functions/ deliberately stays at the repo root: Pages compiles it from the
+# project root, not from the output directory, and mounts it at /api/*.
 #
 # First-time setup
 #   wrangler d1 create benja-calendar          # copy the id below
 #   wrangler d1 migrations apply benja-calendar --remote
-#   wrangler pages deploy .
+#   wrangler pages deploy
+#
+# Google Calendar (Sprint 6) needs four secrets on the Pages project:
+#   wrangler pages secret put GOOGLE_CLIENT_ID
+#   wrangler pages secret put GOOGLE_CLIENT_SECRET
+#   wrangler pages secret put GOOGLE_REDIRECT_URI          # …/api/gcal/auth
+#   wrangler pages secret put GOOGLE_BUSINESS_CALENDAR_ID  # the business calendar
+# Until they are set, /api/gcal/* answers 503 gcal_not_configured and the app
+# keeps working exactly as it did in Sprint 5 (§7.4e).
 #
 # Until database_id is filled in, /api/* answers 500 no_binding and the client
 # stays on its local store — the app is fully usable either way (§8).
@@ -15,7 +32,7 @@
 
 name = "benja-calendar-app"
 compatibility_date = "2026-07-27"
-pages_build_output_dir = "."
+pages_build_output_dir = "public"
 
 [[d1_databases]]
 binding = "DB"

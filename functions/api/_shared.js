@@ -39,7 +39,9 @@ export const SCHEMA = {
   events: {
     columns: ['id', 'title', 'category', 'start_time', 'end_time', 'location',
       'client_id', 'category_type', 'updated_at', 'owner_id', 'notes',
-      'created_at', 'deleted_at'],
+      'created_at', 'deleted_at',
+      // Sprint 6 — appended by migration 0002, so they trail every Sprint-5 column
+      'google_event_id', 'etag', 'google_calendar_id'],
     ints: []
   },
   tasks: {
@@ -178,15 +180,32 @@ export function sanitize(table, input) {
 /* ------------------------------------------------------------ statements --- */
 
 /**
+ * Columns a blank payload must never erase (Sprint 6).
+ *
+ * The Google link (google_event_id / etag / google_calendar_id) is learned by
+ * /api/gcal/sync, not by the browser. A client that has never synced with
+ * Google sends '' for all three, and a plain `col = excluded.col` would wipe
+ * the link on the very next tap — orphaning the Google event and re-creating
+ * it as a duplicate on the next cycle. So for these columns an empty incoming
+ * value means "I have nothing to say", not "set this to nothing".
+ */
+const PRESERVE_IF_BLANK = {
+  events: ['google_event_id', 'etag', 'google_calendar_id']
+};
+
+/**
  * Parameterised UPSERT with a last-write-wins guard: an older payload updates
  * nothing, so replaying a stale outbox entry can never overwrite a newer edit.
  */
 function upsertSQL(table) {
   const cols = SCHEMA[table].columns;
+  const keep = PRESERVE_IF_BLANK[table] || [];
   const holes = cols.map(() => '?').join(', ');
   const sets = cols
     .filter(c => c !== 'id' && c !== 'created_at')
-    .map(c => c + ' = excluded.' + c)
+    .map(c => keep.indexOf(c) === -1
+      ? c + ' = excluded.' + c
+      : c + ' = COALESCE(NULLIF(excluded.' + c + ", ''), " + table + '.' + c + ')')
     .join(', ');
 
   return 'INSERT INTO ' + table + ' (' + cols.join(', ') + ') VALUES (' + holes + ') ' +

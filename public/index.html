@@ -70,8 +70,21 @@
           <span class="push-ico" id="pushIco" aria-hidden="true">🔔</span>
           <span class="push-label" id="pushLabel">הפעל התראות פוש</span>
         </button>
+        <!-- Google Calendar two-way sync — connect, then tap to run a cycle -->
+        <button class="gcal-btn is-off" id="gcalBtn" type="button"
+                data-gcalstate="off" aria-pressed="false" title="התחבר ל-Google Calendar">
+          <span class="gcal-ico" id="gcalIco" aria-hidden="true">📅</span>
+          <span class="gcal-label" id="gcalLabel">התחבר ל-Google Calendar</span>
+        </button>
         <span class="avatar avatar-sm topbar-avatar" aria-hidden="true">ב</span>
       </div>
+
+      <!-- "סונכרן לאחרונה מול גוגל: HH:MM" — cached locally, so it still reads
+           correctly with no network -->
+      <p class="gcal-sync" id="gcalSync" aria-live="polite" hidden>
+        <span id="gcalSyncText"></span>
+        <button class="gcal-unlink" id="gcalUnlink" type="button" hidden>ניתוק</button>
+      </p>
 
       <!-- Global category filter -->
       <div class="segmented" role="tablist" aria-label="סינון לפי קטגוריה">

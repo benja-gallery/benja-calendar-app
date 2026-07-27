@@ -288,6 +288,12 @@ CREATE TABLE sync_ops (
 | `PATCH`| `/api/events/:id?scope=` | Update; `scope` = `single`\|`following`\|`all` |
 | `DELETE`| `/api/events/:id?scope=` | Delete with same scope semantics |
 | `POST` | `/api/sync` | Batch outbox replay, returns server deltas |
+| `GET`  | `/api/gcal/auth` | Google connection status (booleans + last sync) — Sprint 6 |
+| `GET`  | `/api/gcal/auth?action=start` | 302 → Google consent screen |
+| `GET`  | `/api/gcal/auth?code=&state=` | Google's callback; exchanges the code, 302 back to the app |
+| `POST` | `/api/gcal/auth` | `{ action: 'disconnect' }` — forgets every stored token |
+| `GET`  | `/api/gcal/sync` | Per-calendar sync state, runs nothing |
+| `POST` | `/api/gcal/sync` | Runs one two-way Google Calendar cycle (§7.4e) |
 | `POST` | `/api/ics/import` | Parse and ingest `.ics` |
 | `GET`  | `/api/ics/export?calendar_id=` | Emit `.ics` |
 
@@ -596,6 +602,131 @@ the column list across all three artefacts (SQL ↔ Worker ↔ client), round-tr
 pillar through `toRow`/`fromRow`, drives the outbox through edit / re-edit / delete /
 apply / reject cycles, and asserts the last-write-wins and tombstone outcomes directly.
 
+### 7.4e Google Calendar two-way sync & the `public/` build directory (shipped — Sprint 6)
+
+**Why the repository split**
+
+Until Sprint 6 the app shipped flat: `pages_build_output_dir = "."` meant Cloudflare Pages
+uploaded the *entire* repository, so `PROJECT_PLAN.md`, `healthcheck.js`, `wrangler.toml`
+and every migration were fetchable over HTTP by anyone who guessed the filename. Sprint 6
+splits the tree in two:
+
+```
+public/       ← the only directory Pages uploads: index.html, styles.css, app.js,
+                manifest.json, sw.js, icons/. Nothing else is reachable over HTTP.
+repo root     ← PROJECT_PLAN.md, README.md, healthcheck.js, wrangler.toml,
+                migrations/, tools/. Outside the build output, therefore never served.
+functions/    ← stays at the ROOT on purpose: Pages compiles Functions from the project
+                root, not from the output directory, and mounts them at /api/*. Moving
+                it into public/ would both unmount the API and publish its source.
+```
+
+`pages_build_output_dir = "public"` is the single line that enforces it, and
+`healthcheck.js` §20 asserts both halves — every published asset is in `public/`, and no
+config file has leaked into it. `tools/gen-icons.js` writes to `public/icons/` so a
+regeneration cannot resurrect the old root copy.
+
+> **Consequence for GitHub Pages:** the branch-root deploy documented in the README no
+> longer serves the app, because the shell now sits one directory down. Cloudflare Pages
+> is the deployment target from Sprint 6 onward. GitHub Pages could never satisfy the
+> shielding requirement anyway — it publishes every file in the branch, `PROJECT_PLAN.md`
+> included.
+
+**The mapping**
+
+| Google calendar | Local category | Resolved id |
+|---|---|---|
+| Primary | `personal` | `primary` |
+| Business | `business` | `GOOGLE_BUSINESS_CALENDAR_ID`, falling back to `primary` |
+
+`category` is the mapping key, which keeps §0.2 intact: there is no third calendar because
+there is no third category, and an unknown category is forced to `personal` exactly as it is
+everywhere else.
+
+**Schema (migration `0002_sprint6_gcal.sql`, append-only)**
+
+- `events.google_event_id` — Google's event id; `''` means "never pushed".
+- `events.etag` — Google's ETag, sent back as the `If-Match` precondition on every push.
+- `events.google_calendar_id` — which calendar the event currently lives on, so flipping an
+  event's category *moves* it (delete there, insert here) instead of forking it into two.
+- `gcal_accounts` — the single OAuth installation: access token, refresh token, expiry, and
+  the CSRF `auth_state` nonce, cleared the moment it is redeemed.
+- `gcal_sync_state` — one row per calendar holding Google's `sync_token` and `last_sync_at`.
+
+Because the browser knows nothing about the Google link, it echoes `''` for all three
+columns. The Worker's UPSERT therefore treats an empty incoming value for them as *"I have
+nothing to say"* rather than *"set this to nothing"* — without that guard the very next tap
+on a phone would orphan the Google event and the next cycle would duplicate it.
+
+**API surface**
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/api/gcal/auth` | GET | `{ configured, connected, lastSyncAt, calendars }` |
+| `/api/gcal/auth?action=start` | GET | 302 → Google consent (`access_type=offline`, `prompt=consent`) |
+| `/api/gcal/auth?code=…&state=…` | GET | Google's callback → token exchange → 302 back to `/?gcal=connected` |
+| `/api/gcal/auth` | POST | `{ action: 'disconnect' }` — forgets every stored token |
+| `/api/gcal/sync` | GET | per-calendar state without running anything |
+| `/api/gcal/sync` | POST | runs one full two-way cycle |
+
+No token ever reaches the browser. The client learns three booleans and a timestamp; the
+refresh token lives only in D1 and is read only inside the Worker.
+
+**One cycle, per calendar, in this order and never any other**
+
+1. **Pull** — incremental via Google's `syncToken`, `showDeleted=true` so a deletion made on
+   a phone arrives as `status: 'cancelled'` and becomes a local tombstone (§8.4). The first
+   run, or a `410 GONE` (how Google retires a stale token), falls back to a bounded 180-day
+   window rather than the whole history. Paging is capped.
+2. **Push** — every local event that is new, edited or deleted since the last cycle, *minus*
+   anything the pull just wrote, so a row can never be pushed straight back at the calendar
+   it arrived from. New rows `insert`, known rows `patch` with `If-Match`, tombstones
+   `delete`. A `404`/`410` on patch recreates the event; a `412` is a real conflict.
+3. **Stamp** — store the new `syncToken` and `last_sync_at`.
+
+**Conflict resolution** is last-write-wins on ISO-8601 instants — the same rule `/api/sync`
+already applies between devices (§8.3) — comparing Google's `updated` against the row's
+`updated_at` as strings, because ISO sorts lexically. On a `412` the event is re-read and
+LWW arbitrates: Google newer ⇒ Google's copy lands locally; local newer ⇒ the patch is
+retried without the precondition.
+
+Writing `google_event_id` / `etag` / `google_calendar_id` back onto a row deliberately does
+**not** bump `updated_at`. The bookkeeping is not a user edit, and bumping it would re-select
+the row on every subsequent cycle, forever.
+
+**Time model** — a local event stores wall-clock (§3): `YYYY-MM-DD` for all-day,
+`YYYY-MM-DDTHH:MM` for timed. Google's all-day `end.date` is **exclusive**, so a one-day
+event on the 27th is `start 2026-07-27 / end 2026-07-28` there and
+`start_time = end_time = '2026-07-27'` here. Every conversion crosses that ±1 day boundary,
+and getting it wrong shifts every all-day event by a day — which is exactly what
+`healthcheck.js` §21 pins, month, year and leap-day rollovers included.
+
+**UI** — a third pill in the top bar, matching the sync badge and the push toggle:
+
+| State | Button | Meaning |
+|---|---|---|
+| `off` | 📅 **התחבר ל-Google Calendar** | tapping starts the consent flow |
+| `on` | 📅 **מחובר ל-Google Calendar** | tapping runs a cycle now |
+| `busy` | 📅 **מסנכרן מול Google…** | a cycle is in flight |
+| `na` | 📅 **Google Calendar לא מוגדר** | the deployment carries no credentials |
+
+Under it sits the readout **סונכרן לאחרונה מול גוגל: HH:MM**, cached in the local store so it
+still reads correctly with no network, plus a **ניתוק** affordance while connected. A cycle
+runs on connect, on a five-minute heartbeat while the tab is visible, and on demand — then
+calls `Sync.flush()`, because it is `/api/sync` that carries the changed rows home.
+
+**Deployment** — four secrets on the Pages project: `GOOGLE_CLIENT_ID`,
+`GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI` (pointing at `…/api/gcal/auth`) and
+`GOOGLE_BUSINESS_CALENDAR_ID`. Until they are set, `/api/gcal/*` answers
+`503 gcal_not_configured`, the button renders `na`, and every Sprint-5 capability is
+untouched. `sw.js` is bumped to `v6`.
+
+**Verification** — `healthcheck.js` §20–§21 execute the mapping module for real: calendar
+mapping both directions, the exclusive-end math with its rollovers, a local → Google → local
+round-trip with no drift, wall-clock slicing of RFC-3339 offsets, LWW ordering including the
+equal-instant case, no-op suppression, the Google link round-tripping through the client
+serialisers, and that no OAuth secret appears in any source file.
+
 ### 7.4 General layout
 
 **Layout direction:** RTL by default (`dir="rtl"`), with LTR fallback driven by locale.
@@ -722,31 +853,44 @@ the change is fixed or reverted — the repository is never left broken.
 
 ## 11. Repository Conventions
 
+Since Sprint 6 the tree has exactly one published directory. Everything a browser can
+fetch is in `public/`; everything else is build and config territory and is never
+uploaded (§7.4e).
+
 ```
 C:\calendar-app\
-├── PROJECT_PLAN.md      ← this file
-├── index.html           ← app shell (V1 ships flat, at the repo root)
-├── styles.css
-├── app.js
-├── manifest.json        ← PWA install descriptor
-├── sw.js                ← service worker: offline cache + push
-├── wrangler.toml        ← Pages + D1 binding (Sprint 5)
-├── icons/               ← generated PNGs (do not hand-edit)
-├── tools/gen-icons.js   ← regenerates icons/ from the brand tokens
-├── healthcheck.js       ← repo-local verification suite (§10)
-├── public/              ← static client assets (Pages)
-├── src/
-│   ├── ui/              ← views and components
-│   ├── core/            ← recurrence, timezone, ICS  (shared client+worker)
-│   └── store/           ← IndexedDB + outbox
-├── functions/api/       ← Worker routes
-├── migrations/          ← D1 SQL migrations, numbered
-└── test/                ← unit + integration suites
+├── public/                      ← THE PUBLISHED SURFACE (pages_build_output_dir)
+│   ├── index.html               ← app shell
+│   ├── styles.css
+│   ├── app.js
+│   ├── manifest.json            ← PWA install descriptor
+│   ├── sw.js                    ← service worker: offline cache + push
+│   └── icons/                   ← generated PNGs (do not hand-edit)
+├── functions/api/               ← Worker routes — ROOT on purpose: Pages compiles
+│   ├── sync.js  events.js  …      Functions from the project root and mounts them
+│   └── gcal/                      at /api/*. Moving this into public/ would both
+│       ├── _gcal.js               unmount the API and publish its source.
+│       ├── _token.js
+│       ├── auth.js
+│       └── sync.js
+├── migrations/                  ← D1 SQL migrations, numbered, append-only
+├── tools/gen-icons.js           ← regenerates public/icons/ from the brand tokens
+├── PROJECT_PLAN.md              ← this file
+├── README.md
+├── healthcheck.js               ← repo-local verification suite (§10)
+└── wrangler.toml                ← Pages output dir + D1 binding
 ```
 
+- **Nothing outside `public/` may be reachable over HTTP.** `healthcheck.js` §20 fails the
+  build if a config file leaks into `public/`, or if a published asset drifts back out.
 - Commit messages: single line, imperative mood (`add week-view drag-create`).
-- Migrations are append-only and never edited after being applied.
-- `src/core/` has no DOM and no Worker-runtime dependencies — it must run in both.
+- Migrations are append-only and never edited after being applied. Sprint 6's three new
+  `events` columns therefore arrive as `ALTER TABLE ADD COLUMN` and trail every Sprint-5
+  column — the Worker's `SCHEMA` and the client's `SYNC_SCHEMA` list them in exactly that
+  position, and the healthcheck rebuilds the order from the migrations to prove it.
+- A module under `functions/api/` prefixed with `_` is shared code, never a route.
+- `_gcal.js` is pure by contract — no `fetch`, no D1, no `env` — so the verification suite
+  can execute the mapping math directly instead of grepping it.
 
 ---
 

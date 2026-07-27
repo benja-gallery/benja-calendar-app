@@ -122,7 +122,11 @@
   var SYNC_SCHEMA = {
     events: ['id', 'title', 'category', 'start_time', 'end_time', 'location',
       'client_id', 'category_type', 'updated_at', 'owner_id', 'notes',
-      'created_at', 'deleted_at'],
+      'created_at', 'deleted_at',
+      // Sprint 6 — the Google Calendar link, appended by migration 0002. The
+      // browser only ever echoes these back; /api/gcal/sync is what fills them,
+      // and the Worker refuses to let a blank echo erase them.
+      'google_event_id', 'etag', 'google_calendar_id'],
     tasks: ['id', 'title', 'category', 'status', 'priority', 'due_date',
       'next_action', 'subtasks_json', 'client_id', 'updated_at', 'owner_id',
       'due_time', 'notes', 'created_at', 'deleted_at'],
@@ -678,6 +682,7 @@
         },
         events: [], tasks: [], lists: [], notes: [], clients: [],
         sync: blankSync(),
+        gcal: blankGCal(),
         seeded: false
       };
     },
@@ -696,6 +701,7 @@
             });
             if (parsed.prefs && typeof parsed.prefs === 'object') d.prefs = parsed.prefs;
             if (parsed.sync && typeof parsed.sync === 'object') d.sync = parsed.sync;
+            if (parsed.gcal && typeof parsed.gcal === 'object') d.gcal = parsed.gcal;
             d.seeded = !!parsed.seeded;
           }
         } catch (e) { /* corrupt payload — fall back to a blank store, never crash */ }
@@ -739,6 +745,10 @@
       // Sprint 5: the cloud block is absent in every pre-D1 store, and its
       // outbox is replayed from disk — a queued mutation survives a reload
       d.sync = normSync(d.sync);
+
+      // Sprint 6: the Google block is absent in every pre-gcal store, and the
+      // cached "last synced" stamp is what the header renders while offline
+      d.gcal = normGCal(d.gcal);
 
       this.data = d;
       if (!d.seeded) { this.seed(); }
@@ -945,7 +955,10 @@
         location: str(r.location), client_id: str(r.clientId),
         category_type: str(r.type) || 'event',
         updated_at: toISOStamp(r.updatedAt), owner_id: str(r.ownerId) || OWNER.id,
-        notes: str(r.notes), created_at: toISOStamp(r.createdAt), deleted_at: null
+        notes: str(r.notes), created_at: toISOStamp(r.createdAt), deleted_at: null,
+        // echoed back untouched — '' simply means "this device knows no link yet"
+        google_event_id: str(r.googleEventId), etag: str(r.googleEtag),
+        google_calendar_id: str(r.googleCalendarId)
       };
     },
     tasks: function (r) {
@@ -999,7 +1012,9 @@
         title: str(row.title), category: normCat(row.category),
         date: s.date, start: s.time, end: e.time,
         location: str(row.location), notes: str(row.notes),
-        clientId: str(row.client_id)
+        clientId: str(row.client_id),
+        googleEventId: str(row.google_event_id), googleEtag: str(row.etag),
+        googleCalendarId: str(row.google_calendar_id)
       };
     },
     tasks: function (row) {
@@ -1393,6 +1408,260 @@
     var d = new Date(ms);
     return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
   }
+
+  /* ==========================================================================
+     Google Calendar two-way sync (Sprint 6) — the client half
+
+     The browser deliberately does almost nothing here. The whole OAuth
+     handshake, the syncToken bookkeeping and every call to Google live in the
+     Worker (functions/api/gcal/*), because a refresh token must never reach a
+     page. What the client owns is exactly three things:
+
+       1. a button that starts the consent flow, and once connected runs a cycle
+       2. the "סונכרן לאחרונה מול גוגל: HH:MM" readout, cached locally so it
+          survives a reload and still reads correctly offline
+       3. a Sync.flush() after every cycle — the Google sync writes D1, and it
+          is /api/sync that carries those rows down into the local store.
+
+     Nothing here is on the path between a tap and a repaint: a dead or
+     unconfigured endpoint leaves the app exactly as capable as it was in
+     Sprint 5 (§7.4e).
+     ========================================================================== */
+
+  var GCAL_ENDPOINT = 'api/gcal';        // relative, exactly like SYNC_ENDPOINT
+  var GCAL_STATES = ['on', 'off', 'busy', 'na'];
+  var GCAL_LABEL = {
+    off:  { ico: '📅', text: 'התחבר ל-Google Calendar' },
+    on:   { ico: '📅', text: 'מחובר ל-Google Calendar' },
+    busy: { ico: '📅', text: 'מסנכרן מול Google…' },
+    na:   { ico: '📅', text: 'Google Calendar לא מוגדר' }
+  };
+  var GCAL_SYNC_PREFIX = 'סונכרן לאחרונה מול גוגל: ';
+  var GCAL_NEVER = 'טרם סונכרן מול Google Calendar';
+  var GCAL_MS = 300000;                  // background cycle — Google quota is not free
+
+  function blankGCal() {
+    return { configured: false, connected: false, lastSyncAt: '' };
+  }
+
+  function normGCal(raw) {
+    var g = blankGCal();
+    if (!raw || typeof raw !== 'object') return g;
+    g.configured = !!raw.configured;
+    g.connected = !!raw.connected;
+    if (typeof raw.lastSyncAt === 'string' && ISO_RE.test(raw.lastSyncAt)) {
+      g.lastSyncAt = raw.lastSyncAt;
+    }
+    return g;
+  }
+
+  var GCal = {
+    busy: false,
+    lastError: '',
+    timer: null,
+
+    cfg: function () {
+      var d = Store.data;
+      if (!d) return null;
+      if (!d.gcal || typeof d.gcal !== 'object') d.gcal = blankGCal();
+      return d.gcal;
+    },
+
+    /** same rule as the cloud sync: file:// has no origin to call */
+    enabled: function () {
+      var p = (window.location && window.location.protocol) || '';
+      if (p !== 'http:' && p !== 'https:') return false;
+      return typeof window.fetch === 'function';
+    },
+
+    /** 'on' מחובר · 'off' מנותק · 'busy' מסנכרן · 'na' לא הוגדר בשרת */
+    state: function () {
+      if (GCal.busy) return 'busy';
+      var c = GCal.cfg();
+      if (!c || !GCal.enabled()) return 'off';
+      if (!c.configured) return 'na';
+      return c.connected ? 'on' : 'off';
+    },
+
+    /** shared envelope unwrap — every /api/gcal route answers { ok, data } */
+    call: function (path, init) {
+      return window.fetch(GCAL_ENDPOINT + path, init)
+        .then(function (res) { return res.json(); })
+        .then(function (out) {
+          if (!out || out.ok !== true || !out.data) {
+            throw new Error((out && out.error && out.error.message) || 'bad envelope');
+          }
+          return out.data;
+        });
+    },
+
+    /** read the connection state; a failure is silent and simply reads as 'off' */
+    refresh: function () {
+      if (!GCal.enabled()) { GCal.paint(); return null; }
+
+      return GCal.call('/auth')
+        .then(function (data) {
+          var c = GCal.cfg();
+          if (!c) return false;
+          c.configured = !!data.configured;
+          c.connected = !!data.connected;
+          if (typeof data.lastSyncAt === 'string' && ISO_RE.test(data.lastSyncAt)) {
+            c.lastSyncAt = data.lastSyncAt;
+          }
+          GCal.lastError = '';
+          Store.save();
+          return true;
+        })
+        ['catch'](function (e) {
+          GCal.lastError = (e && e.message) ? e.message : 'gcal status failed';
+          return false;
+        })
+        .then(function (res) { GCal.paint(); return res; });
+    },
+
+    /** leaves the app for Google's consent screen and comes back to /?gcal=connected */
+    connect: function () {
+      if (!GCal.enabled()) { toast('חיבור ל-Google דורש חיבור לאינטרנט'); return; }
+      window.location.href = GCAL_ENDPOINT + '/auth?action=start';
+    },
+
+    disconnect: function () {
+      if (!GCal.enabled()) return null;
+
+      return GCal.call('/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'disconnect' })
+      })
+        .then(function () {
+          var c = GCal.cfg();
+          if (c) { c.connected = false; c.lastSyncAt = ''; }
+          Store.save();
+          toast('החיבור ל-Google Calendar נותק');
+          return true;
+        })
+        ['catch'](function (e) {
+          GCal.lastError = (e && e.message) ? e.message : 'disconnect failed';
+          return false;
+        })
+        .then(function (res) { GCal.paint(); return res; });
+    },
+
+    /**
+     * One two-way cycle. The Worker does the pulling and pushing against
+     * Google; the Sync.flush() afterwards is what actually brings the changed
+     * rows down into localStorage so the calendar repaints with them.
+     */
+    sync: function () {
+      var c = GCal.cfg();
+      if (!c || GCal.busy || !GCal.enabled() || !c.connected) { GCal.paint(); return null; }
+
+      GCal.busy = true;
+      GCal.paint();
+
+      return GCal.call('/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({})
+      })
+        .then(function (data) {
+          if (typeof data.lastSyncAt === 'string' && ISO_RE.test(data.lastSyncAt)) {
+            c.lastSyncAt = data.lastSyncAt;
+          }
+          GCal.lastError = (data.errors && data.errors.length)
+            ? String(data.errors[0].error || '') : '';
+          Store.save();
+          return data;
+        })
+        ['catch'](function (e) {
+          GCal.lastError = (e && e.message) ? e.message : 'gcal sync failed';
+          return null;
+        })
+        .then(function (data) {
+          GCal.busy = false;
+          GCal.paint();
+          // the cycle wrote D1 — /api/sync is the road those rows travel home
+          if (data) { Sync.flush(); }
+          return data;
+        });
+    },
+
+    /** the exact readout the mandate names: "סונכרן לאחרונה מול גוגל: HH:MM" */
+    stampText: function () {
+      var c = GCal.cfg();
+      if (!c || !c.connected) return '';
+      return c.lastSyncAt ? GCAL_SYNC_PREFIX + hhmm(c.lastSyncAt) : GCAL_NEVER;
+    },
+
+    paint: function () {
+      var btn = $('#gcalBtn');
+      if (!btn) return;
+
+      var st = GCal.state();
+      var meta = GCAL_LABEL[st];
+      var c = GCal.cfg();
+
+      btn.className = 'gcal-btn is-' + st;
+      btn.setAttribute('data-gcalstate', st);
+      btn.setAttribute('aria-pressed', st === 'on' ? 'true' : 'false');
+      btn.disabled = st === 'na';
+      $('#gcalIco').textContent = meta.ico;
+      $('#gcalLabel').textContent = meta.text;
+
+      var detail = meta.text;
+      if (GCal.lastError && st !== 'na') detail += ' · ' + GCal.lastError;
+      btn.title = detail;
+      btn.setAttribute('aria-label', detail);
+
+      var line = $('#gcalSync');
+      var text = $('#gcalSyncText');
+      var unlink = $('#gcalUnlink');
+      if (!line || !text) return;
+
+      var stamp = GCal.stampText();
+      if (st === 'na') stamp = 'חיבור Google Calendar לא הוגדר בשרת';
+      text.textContent = stamp;
+      line.hidden = !stamp;
+      if (unlink) unlink.hidden = !(c && c.connected);
+    },
+
+    init: function () {
+      var btn = $('#gcalBtn');
+      if (btn) {
+        btn.addEventListener('click', function () {
+          var c = GCal.cfg();
+          if (c && c.connected) GCal.sync();
+          else GCal.connect();
+        });
+      }
+
+      var unlink = $('#gcalUnlink');
+      if (unlink) unlink.addEventListener('click', function () { GCal.disconnect(); });
+
+      GCal.paint();
+      if (!GCal.enabled()) return;
+
+      // Google bounced the user back here after consent — say so, sync, and
+      // scrub the marker so a reload does not replay the toast
+      var search = (window.location && window.location.search) || '';
+      var justConnected = search.indexOf('gcal=connected') !== -1;
+      if (justConnected && window.history && window.history.replaceState) {
+        window.history.replaceState({}, '', window.location.pathname);
+      }
+
+      GCal.refresh().then(function () {
+        if (justConnected) toast('Google Calendar מחובר');
+        var c = GCal.cfg();
+        if (c && c.connected) GCal.sync();
+      });
+
+      if (GCal.timer) clearInterval(GCal.timer);
+      GCal.timer = setInterval(function () {
+        var c = GCal.cfg();
+        if (c && c.connected && !document.hidden) GCal.sync();
+      }, GCAL_MS);
+    }
+  };
 
   /* ------------------------------------------------------------------ state */
 
@@ -3253,6 +3522,7 @@
     registerServiceWorker();
     Notify.init();
     Sync.init();
+    GCal.init();
   }
 
   if (document.readyState === 'loading') {
@@ -3285,6 +3555,18 @@
       splitStamp: splitStamp,
       validRow: validRow,
       validOp: validOp
+    },
+
+    // Google Calendar bridge (Sprint 6) — the client half is pure enough for
+    // healthcheck.js to drive without a network, a DOM or an OAuth token
+    gcal: {
+      ENDPOINT: GCAL_ENDPOINT,
+      STATES: GCAL_STATES,
+      LABEL: GCAL_LABEL,
+      SYNC_PREFIX: GCAL_SYNC_PREFIX,
+      GCal: GCal,
+      blankGCal: blankGCal,
+      normGCal: normGCal
     },
 
     // pure tasks / lists / notes engine — the healthcheck drives it directly
