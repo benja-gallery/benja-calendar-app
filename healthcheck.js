@@ -597,13 +597,17 @@ check('selected calendar view persists to localStorage', () => {
 
 /* ---- 15b. date math, executed for real ---- */
 
-/** run app.js in a bare sandbox — init() never fires, only window.APP is set */
-function loadApp() {
+/**
+ * Run app.js in a bare sandbox — init() never fires, only window.APP is set.
+ * `over.navigator` swaps in a device stub, which is how the Sprint 7 haptics
+ * checks exercise a phone with a vibration motor and one without.
+ */
+function loadApp(over) {
   const noop = () => {};
   const sandbox = {
     console, Math, JSON, Date, Promise, RegExp, Error, isNaN, parseInt, parseFloat,
     setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop,
-    navigator: {},
+    navigator: (over && over.navigator) || {},
     location: { protocol: 'file:' },
     document: {
       readyState: 'loading',                 // keeps init() parked on DOMContentLoaded
@@ -820,7 +824,11 @@ check('every Sprint 3 write path goes through localStorage', () => {
     if (branch.indexOf('Store.save()') === -1 && branch.indexOf('Store.add(') === -1) {
       throw new Error(k + ' mutates memory without persisting');
     }
-    if (branch.indexOf('render()') === -1) throw new Error(k + ' does not repaint');
+    // Sprint 7 replaced the blanket render() on these paths with a targeted
+    // patch; either one is a repaint, a branch with neither is a stale view
+    if (branch.indexOf('render()') === -1 && branch.indexOf('Patch.apply(') === -1) {
+      throw new Error(k + ' does not repaint');
+    }
   });
   return true;
 });
@@ -2436,6 +2444,439 @@ check('PROJECT_PLAN documents the Sprint 6 Google Calendar layer', () => {
     'syncToken', 'google_event_id', 'etag',
     'התחבר ל-Google Calendar', 'סונכרן לאחרונה מול גוגל',
     'public/', 'pages_build_output_dir'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ==========================================================================
+   22. Sprint 7 — premium UX: haptics, targeted DOM updates, undo, touch floor
+   ========================================================================== */
+
+/* ---- 22a. haptic feedback, executed on a stubbed device ---- */
+
+check('haptics are guarded — a device with no motor never throws', () => {
+  const APP = loadApp();                       // the bare sandbox navigator has no vibrate
+  const H = APP.ui && APP.ui.Haptics;
+  if (!H) return 'no APP.ui.Haptics export';
+  if (H.supported()) return 'a bare navigator reported vibration support';
+  if (H.light() !== false) return 'light() claimed to fire on a device with no motor';
+  if (H.done() !== false) return 'done() claimed to fire on a device with no motor';
+  return true;
+});
+
+check('haptics fire the mandated 10ms pulse where a motor exists', () => {
+  const calls = [];
+  const APP = loadApp({ navigator: { vibrate: p => { calls.push(p); return true; } } });
+  const H = APP.ui.Haptics;
+  if (!H.supported()) return 'a navigator WITH vibrate was reported unsupported';
+  if (H.light() !== true) return 'light() did not fire';
+  if (calls[0] !== 10) return 'the light pulse is ' + calls[0] + 'ms, not the mandated 10ms';
+  if (APP.ui.HAPTIC_LIGHT !== 10) return 'HAPTIC_LIGHT is ' + APP.ui.HAPTIC_LIGHT;
+  H.done();
+  if (!Array.isArray(calls[1]) || calls[1].length < 2) return 'the completion beat is not a pattern';
+  return true;
+});
+
+check('a vibrate implementation that throws cannot break the tap', () => {
+  const APP = loadApp({ navigator: { vibrate: () => { throw new Error('permission denied'); } } });
+  if (APP.ui.Haptics.light() !== false) return 'a throwing motor was reported as a success';
+  // a browser that refuses the pattern answers false rather than throwing
+  const soft = loadApp({ navigator: { vibrate: () => false } });
+  if (soft.ui.Haptics.light() !== false) return 'a refused pulse was reported as a success';
+  return true;
+});
+
+check('navigator.vibrate is called from exactly one guarded place', () => {
+  const hits = js.match(/navigator\.vibrate\s*\(/g) || [];
+  if (hits.length !== 1) return 'navigator.vibrate is called ' + hits.length + ' times';
+  const mod = (js.match(/var Haptics = \{[\s\S]*?\n  \};/) || [''])[0];
+  if (!mod) return 'no Haptics module';
+  if (mod.indexOf('navigator.vibrate(') === -1) return 'the one call site sits outside Haptics';
+  if (mod.indexOf('try {') === -1) return 'the call is not wrapped in a try';
+  if (mod.indexOf('Haptics.supported()') === -1) return 'the call is not support-gated';
+  return true;
+});
+
+check('every delegated tap gets a pulse, and only after a control matched', () => {
+  const onClick = (js.match(/function onClick\(e\) \{[\s\S]*?\n  \}\n/) || [''])[0];
+  if (!onClick) return 'no onClick delegate';
+  const guard = onClick.indexOf('if (!el) return;');
+  const pulse = onClick.indexOf('Haptics.light()');
+  if (pulse === -1) return 'no haptic on the delegated tap path';
+  if (guard === -1 || pulse < guard) return 'the pulse fires before a control was even matched';
+  if (js.indexOf('Haptics.done()') === -1) return 'nothing marks a completion with the second beat';
+  // the one control that mutates outside onClick is the client status <select>
+  const onChange = (js.match(/function onChange\(e\) \{[\s\S]*?\n  \}\n/) || [''])[0];
+  if (!onChange || onChange.indexOf('Haptics.light()') === -1) {
+    return 'changing a client status is silent to the finger';
+  }
+  return true;
+});
+
+/* ---- 22b. targeted DOM updates ---- */
+
+check('every record row carries the id that lets it be patched in place', () => {
+  ['tasks:', 'lists:', 'notes:', 'clients:', 'events:'].forEach(k => {
+    if (js.indexOf('data-rec="' + k) === -1) throw new Error('no data-rec for ' + k);
+  });
+  if (js.indexOf('data-compact="1"') === -1) return 'the compact row variant is indistinguishable';
+  if (js.indexOf("node.dataset.compact === '1'") === -1) return 'the patch ignores the compact variant';
+  return true;
+});
+
+check('a simple state change patches one node instead of redrawing the app', () => {
+  ['data-toggle', 'data-cycle', 'data-subtask', 'data-listitem', 'data-pin'].forEach(k => {
+    const branch = (js.match(new RegExp('el\\.dataset\\.' + k.slice(5) + '\\)\\s*\\{[\\s\\S]*?\\n      return;')) || [''])[0];
+    if (!branch) throw new Error('no delegated branch for ' + k);
+    if (branch.indexOf('Patch.apply(') === -1) throw new Error(k + ' does not patch its record');
+    if (/\brender\(\)/.test(branch)) throw new Error(k + ' still triggers a full app render');
+  });
+  return true;
+});
+
+check('the patch engine executes and knows every list container', () => {
+  const U = loadApp().ui;
+  ['record', 'settle', 'apply', 'html'].forEach(k => {
+    if (typeof U.Patch[k] !== 'function') throw new Error('Patch.' + k + ' is missing');
+  });
+  const sels = U.SECTIONS.map(s => s.sel);
+  ['#timeline', '#todoToday', '#calStage', '#tasksList', '#listsList', '#notesList', '#clientsList']
+    .forEach(s => { if (sels.indexOf(s) === -1) throw new Error('no registered section for ' + s); });
+
+  U.SECTIONS.forEach(s => {
+    if (typeof s.draw !== 'function') throw new Error(s.sel + ' has no draw()');
+    if (typeof s.keys !== 'function') throw new Error(s.sel + ' has no keys()');
+    if (['today', 'calendar', 'tasks', 'clients'].indexOf(s.view) === -1) {
+      throw new Error(s.sel + ' belongs to no view');
+    }
+    if (html.indexOf('id="' + s.sel.slice(1) + '"') === -1) {
+      throw new Error(s.sel + ' is registered but not in the document');
+    }
+  });
+  return true;
+});
+
+check('membership decides a rebuild, and it is compared in order', () => {
+  const APP = loadApp(), U = APP.ui;
+  APP.Store.load();
+
+  const keys = U.recKeys('tasks', U.shownTasks());
+  if (keys.length < 2) return 'the seeded store shows too few tasks to compare';
+  if (keys.some(k => k.indexOf('tasks:') !== 0)) return 'a key is not namespaced by collection';
+  if (!U.sameKeys(keys, keys.slice())) return 'an identical list was reported as changed';
+  if (U.sameKeys(keys, keys.slice().reverse())) return 'a reorder was reported as unchanged';
+  if (U.sameKeys(keys, keys.slice(1))) return 'a removal was reported as unchanged';
+  if (U.sameKeys(keys, null)) return 'an unprovable membership was treated as unchanged';
+
+  // every collection publishes the same shape, so no section can drift
+  ['shownLists', 'shownNotes', 'shownClients'].forEach(fn => {
+    if (typeof U[fn] !== 'function') throw new Error('no ' + fn + '() selector');
+    if (!Array.isArray(U[fn]())) throw new Error(fn + '() does not return a list');
+  });
+  return true;
+});
+
+check('every list renderer can be told to skip its markup', () => {
+  ['renderTimeline', 'renderTodo', 'renderTasks', 'renderLists', 'renderNotes', 'renderClients']
+    .forEach(fn => {
+      if (!new RegExp('function ' + fn + '\\(quiet\\)').test(js)) throw new Error(fn + ' takes no quiet flag');
+    });
+  if (!/if \(!quiet\)/.test(js)) return 'the quiet flag is never honoured';
+  if (!/render: function \(quiet\)/.test(js)) return 'the calendar pane cannot be quieted';
+  if (!/keys: function \(\)/.test(js)) return 'nothing publishes a container membership';
+  return true;
+});
+
+/* ---- 22c. the undo safety net, executed ---- */
+
+check('the undo window holds one deletion and restores it into its old slot', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+
+  const before = Store.data.tasks.map(t => t.id);
+  if (before.length < 3) return 'the seeded store has too few tasks to test a middle slot';
+
+  const victim = before[1];
+  const entry = U.softDelete('tasks', victim);
+  if (!entry) return 'softDelete refused a live record';
+  if (entry.index !== 1) return 'the slot was recorded as ' + entry.index + ', not 1';
+  if (!entry.label) return 'the entry carries no Hebrew label for the toast';
+  if (Store.find('tasks', victim)) return 'the record never left the store';
+  if (!U.Undo.has()) return 'no undo was armed';
+
+  U.Undo.fire();
+  const after = Store.data.tasks.map(t => t.id);
+  if (after.join(',') !== before.join(',')) return 'restored to slot ' + after.indexOf(victim) + ', not 1';
+  if (U.Undo.has()) return 'the window stayed open after a restore';
+  if (U.softDelete('tasks', 'no_such_id')) return 'softDelete armed an undo for a record that never existed';
+  return true;
+});
+
+check('a committed deletion is permanent, and a second delete never stacks', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+
+  const ids = Store.data.tasks.map(t => t.id);
+  U.softDelete('tasks', ids[0]);
+  const first = U.Undo.peek();
+  U.softDelete('tasks', ids[1]);               // arms a second — the first must close
+  if (!first || U.Undo.peek().id === first.id) return 'the older window survived';
+
+  U.Undo.commit();
+  if (U.Undo.has()) return 'commit left the window open';
+  if (U.Undo.fire() !== null) return 'a committed deletion could still be undone';
+  if (Store.find('tasks', ids[0]) || Store.find('tasks', ids[1])) return 'a committed deletion came back';
+  return true;
+});
+
+check('a restore replaces the queued tombstone instead of racing it', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store, S = APP.sync;
+  Store.load();
+  const c = Store.data.sync;
+
+  // drain: pretend the server applied everything, so the shadow is authoritative
+  const batch = c.queue.slice();
+  S.Sync.settle(batch, { applied: batch.map(o => o.opId), rejected: [], changes: {}, cursor: '' });
+
+  const victim = Store.data.notes[0];
+  if (!victim) return 'no seeded note to delete';
+
+  U.softDelete('notes', victim.id);
+  if (!c.queue.some(op => op.id === victim.id && op.action === 'delete')) {
+    return 'the deletion never reached the outbox';
+  }
+
+  U.Undo.fire();
+  const ops = c.queue.filter(op => op.id === victim.id);
+  if (ops.length !== 1) return 'the outbox holds ' + ops.length + ' ops for one record';
+  if (ops[0].action !== 'upsert') return 'the restore left a ' + ops[0].action + ' queued — it would sync as a deletion';
+  return true;
+});
+
+check('a note inside a client file is deleted with the same safety net', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+
+  const c = Store.data.clients[0];
+  if (!c) return 'no seeded client';
+  APP.clients.addClientNote(c, 'פתק ראשון');
+  APP.clients.addClientNote(c, 'פתק שני');
+  const before = c.clientNotes.map(n => n.id);
+  if (before.length < 2) return 'the composer did not write two notes';
+
+  const entry = U.softDeleteClientNote(c.id, before[1]);
+  if (!entry) return 'softDeleteClientNote refused a live note';
+  if (c.clientNotes.some(n => n.id === before[1])) return 'the note never left the file';
+
+  U.Undo.fire();
+  if (c.clientNotes.map(n => n.id).join(',') !== before.join(',')) return 'the note came back in the wrong slot';
+  return true;
+});
+
+check('the undo toast is in the document, labelled and wired to five seconds', () => {
+  ['id="toast"', 'id="toastText"', 'id="toastUndo"', 'data-undo="1"'].forEach(n => {
+    if (html.indexOf(n) === -1) throw new Error('missing ' + n);
+  });
+  if (html.indexOf('>אחזר<') === -1) return 'the undo button is not labelled אחזר';
+  if (!/var UNDO_MS = 5000/.test(js)) return 'the undo window is not 5 seconds';
+  if (js.indexOf('Undo.commit()') === -1) return 'an expiring toast never commits the deletion';
+  if (js.indexOf('Undo.fire()') === -1) return 'nothing restores when אחזר is tapped';
+  if (js.indexOf('[data-undo]') === -1) return 'the undo button is not in the click delegate';
+  ['.toast-undo', '.toast.has-action'].forEach(s => {
+    if (css.indexOf(s) === -1) throw new Error('no style for ' + s);
+  });
+  return true;
+});
+
+check('no deletion path bypasses the undo window', () => {
+  const del = (js.match(/if \(el\.dataset\.del\) \{[\s\S]*?\n      return;/) || [''])[0];
+  if (!del) return 'no delete branch in the delegate';
+  if (del.indexOf('softDelete(') === -1) return 'the delete branch removes without arming an undo';
+  if (del.indexOf('Store.remove(') !== -1) return 'the delete branch still removes permanently';
+
+  const noteDel = (js.match(/if \(el\.dataset\.clientnotedel\) \{[\s\S]*?\n      return;/) || [''])[0];
+  if (!noteDel) return 'no client-note delete branch';
+  if (noteDel.indexOf('softDeleteClientNote(') === -1) return 'a client note is still deleted permanently';
+  return true;
+});
+
+/* ---- 22d. mobile ergonomics: the 44x44 floor, enforced by parsing the CSS ---- */
+
+/**
+ * Flat { sel, body } for every declaration block, media-nested ones included.
+ * Comments are stripped first — a rule preceded by one would otherwise carry
+ * the whole comment inside its selector.
+ */
+function cssRules(src) {
+  const clean = src.replace(/\/\*[\s\S]*?\*\//g, '');
+  const out = [];
+  const re = /([^{}@]+)\{([^{}]*)\}/g;
+  let m;
+  while ((m = re.exec(clean))) out.push({ sel: m[1].trim().replace(/\s+/g, ' '), body: m[2] });
+  return out;
+}
+
+/** every class that is, or wraps, a control a finger has to hit */
+const CONTROLS = [
+  'push-btn', 'sync-btn', 'gcal-btn', 'gcal-unlink', 'seg', 'tab', 'rail-item',
+  'att', 'type-btn', 'btn', 'fab', 'sheet-x', 'check-tap', 'cl-item', 'mini',
+  'qa', 'qa-mini', 'cal-arrow', 'cal-today', 'cal-cell', 'wk-cell', 'dv-slot',
+  'cl-open', 'badge-btn', 'toast-undo'
+];
+
+/** chips that stay visually small and clear the floor with a hit expander */
+const EXPANDED = ['badge-btn'];
+
+/**
+ * True when the rule actually sizes the control, rather than something nested
+ * inside it: `.rail-item .ico { width:22px }` sizes a glyph, not the button.
+ * Only the last compound of each comma-separated part is the rule's subject.
+ */
+function targets(sel, cls) {
+  const re = new RegExp('\\.' + cls + '(?![\\w-])');
+  return sel.split(',').some(part => {
+    const last = part.trim().split(/[\s>+~]+/).filter(Boolean).pop() || '';
+    return re.test(last);
+  });
+}
+
+check('no control anywhere in the CSS drops below the 44x44 floor', () => {
+  if (!/--tap:\s*44px/.test(css)) return 'no --tap: 44px token';
+  const bad = [];
+
+  cssRules(css).forEach(r => {
+    const hit = CONTROLS.filter(c => targets(r.sel, c));
+    if (!hit.length) return;
+
+    ['min-height', 'height', 'min-width', 'width'].forEach(prop => {
+      const m = r.body.match(new RegExp('(?:^|;)\\s*' + prop + '\\s*:\\s*([^;]+)'));
+      if (!m) return;
+      const px = m[1].trim().match(/^(\d+(?:\.\d+)?)px$/);
+      if (!px || parseFloat(px[1]) >= 44) return;
+      if (hit.every(c => EXPANDED.indexOf(c) !== -1)) return;   // covered by a hit expander
+      bad.push(r.sel + ' { ' + prop + ':' + m[1].trim() + ' }');
+    });
+  });
+
+  return bad.length ? 'sub-44px control: ' + bad.join(' · ') : true;
+});
+
+check('the small chips that stay small carry a real 44x44 hit expander', () => {
+  EXPANDED.forEach(c => {
+    const rule = (css.match(new RegExp('\\.' + c + '::after\\s*\\{[\\s\\S]*?\\}')) || [''])[0];
+    if (!rule) throw new Error('.' + c + ' has no ::after hit expander');
+    if (!/min-width:\s*var\(--tap\)/.test(rule)) throw new Error('.' + c + ' expander is under 44px wide');
+    if (!/min-height:\s*var\(--tap\)/.test(rule)) throw new Error('.' + c + ' expander is under 44px tall');
+    if (!/position:\s*absolute/.test(rule)) throw new Error('.' + c + ' expander is in flow — it would move the layout');
+    // the centring transform is physical, so the anchor must be physical too,
+    // or the overlay lands on the wrong side of an RTL row
+    if (!/left:\s*50%/.test(rule) || !/translate\(-50%,\s*-50%\)/.test(rule)) {
+      throw new Error('.' + c + ' expander is not centred on the chip');
+    }
+    if (!new RegExp('\\.' + c + '\\{[^}]*position:\\s*relative').test(css.replace(/\s*\{/g, '{'))) {
+      throw new Error('.' + c + ' is not a positioning context for its expander');
+    }
+  });
+  return true;
+});
+
+/**
+ * Regression guard for a whole class of bug rather than one instance of it:
+ * the moment a rule gives an element a `display`, the UA rule behind the
+ * `hidden` attribute stops applying and the element is on screen forever. Any
+ * element the markup ships hidden must therefore carry its own reset.
+ */
+check('a CSS display rule can never defeat the hidden attribute', () => {
+  const rules = cssRules(css);
+  const bad = [];
+
+  (html.match(/<[a-z][^>]*\shidden(?:\s|>)[^>]*>?/gi) || []).forEach(tag => {
+    const id = (tag.match(/id="([\w-]+)"/) || [])[1];
+    const cls = (tag.match(/class="([^"]+)"/) || [])[1] || '';
+    const keys = (id ? ['#' + id] : []).concat(
+      cls.split(/\s+/).filter(Boolean).map(c => '.' + c));
+    if (!keys.length) return;
+
+    const given = rules.some(r =>
+      r.sel.indexOf('[hidden]') === -1 &&
+      /(?:^|;)\s*display\s*:/.test(r.body) &&
+      r.sel.split(',').some(p => keys.indexOf(p.trim()) !== -1));
+    if (!given) return;
+
+    const reset = keys.some(k => rules.some(r =>
+      r.sel.split(',').some(p => p.trim() === k + '[hidden]') &&
+      /display:\s*none/.test(r.body)));
+    if (!reset) bad.push(keys.join('/'));
+  });
+
+  return bad.length ? 'shipped hidden but permanently visible: ' + bad.join(', ') : true;
+});
+
+check('the header pills are square-safe on the narrowest phone', () => {
+  const narrow = (css.match(/@media\s*\(max-width:\s*420px\)\s*\{[\s\S]*?\n\}/) || [''])[0];
+  if (!narrow) return 'no narrow-phone breakpoint';
+  ['.push-btn', '.sync-btn', '.gcal-btn'].forEach(s => {
+    const rule = (narrow.match(new RegExp('\\' + s + '\\{[^}]*\\}')) || [''])[0];
+    if (!rule) throw new Error(s + ' is not compacted on a narrow phone');
+    if (!/width:\s*var\(--tap\)/.test(rule) || !/min-width:\s*var\(--tap\)/.test(rule)) {
+      throw new Error(s + ' shrinks below the tap floor when its label is dropped');
+    }
+  });
+  return true;
+});
+
+/* ---- 22e. tactile press states and focus rings ---- */
+
+check('every control answers a press with a tactile dip', () => {
+  const press = (css.match(/button:active[\s\S]*?\}/) || [''])[0];
+  if (!press) return 'no :active rule on button';
+  if (!/transform:\s*scale\(0?\.97\)/.test(press)) return 'the press does not scale to .97';
+  if (!/transition:\s*transform 0?\.1s ease/.test(css)) return 'no .1s transform transition';
+  ['.seg:active', '.cl-item:active', '.qa:active', '.att:active', '.type-btn:active'].forEach(s => {
+    if (css.indexOf(s) === -1) throw new Error('no press state for ' + s);
+  });
+  // the FAB already carries a positioning transform and must compose, not lose it
+  if (!/\.fab:active\{\s*transform:translateX\(50%\)\s*scale\(\.97\)/.test(css)) {
+    return 'the FAB press state lost its own positioning transform';
+  }
+  return true;
+});
+
+check('keyboard focus is visible and a finger press paints no ring', () => {
+  if (!/button:focus-visible/.test(css)) return 'no focus-visible ring on buttons';
+  if (!/outline:\s*2px solid/.test(css)) return 'the focus ring has no outline';
+  if (!/outline-offset/.test(css)) return 'the ring sits on the border and shifts the layout';
+  if (!/:focus:not\(:focus-visible\)[^{]*\{\s*outline:\s*none/.test(css)) {
+    return 'a touch press still paints a focus ring';
+  }
+  if (!/-webkit-tap-highlight-color:\s*transparent/.test(css)) return 'the grey mobile tap flash is still on';
+  return true;
+});
+
+check('the swipe navigation still owns the calendar horizontal axis', () => {
+  if (!/touch-action:\s*manipulation/.test(css)) return 'the 300ms double-tap delay was never removed';
+  if (!/\.cal-stage\s*\{[^}]*touch-action:\s*pan-y/.test(css)) return '.cal-stage no longer reserves pan-y';
+  if (!/\.cal-stage button\{\s*touch-action:\s*pan-y/.test(css)) {
+    return 'the blanket touch-action hands calendar swipes back to the browser';
+  }
+  return true;
+});
+
+/* ---- 22f. shipped shell and specification ---- */
+
+check('the service worker cache version was bumped for this sprint', () => {
+  const sw = read('sw.js');
+  const m = sw.match(/CACHE_VERSION\s*=\s*'v(\d+)'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[1], 10) < 9) return 'the cache is still v' + m[1] + ' — returning phones keep the old shell';
+  return true;
+});
+
+check('PROJECT_PLAN documents the Sprint 7 premium UX layer', () => {
+  const required = [
+    'Sprint 7', 'navigator.vibrate', 'data-rec', 'Patch.record', 'Patch.settle',
+    'softDelete', 'אחזר', '44x44', ':focus-visible', 'v9'
   ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;

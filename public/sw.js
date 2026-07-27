@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v8';   // Sprint 7 — new photographic brand mark (icons/*)
+var CACHE_VERSION = 'v9';   // Sprint 7 — haptics, targeted DOM updates, undo toast
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */

@@ -4,6 +4,8 @@
    Sprint 2 — PWA install shell, service worker, notifications engine.
    Sprint 3 — tasks engine (status / priority / next action / sub-tasks),
               smart checklist lists, quick notes.
+   Sprint 7 — premium UX: haptic feedback, targeted DOM updates instead of
+              full re-renders, and an undo window on every deletion.
 
    Architecture notes
    - Every entity carries category: 'personal' | 'business'  (PROJECT_PLAN §0.2)
@@ -154,10 +156,55 @@
   var SYNC_QUEUE_MAX = 1000;   // outbox ceiling — one op per record, deduped
   var ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
+  /* --- premium touch feel (Sprint 7) --- */
+
+  /** one short pulse under a finger — long enough to feel, short enough to
+   *  never read as a buzz. Android/Chrome only; iOS has no web API at all. */
+  var HAPTIC_LIGHT = 10;
+  /** a two-beat confirmation, reserved for "this thing is now finished" */
+  var HAPTIC_DONE = [10, 40, 10];
+
+  var TOAST_MS = 2600;         // plain acknowledgement
+  var UNDO_MS = 5000;          // the safety net stays open exactly five seconds
+  var UNDO_LABEL = 'אחזר';
+
+  /** what the undo toast calls the thing that just disappeared */
+  var DELETED_LABEL = {
+    events: 'האירוע', tasks: 'המשימה', lists: 'הרשימה',
+    notes: 'הפתק', clients: 'הלקוח', clientNotes: 'הפתק'
+  };
+
   /* ------------------------------------------------------------- utilities */
 
   function $(sel, root) { return (root || document).querySelector(sel); }
   function $$(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+
+  /* ==========================================================================
+     Haptics (Sprint 7)
+
+     navigator.vibrate exists on Android/Chrome, is permanently absent on iOS
+     Safari, and is silently ignored by a browser whose tab has never been
+     engaged. Every path through here is guarded and swallows its own errors:
+     a tap must never fail because the device has no vibration motor.
+     ========================================================================== */
+
+  var Haptics = {
+    supported: function () {
+      return typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function';
+    },
+
+    /** the ONLY place in the app that is allowed to call navigator.vibrate */
+    fire: function (pattern) {
+      if (!Haptics.supported()) return false;
+      try { return navigator.vibrate(pattern) !== false; } catch (e) { return false; }
+    },
+
+    /** every button tap, tab switch and status toggle */
+    light: function () { return Haptics.fire(HAPTIC_LIGHT); },
+
+    /** something completed — a task closed, a checklist filled up */
+    done: function () { return Haptics.fire(HAPTIC_DONE); }
+  };
 
   function uid(prefix) {
     return (prefix || 'id') + '_' +
@@ -1811,7 +1858,13 @@
 
   /* ------------------------------------------------- render: 2. day timeline */
 
-  function renderTimeline() {
+  /**
+   * `quiet` is set by Patch.settle() when the container's membership has not
+   * changed: the record that changed was already repainted in place, so the
+   * markup is skipped and only the derived meta line is refreshed. Nothing the
+   * finger is touching gets destroyed.
+   */
+  function renderTimeline(quiet) {
     var events = todaysEvents();
     var byHour = {};
 
@@ -1837,7 +1890,7 @@
       );
     }
 
-    $('#timeline').innerHTML = rows.join('');
+    if (!quiet) $('#timeline').innerHTML = rows.join('');
     $('#timelineMeta').textContent = events.length
       ? plural(events.length, 'אירוע אחד', 'אירועים') + ' · ' + pad2(DAY_START) + ':00–' + pad2(DAY_END) + ':00'
       : 'אין אירועים מתוזמנים';
@@ -1846,7 +1899,7 @@
   function eventCard(e) {
     var when = e.start ? (e.start + (e.end ? '–' + e.end : '')) : 'ללא שעה';
     var meta = [when, e.location].filter(Boolean).join(' · ');
-    return '<div class="ev ev-' + e.category + '">' +
+    return '<div class="ev ev-' + e.category + '" data-rec="events:' + e.id + '">' +
       '<div class="ev-body">' +
       '<div class="ev-title">' + esc(e.title) + '</div>' +
       '<div class="ev-meta">' + esc(meta) + '</div>' +
@@ -1858,11 +1911,13 @@
 
   /* ------------------------------------------- render: 3. unscheduled to-do */
 
-  function renderTodo() {
+  function renderTodo(quiet) {
     var list = unscheduledToday();
-    $('#todoToday').innerHTML = list.length
-      ? list.map(function (t) { return taskRow(t); }).join('')
-      : emptyState('אין משימות פתוחות להיום', 'כל מה שתייעד להיום ללא שעה מסוימת יופיע כאן.');
+    if (!quiet) {
+      $('#todoToday').innerHTML = list.length
+        ? list.map(function (t) { return taskRow(t); }).join('')
+        : emptyState('אין משימות פתוחות להיום', 'כל מה שתייעד להיום ללא שעה מסוימת יופיע כאן.');
+    }
     $('#todoMeta').textContent = list.length ? plural(list.length, 'משימה אחת', 'משימות') : '';
   }
 
@@ -1886,7 +1941,10 @@
       (status === 'waiting' ? ' is-waiting' : '') +
       (late ? ' is-late' : '');
 
-    return '<div class="' + cls + '">' +
+    // data-rec is what lets Patch.record() repaint this one row in place, in
+    // every pane it happens to appear in, without rebuilding any container
+    return '<div class="' + cls + '" data-rec="tasks:' + t.id + '"' +
+      (compact ? ' data-compact="1"' : '') + '>' +
       '<button type="button" class="check-tap" data-toggle="' + t.id + '" aria-label="סימון כבוצע">' +
       '<span class="check">' + (t.done ? '✓' : '') + '</span></button>' +
       '<div class="row-body">' +
@@ -2231,7 +2289,26 @@
 
     /* ------------------------------------------------------------- paint */
 
-    render: function () {
+    /**
+     * The record rows the active pane holds, in the order it holds them —
+     * Patch.settle() compares this against the DOM to decide whether the pane
+     * has to be rebuilt at all. Month and week draw their records as dots and
+     * chips rather than rows, so there is nothing to patch in place and they
+     * answer null: "always rebuild me".
+     */
+    keys: function () {
+      if (this.view === 'day') return recKeys('tasks', openTasksOn(this.anchor));
+      if (this.view !== 'agenda') return null;
+
+      var iso = this.anchor, out = [];
+      for (var i = 0; i < AGENDA_DAYS; i++) {
+        out = out.concat(recKeys('events', eventsOn(iso)), recKeys('tasks', openTasksOn(iso)));
+        iso = addDaysISO(iso, 1);
+      }
+      return out;
+    },
+
+    render: function (quiet) {
       var self = this;
 
       $$('[data-calview]').forEach(function (b) {
@@ -2245,7 +2322,8 @@
       $('#calDay').hidden = this.view !== 'day';
       $('#calAgenda').hidden = this.view !== 'agenda';
 
-      if (this.view === 'month') this.renderMonth();
+      if (quiet) { /* the pane was patched in place — only the labels move */ }
+      else if (this.view === 'month') this.renderMonth();
       else if (this.view === 'week') this.renderWeek();
       else if (this.view === 'day') this.renderDay();
       else this.renderAgenda();
@@ -2294,7 +2372,7 @@
     }
   };
 
-  function renderCalendar() { Cal.render(); }
+  function renderCalendar(quiet) { Cal.render(quiet); }
 
   /* ---------------------------------------------- render: tasks / lists / notes */
 
@@ -2308,11 +2386,17 @@
     render();
   }
 
-  function renderTasks() {
+  /** the tasks the list is currently showing, in the order it shows them */
+  function shownTasks() {
+    var tab = taskTab(), today = todayISO();
+    return sortTasks(pick('tasks').filter(function (x) { return taskMatchesTab(x, tab, today); }));
+  }
+
+  function renderTasks(quiet) {
     var tab = taskTab();
     var today = todayISO();
     var all = pick('tasks');
-    var shown = sortTasks(all.filter(function (x) { return taskMatchesTab(x, tab, today); }));
+    var shown = shownTasks();
 
     // scoped to the sub-tab strip — the attention cards deep-link with the same
     // attribute but must never pick up the active-tab styling
@@ -2327,30 +2411,36 @@
       el.textContent = all.filter(function (x) { return taskMatchesTab(x, key, today); }).length;
     });
 
-    $('#tasksList').innerHTML = shown.length
-      ? shown.map(function (t) { return taskRow(t); }).join('')
-      : emptyState('אין משימות בתצוגה הזו', TASK_TAB_EMPTY[tab] || TASK_TAB_EMPTY.all);
+    if (!quiet) {
+      $('#tasksList').innerHTML = shown.length
+        ? shown.map(function (t) { return taskRow(t); }).join('')
+        : emptyState('אין משימות בתצוגה הזו', TASK_TAB_EMPTY[tab] || TASK_TAB_EMPTY.all);
+    }
 
     $('#tasksMeta').textContent = all.length
       ? all.filter(function (t) { return !isClosed(t.status); }).length + ' פתוחות מתוך ' + all.length
       : '';
-
-    renderLists();
-    renderNotes();
   }
 
   /* ------------------------------------------------- smart checklist lists */
 
-  function renderLists() {
-    var lists = pick('lists').slice().sort(function (a, b) {
+  /** dated lists first, then the timeless ones, freshest edit on top */
+  function shownLists() {
+    return pick('lists').slice().sort(function (a, b) {
       var da = a.date || '9999-99-99', db = b.date || '9999-99-99';
       if (da !== db) return da < db ? -1 : 1;
       return (b.updatedAt || 0) - (a.updatedAt || 0);
     });
+  }
 
-    $('#listsList').innerHTML = lists.length
-      ? lists.map(listRow).join('')
-      : emptyState('אין רשימות', 'רשימות קניות, ציוד לסטודיו וצ׳ק־ליסטים לפרויקט — הכול כאן.');
+  function renderLists(quiet) {
+    var lists = shownLists();
+
+    if (!quiet) {
+      $('#listsList').innerHTML = lists.length
+        ? lists.map(listRow).join('')
+        : emptyState('אין רשימות', 'רשימות קניות, ציוד לסטודיו וצ׳ק־ליסטים לפרויקט — הכול כאן.');
+    }
 
     var items = 0, done = 0;
     lists.forEach(function (l) {
@@ -2366,7 +2456,8 @@
     var p = listProgress(l);
     var complete = p.total > 0 && p.done === p.total;
 
-    return '<div class="row list' + (complete ? ' is-complete' : '') + '">' +
+    return '<div class="row list' + (complete ? ' is-complete' : '') +
+      '" data-rec="lists:' + l.id + '">' +
       '<div class="row-body">' +
       '<div class="row-title">☰ ' + esc(l.title) + '</div>' +
       '<div class="row-meta">' + catTag(l.category) +
@@ -2385,12 +2476,16 @@
 
   /* -------------------------------------------------------- quick notes */
 
-  function renderNotes() {
-    var notes = sortNotes(pick('notes'));
+  function shownNotes() { return sortNotes(pick('notes')); }
 
-    $('#notesList').innerHTML = notes.length
-      ? notes.map(noteRow).join('')
-      : emptyState('אין פתקים', 'רעיון, מספר טלפון או משפט מהלקוח — כתוב עכשיו, תסדר אחר כך.');
+  function renderNotes(quiet) {
+    var notes = shownNotes();
+
+    if (!quiet) {
+      $('#notesList').innerHTML = notes.length
+        ? notes.map(noteRow).join('')
+        : emptyState('אין פתקים', 'רעיון, מספר טלפון או משפט מהלקוח — כתוב עכשיו, תסדר אחר כך.');
+    }
 
     var pinned = notes.filter(function (n) { return n.pinned; }).length;
     $('#notesMeta').textContent = notes.length
@@ -2399,7 +2494,8 @@
   }
 
   function noteRow(n) {
-    return '<div class="row note' + (n.pinned ? ' is-pinned' : '') + '">' +
+    return '<div class="row note' + (n.pinned ? ' is-pinned' : '') +
+      '" data-rec="notes:' + n.id + '">' +
       '<div class="row-body">' +
       '<div class="row-title">' + (n.pinned ? '📌 ' : '✎ ') + esc(n.title || 'פתק') + '</div>' +
       '<div class="row-meta">' + catTag(n.category) +
@@ -2480,7 +2576,7 @@
     var contact = [c.phone, c.email].filter(Boolean).join(' · ');
 
     return '<article class="cl-card cst-row-' + status +
-      (clientNeedsAction(c) ? ' is-missing' : '') + '">' +
+      (clientNeedsAction(c) ? ' is-missing' : '') + '" data-rec="clients:' + c.id + '">' +
       '<button type="button" class="cl-open" data-clientopen="' + c.id + '"' +
       ' aria-label="' + esc('פתיחת תיק הלקוח ' + (c.name || '')) + '">' +
       '<span class="cl-name">' + safeName + '</span>' +
@@ -2494,10 +2590,16 @@
       '</article>';
   }
 
-  function renderClients() {
+  /** the client cards the pipeline is currently showing, in pipeline order */
+  function shownClients() {
+    var tab = clientTab();
+    return sortClients(pick('clients').filter(function (c) { return clientMatchesTab(c, tab); }));
+  }
+
+  function renderClients(quiet) {
     var tab = clientTab();
     var all = pick('clients');
-    var shown = sortClients(all.filter(function (c) { return clientMatchesTab(c, tab); }));
+    var shown = shownClients();
 
     // scoped to the sub-tab strip — the attention card deep-links with the same
     // attribute but must never pick up the active-tab styling
@@ -2512,9 +2614,11 @@
       el.textContent = all.filter(function (c) { return clientMatchesTab(c, key); }).length;
     });
 
-    $('#clientsList').innerHTML = shown.length
-      ? shown.map(clientCard).join('')
-      : emptyState('אין לקוחות בתצוגה הזו', CLIENT_TAB_EMPTY[tab] || CLIENT_TAB_EMPTY.all);
+    if (!quiet) {
+      $('#clientsList').innerHTML = shown.length
+        ? shown.map(clientCard).join('')
+        : emptyState('אין לקוחות בתצוגה הזו', CLIENT_TAB_EMPTY[tab] || CLIENT_TAB_EMPTY.all);
+    }
 
     var missing = all.filter(clientNeedsAction).length;
     $('#clientsMeta').textContent = all.length
@@ -2749,7 +2853,21 @@
       this.render();
     },
 
-    render: function () {
+    /**
+     * Only the two tabs built out of patchable record rows can be reconciled
+     * in place; every other tab (overview, meetings, notes, history) answers
+     * null and is rebuilt, because nothing inside it carries data-rec.
+     */
+    keys: function () {
+      var c = this.client();
+      if (!c) return null;
+      var l = clientLinks(c.id);
+      if (this.tab === 'tasks') return recKeys('tasks', sortTasks(l.tasks));
+      if (this.tab === 'lists') return recKeys('lists', l.lists);
+      return null;
+    },
+
+    render: function (quiet) {
       var el = $('#clientDrawer');
       if (!el) return;
       var c = this.client();
@@ -2768,13 +2886,13 @@
         clientStatusBadge(c) + catTag(normCat(c.category)) +
         (clientNeedsAction(c) ? noActionBadge() : '') +
         contactButtons(c, 'mini');
-      $('#drawerBody').innerHTML = drawerTabHTML(this.tab, c, clientLinks(c.id));
+      if (!quiet) $('#drawerBody').innerHTML = drawerTabHTML(this.tab, c, clientLinks(c.id));
       // the dialog is named by #drawerName; the body just says which tab is live
       $('#drawerBody').setAttribute('aria-label', DRAWER_TAB_LABEL[this.tab]);
     }
   };
 
-  function renderDrawer() { if (Drawer.isOpen()) Drawer.render(); }
+  function renderDrawer(quiet) { if (Drawer.isOpen()) Drawer.render(quiet); }
 
   /* ------------------------------------------------------- render: fragments */
 
@@ -2792,6 +2910,7 @@
 
   /* ------------------------------------------------------------ render: all */
 
+  /** the full repaint — view switches, filter changes, boot, a cloud merge */
   function render() {
     renderSummary();
     renderAttention();
@@ -2799,11 +2918,231 @@
     renderTodo();
     renderCalendar();
     renderTasks();
+    renderLists();
+    renderNotes();
     renderClients();
     renderDrawer();
     Sync.paint();
     $('#todayLabel').textContent = hebDate(todayISO());
     $('#railUserName').textContent = OWNER.name;
+  }
+
+  /* ==========================================================================
+     Targeted DOM updates (Sprint 7)
+
+     A tap used to call render(), which rewrote the innerHTML of every container
+     in the app — including the one the finger was still on. The pressed card
+     was destroyed and rebuilt mid-press: the :active state died, the ripple
+     never finished, and the whole layout flickered.
+
+     A simple state change now takes two steps instead:
+
+       1. Patch.record()  rewrites ONLY the node(s) that stand for that one
+          record, wherever they appear — My Day, the tasks list, a calendar
+          pane, an open client file. No container is touched.
+
+       2. Patch.settle()  refreshes the derived surfaces (counters, the summary
+          line, the attention strip — all cheap text) and rebuilds a list
+          container only when its MEMBERSHIP changed. A task that just left
+          "לביצוע היום" still has to disappear; a task that merely changed
+          priority does not cost a single container rewrite.
+
+     Containers belonging to a view that is not on screen are skipped entirely
+     — setView() runs a full render() on the way in.
+     ========================================================================== */
+
+  function recKeys(collection, rows) {
+    return (rows || []).map(function (r) { return collection + ':' + r.id; });
+  }
+
+  /** the record keys a container currently holds, in DOM order */
+  function domKeys(sel) {
+    var el = $(sel);
+    if (!el) return null;
+    return $$('[data-rec]', el).map(function (n) { return n.dataset.rec; });
+  }
+
+  /** null on either side means "cannot prove it is unchanged" — rebuild */
+  function sameKeys(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) { if (a[i] !== b[i]) return false; }
+    return true;
+  }
+
+  /** every list container, the ids it should hold, and how to redraw it */
+  var SECTIONS = [
+    { view: 'today', sel: '#timeline', draw: renderTimeline,
+      keys: function () { return recKeys('events', todaysEvents()); } },
+    { view: 'today', sel: '#todoToday', draw: renderTodo,
+      keys: function () { return recKeys('tasks', unscheduledToday()); } },
+    // scope: the stage keeps the markup of every pane it has ever drawn, and
+    // only hides the inactive ones — membership must be read off the live pane
+    { view: 'calendar', sel: '#calStage', scope: '#calStage .cal-pane:not([hidden])',
+      draw: renderCalendar, keys: function () { return Cal.keys(); } },
+    { view: 'tasks', sel: '#tasksList', draw: renderTasks,
+      keys: function () { return recKeys('tasks', shownTasks()); } },
+    { view: 'tasks', sel: '#listsList', draw: renderLists,
+      keys: function () { return recKeys('lists', shownLists()); } },
+    { view: 'tasks', sel: '#notesList', draw: renderNotes,
+      keys: function () { return recKeys('notes', shownNotes()); } },
+    { view: 'clients', sel: '#clientsList', draw: renderClients,
+      keys: function () { return recKeys('clients', shownClients()); } }
+  ];
+
+  var Patch = {
+    /** the markup for one record, in the variant the node asked for */
+    html: function (collection, rec, compact) {
+      if (collection === 'tasks') return taskRow(rec, compact);
+      if (collection === 'lists') return listRow(rec);
+      if (collection === 'notes') return noteRow(rec);
+      if (collection === 'clients') return clientCard(rec);
+      if (collection === 'events') return eventCard(rec);
+      return '';
+    },
+
+    /** step 1 — swap this record's node(s) in place. Returns false if it is
+     *  not on screen at all, which is the caller's cue to repaint properly. */
+    record: function (collection, id) {
+      var rec = Store.find(collection, id);
+      if (!rec) return false;
+      var hit = false;
+      $$('[data-rec="' + collection + ':' + id + '"]').forEach(function (node) {
+        var html = Patch.html(collection, rec, node.dataset.compact === '1');
+        if (!html) return;
+        hit = true;
+        node.outerHTML = html;
+      });
+      return hit;
+    },
+
+    /** step 2 — derived text always, containers only where membership moved */
+    settle: function () {
+      renderSummary();
+      renderAttention();
+
+      SECTIONS.forEach(function (s) {
+        if (UI.view !== s.view) return;          // off-screen: setView() will redraw it
+        s.draw(sameKeys(domKeys(s.scope || s.sel), s.keys()));
+      });
+
+      renderDrawer(sameKeys(domKeys('#drawerBody'), Drawer.keys()));
+      Sync.paint();
+    },
+
+    /** the whole cycle for one changed record */
+    apply: function (collection, id) {
+      if (!Patch.record(collection, id)) { render(); return false; }
+      Patch.settle();
+      return true;
+    }
+  };
+
+  /* ==========================================================================
+     Undo — the safety net behind every deletion (Sprint 7)
+
+     Deleting is one tap and asks nothing. The record leaves the store at once,
+     so the view never lies, and Undo holds the exact slot it came from until
+     the toast expires. The confirmation dialogue still exists — it is just
+     asked afterwards, and only by the people who need it.
+     ========================================================================== */
+
+  var Undo = {
+    pending: null,        // { entry, restore } — at most one, always the newest
+
+    arm: function (entry, restore) {
+      this.commit();                            // an older window closes, never stacks
+      this.pending = { entry: entry, restore: restore };
+      return this.pending;
+    },
+
+    has: function () { return this.pending !== null; },
+    peek: function () { return this.pending ? this.pending.entry : null; },
+
+    /** אחזר was tapped — put the record back and close the window */
+    fire: function () {
+      var p = this.pending;
+      this.pending = null;
+      if (!p) return null;
+      p.restore();
+      return p.entry;
+    },
+
+    /** the five seconds ran out — the deletion is now permanent */
+    commit: function () {
+      var p = this.pending;
+      this.pending = null;
+      return p ? p.entry : null;
+    }
+  };
+
+  /**
+   * Stamp a record as changed, strictly later than its previous stamp.
+   * Date.now() on its own is not enough here: the outbox diffs on updatedAt, so
+   * a delete and an undo landing inside the same millisecond would leave the
+   * queued tombstone standing and the restored record would sync as deleted.
+   */
+  function touch(rec) {
+    rec.updatedAt = Math.max(Date.now(), (rec.updatedAt || 0) + 1);
+    return rec.updatedAt;
+  }
+
+  /**
+   * Remove a record and arm its undo. Pure store work — no DOM, no toast — so
+   * the healthcheck can drive the whole delete/restore cycle head-lessly.
+   */
+  function softDelete(collection, id) {
+    var list = Store.data && Store.data[collection];
+    if (!list) return null;
+
+    var index = -1;
+    for (var i = 0; i < list.length; i++) { if (list[i].id === id) { index = i; break; } }
+    if (index === -1) return null;
+
+    var rec = list[index];
+    list.splice(index, 1);
+    Store.save();
+
+    var entry = { collection: collection, id: id, index: index, label: DELETED_LABEL[collection] || 'הפריט' };
+
+    Undo.arm(entry, function () {
+      var live = Store.data[collection];
+      // the newer stamp is what makes the outbox REPLACE the tombstone it just
+      // queued with an upsert — without it the restore would sync as a delete
+      touch(rec);
+      live.splice(Math.min(index, live.length), 0, rec);
+      Store.save();
+    });
+
+    return entry;
+  }
+
+  /** the same safety net for a note inside a client file, which is a sub-record */
+  function softDeleteClientNote(clientId, noteId) {
+    var c = Store.find('clients', clientId);
+    if (!c) return null;
+    var rows = Array.isArray(c.clientNotes) ? c.clientNotes : [];
+
+    var index = -1;
+    for (var i = 0; i < rows.length; i++) { if (rows[i].id === noteId) { index = i; break; } }
+    if (index === -1) return null;
+
+    var note = rows[index];
+    rows.splice(index, 1);
+    c.clientNotes = rows;
+    touch(c);
+    Store.save();
+
+    var entry = { collection: 'clientNotes', id: noteId, index: index, label: DELETED_LABEL.clientNotes };
+
+    Undo.arm(entry, function () {
+      var live = Array.isArray(c.clientNotes) ? c.clientNotes : [];
+      live.splice(Math.min(index, live.length), 0, note);
+      c.clientNotes = live;
+      touch(c);
+      Store.save();
+    });
+
+    return entry;
   }
 
   /* ------------------------------------------------------------ master add */
@@ -3046,13 +3385,39 @@
   /* ----------------------------------------------------------------- toast */
 
   var toastTimer = null;
-  function toast(msg) {
+
+  /**
+   * Pass `action` and the toast becomes a safety net rather than a receipt:
+   * the אחזר button appears and the dismiss timer stretches to UNDO_MS. When
+   * that timer runs out the pending deletion is committed — the toast IS the
+   * confirmation dialogue, asked after the fact so the common case is free.
+   */
+  function toast(msg, action) {
     var el = $('#toast');
-    el.textContent = msg;
+    if (!el) return;
+    var txt = $('#toastText'), btn = $('#toastUndo');
+
+    if (txt) txt.textContent = msg; else el.textContent = msg;
+    if (btn) btn.hidden = !action;
+    el.classList.toggle('has-action', !!action);
     el.hidden = false;
+
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { el.hidden = true; }, 2600);
+    toastTimer = setTimeout(function () {
+      el.hidden = true;
+      el.classList.remove('has-action');
+      if (btn) btn.hidden = true;
+      if (action) Undo.commit();            // the window closed — the deletion stands
+    }, action ? UNDO_MS : TOAST_MS);
   }
+
+  function hideToast() {
+    clearTimeout(toastTimer);
+    var el = $('#toast'), btn = $('#toastUndo');
+    if (el) { el.hidden = true; el.classList.remove('has-action'); }
+    if (btn) btn.hidden = true;
+  }
+
   function warn(msg) { toast(msg); return false; }
 
   /* ==========================================================================
@@ -3317,8 +3682,19 @@
       '[data-calview],[data-calnav],[data-calslot],' +
       '[data-tasktab],[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
       '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
-      '[data-nextaction],[data-clientnote],[data-clientnotedel]') : null;
+      '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo]') : null;
     if (!el) return;
+
+    // one light pulse for every control in the app — button taps, tab switches
+    // and status toggles all come through this one delegate
+    Haptics.light();
+
+    if (el.dataset.undo) {
+      var back = Undo.fire();
+      hideToast();
+      if (back) { render(); toast(back.label + ' שוחזר'); }
+      return;
+    }
 
     if (el.dataset.action === 'master-add') { openTypeSheet(); return; }
     if (el.dataset.action === 'close-sheet') { closeSheets(); return; }
@@ -3358,7 +3734,7 @@
         Store.save();
         // repaint only AFTER the browser has followed tel:/wa.me — pulling the
         // anchor out mid-dispatch cancels the navigation on some mobile browsers
-        setTimeout(function () { render(); }, 0);
+        setTimeout(function () { Patch.apply('clients', chp[1]); }, 0);
       }
       return;                                   // never preventDefault: the OS owns the link
     }
@@ -3371,7 +3747,7 @@
         var when = panel.querySelector('[name="nextActionAt"]');
         setClientNextAction(nac, txt ? txt.value : '', when ? when.value : '');
         Store.save();
-        render();
+        Patch.apply('clients', nac.id);
         toast(clientNeedsAction(nac) ? 'הפעולה הבאה נמחקה' : 'הפעולה הבאה עודכנה');
       }
       return;
@@ -3385,7 +3761,7 @@
         if (!addClientNote(cnc, area.value)) { warn('הפתק ריק'); return; }
         area.value = '';
         Store.save();
-        render();
+        Patch.apply('clients', cnc.id);
         toast('הפתק נוסף לתיק');
       }
       return;
@@ -3393,13 +3769,10 @@
 
     if (el.dataset.clientnotedel) {
       var dnp = el.dataset.clientnotedel.split(':');
-      var dnc = Store.find('clients', dnp[0]);
-      if (dnc) {
-        dnc.clientNotes = (dnc.clientNotes || []).filter(function (n) { return n.id !== dnp[1]; });
-        dnc.updatedAt = Date.now();
-        Store.save();
+      var goneNote = softDeleteClientNote(dnp[0], dnp[1]);
+      if (goneNote) {
         render();
-        toast('הפתק נמחק');
+        toast(goneNote.label + ' נמחק', UNDO_LABEL);
       }
       return;
     }
@@ -3411,7 +3784,8 @@
       if (t) {
         toggleTaskDone(t);
         Store.save();
-        render();
+        if (t.done) Haptics.done();           // a second beat: this one is finished
+        Patch.apply('tasks', t.id);
         toast(t.done ? 'המשימה הושלמה ✓' : 'המשימה חזרה ל' + STATUS_LABEL[t.status]);
       }
       return;
@@ -3422,7 +3796,7 @@
       if (ct) {
         setTaskStatus(ct, nextStatus(ct.status));
         Store.save();
-        render();
+        Patch.apply('tasks', ct.id);
         toast('סטטוס: ' + STATUS_LABEL[ct.status]);
       }
       return;
@@ -3436,12 +3810,13 @@
         // a checklist that just filled up completes its task in one move
         if (sprog.total && sprog.done === sprog.total && !isClosed(st.status)) {
           setTaskStatus(st, 'done');
+          Haptics.done();
           toast('כל תת־המשימות הושלמו — המשימה נסגרה');
         } else {
           st.updatedAt = Date.now();
         }
         Store.save();
-        render();
+        Patch.apply('tasks', st.id);
       }
       return;
     }
@@ -3453,8 +3828,11 @@
         var lprog = toggleItem(lst.items, lp[1]);
         lst.updatedAt = Date.now();
         Store.save();
-        render();
-        if (lprog.total && lprog.done === lprog.total) toast('הרשימה הושלמה 🎉');
+        Patch.apply('lists', lst.id);
+        if (lprog.total && lprog.done === lprog.total) {
+          Haptics.done();
+          toast('הרשימה הושלמה 🎉');
+        }
       }
       return;
     }
@@ -3465,7 +3843,7 @@
         note.pinned = !note.pinned;
         note.updatedAt = Date.now();
         Store.save();
-        render();
+        Patch.apply('notes', note.id);
         toast(note.pinned ? 'הפתק הוצמד למעלה' : 'ההצמדה בוטלה');
       }
       return;
@@ -3486,9 +3864,11 @@
 
     if (el.dataset.del) {
       var parts = el.dataset.del.split(':');
-      Store.remove(parts[0], parts[1]);
-      render();
-      toast('נמחק');
+      var gone = softDelete(parts[0], parts[1]);
+      if (gone) {
+        render();                              // the row is leaving — membership moved
+        toast(gone.label + ' נמחק', UNDO_LABEL);
+      }
       return;
     }
   }
@@ -3499,9 +3879,10 @@
     if (!el || !el.dataset || !el.dataset.clientstatus) return;
     var c = Store.find('clients', el.dataset.clientstatus);
     if (!c) return;
+    Haptics.light();
     setClientStatus(c, el.value);
     Store.save();
-    render();
+    Patch.apply('clients', c.id);
     toast('סטטוס: ' + CLIENT_STATUS_LABEL[normClientStatus(c.status)]);
   }
 
@@ -3535,6 +3916,30 @@
   window.APP = {
     Store: Store, isoDate: isoDate, plural: plural, normCat: normCat,
     STORE_KEY: STORE_KEY, Notify: Notify, Cal: Cal,
+
+    // premium UX layer (Sprint 7) — haptics, the undo safety net and the
+    // targeted-patch engine. All three are pure enough for healthcheck.js to
+    // drive with no DOM, no vibration motor and no network.
+    ui: {
+      HAPTIC_LIGHT: HAPTIC_LIGHT,
+      HAPTIC_DONE: HAPTIC_DONE,
+      TOAST_MS: TOAST_MS,
+      UNDO_MS: UNDO_MS,
+      UNDO_LABEL: UNDO_LABEL,
+      DELETED_LABEL: DELETED_LABEL,
+      Haptics: Haptics,
+      Undo: Undo,
+      Patch: Patch,
+      SECTIONS: SECTIONS,
+      softDelete: softDelete,
+      softDeleteClientNote: softDeleteClientNote,
+      recKeys: recKeys,
+      sameKeys: sameKeys,
+      shownTasks: shownTasks,
+      shownLists: shownLists,
+      shownNotes: shownNotes,
+      shownClients: shownClients
+    },
 
     // cloud sync engine — schema, serialisers, outbox and merge, all pure
     // enough for healthcheck.js to drive without a network or a DOM

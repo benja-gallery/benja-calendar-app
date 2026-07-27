@@ -182,7 +182,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   flex:0 0 auto;
   display:inline-flex; align-items:center; gap:7px;
   margin-inline-start:auto;
-  padding:0 13px; height:38px; min-height:38px;
+  padding:0 13px; height:var(--tap); min-height:var(--tap);
   background:var(--card-2); border:1px solid var(--line-soft);
   border-radius:999px;
   color:var(--muted); font-size:12.5px; font-weight:700; white-space:nowrap;
@@ -209,7 +209,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 .sync-btn{
   flex:0 0 auto;
   display:inline-flex; align-items:center; gap:7px;
-  padding:0 13px; height:38px; min-height:38px;
+  padding:0 13px; height:var(--tap); min-height:var(--tap);
   background:var(--card-2); border:1px solid var(--line-soft);
   border-radius:999px;
   color:var(--muted); font-size:12.5px; font-weight:700; white-space:nowrap;
@@ -242,7 +242,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 .gcal-btn{
   flex:0 0 auto;
   display:inline-flex; align-items:center; gap:7px;
-  padding:0 13px; height:38px; min-height:38px;
+  padding:0 13px; height:var(--tap); min-height:var(--tap);
   background:var(--card-2); border:1px solid var(--line-soft);
   border-radius:999px;
   color:var(--muted); font-size:12.5px; font-weight:700; white-space:nowrap;
@@ -284,13 +284,14 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   .gcal-btn.is-busy .gcal-ico{ animation:sync-pulse 1.8s ease-in-out infinite; }
 }
 
+/* the narrowest phones drop the labels — the pills stay square, never sub-tap */
 @media (max-width:420px){
   .push-label{ display:none; }
-  .push-btn{ padding:0; width:38px; min-width:38px; justify-content:center; }
+  .push-btn{ padding:0; width:var(--tap); min-width:var(--tap); justify-content:center; }
   .sync-label{ display:none; }
-  .sync-btn{ padding:0; width:38px; min-width:38px; justify-content:center; }
+  .sync-btn{ padding:0; width:var(--tap); min-width:var(--tap); justify-content:center; }
   .gcal-label{ display:none; }
-  .gcal-btn{ padding:0; width:38px; min-width:38px; justify-content:center; }
+  .gcal-btn{ padding:0; width:var(--tap); min-width:var(--tap); justify-content:center; }
 }
 
 /* ---------- segmented control (global category filter) ---------- */
@@ -576,7 +577,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 
 .cl-item{
   display:flex; align-items:center; gap:9px; width:100%;
-  min-height:38px; padding:5px 8px;
+  min-height:var(--tap); padding:5px 8px;
   background:transparent; border:0; border-radius:var(--r-sm);
   text-align:start; color:var(--ink);
   transition:background .16s;
@@ -611,7 +612,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 }
 .quick-acts{ display:flex; flex-wrap:wrap; gap:7px; margin-top:9px; }
 .mini{
-  min-height:34px; min-width:0;
+  min-height:var(--tap); min-width:0;
   padding:0 11px;
   background:var(--card-2); border:1px solid var(--line-soft);
   border-radius:999px;
@@ -737,7 +738,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 }
 .wk-cell:hover{ background:var(--line-soft); }
 .wk-cell.is-today{ background:var(--gold-soft); }
-.wk-allday .wk-cell{ min-height:34px; }
+.wk-allday .wk-cell{ min-height:var(--tap); }
 
 .wk-chip{
   display:block; max-width:100%;
@@ -965,6 +966,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   bottom:calc(var(--bar-h) + var(--safe-b) + 74px);
   inset-inline-start:50%; transform:translateX(50%);
   max-width:calc(100vw - 40px);
+  display:flex; align-items:center; gap:10px;
   padding:11px 18px;
   background:var(--card-2); border:1px solid var(--gold-edge);
   border-radius:999px;
@@ -972,6 +974,22 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   box-shadow:var(--shadow-sm);
   animation:rise .2s ease both;
 }
+/* display:flex above beats the UA rule for [hidden] — restore it explicitly */
+.toast[hidden]{ display:none; }
+.toast-text{ min-width:0; }
+
+/* the undo affordance — a real button, sized for a thumb, never a link.
+   The pill loosens its own padding so the 44px control still fits inside it. */
+.toast.has-action{ padding-block:5px; padding-inline-end:5px; }
+.toast-undo{
+  flex:0 0 auto;
+  padding:0 16px; min-height:var(--tap); min-width:var(--tap);
+  background:var(--gold-soft); border:1px solid var(--gold-edge);
+  border-radius:999px;
+  color:var(--gold); font-size:13px; font-weight:800;
+}
+.toast-undo:hover{ background:var(--gold); color:var(--surface); }
+.toast-undo[hidden]{ display:none; }
 
 /* ==========================================================================
    Client CRM · client drawer · Next-Action alert engine   (Sprint 4)
@@ -1059,7 +1077,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   text-decoration:none;
   transition:border-color .16s, color .16s, background .16s;
 }
-.qa-mini{ min-height:38px; padding:0 13px; font-size:12.5px; }
+.qa-mini{ min-height:var(--tap); padding:0 13px; font-size:12.5px; }
 .qa-call:hover{ color:var(--business); border-color:var(--business-edge); }
 .qa-wa:hover{ color:var(--personal); border-color:var(--personal-edge); }
 .qa.is-off{ color:var(--faint); background:transparent; cursor:default; }
@@ -1175,6 +1193,73 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 .dr-log.dr-contact .dr-log-ico{ background:var(--business-soft); color:var(--business); }
 .dr-log.dr-created .dr-log-ico{ background:var(--personal-soft); color:var(--personal); }
 .dr-log.dr-link    .dr-log-ico{ background:var(--waiting-soft);  color:var(--waiting); }
+
+/* ==========================================================================
+   Tactile touch states, focus rings & hit expanders   (Sprint 7)
+
+   Three rules, in this order:
+
+   1. Every control dips under a press and springs back. transform is the only
+      animated property, so a press never triggers layout or paint of anything
+      around it. Controls that already carry a positioning transform (.fab)
+      compose their own :active rule and keep winning on specificity.
+
+   2. A keyboard focus is always visible; a finger press never paints a ring.
+      :focus-visible is what separates the two — the outline is drawn outside
+      the box so it can never shift the layout it sits in.
+
+   3. A handful of chips must stay visually small (a status badge inside a
+      12px meta line cannot be 44px tall without wrecking the row) but must
+      still clear the 44x44 touch floor. They get a transparent, centred hit
+      expander instead of a bigger box — the standard iOS HIG / WCAG 2.5.5
+      answer. left/top are deliberately physical, not logical: the transform
+      that centres the expander is physical too, and mixing the two flips the
+      overlay to the wrong side in RTL.
+   ========================================================================== */
+
+button, .tap, .qa, .cl-open, .att, .type-btn, .seg, .cl-item,
+.mini, .badge-btn, .cal-cell, .wk-cell, .dv-slot, .toast-undo{
+  transition:transform .1s ease;
+  -webkit-tap-highlight-color:transparent;
+  touch-action:manipulation;                 /* no 300ms double-tap-zoom delay */
+}
+
+button:active, .tap:active, .qa:active, .cl-open:active, .att:active,
+.type-btn:active, .seg:active, .cl-item:active, .mini:active,
+.badge-btn:active, .cal-cell:active, .wk-cell:active, .dv-slot:active,
+.toast-undo:active{
+  transform:scale(.97);
+}
+
+/* the calendar stage owns the horizontal axis — its swipe navigation must not
+   be handed to the browser by the blanket touch-action above */
+.cal-stage button{ touch-action:pan-y; }
+
+button:focus-visible, a:focus-visible, .tap:focus-visible,
+.input:focus-visible, .textarea:focus-visible, .select:focus-visible{
+  outline:2px solid var(--gold);
+  outline-offset:2px;
+}
+button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
+
+/* z-index lifts the chip above the plain labels beside it, so the part of the
+   expander that overhangs them still belongs to the chip */
+.badge-btn{ position:relative; z-index:1; }
+.badge-btn::after{
+  content:"";
+  position:absolute; left:50%; top:50%;
+  transform:translate(-50%,-50%);
+  width:100%; height:100%;
+  min-width:var(--tap); min-height:var(--tap);
+}
+
+/* a device that asks for stillness gets stillness — the press state stays,
+   because it is feedback, not decoration */
+@media (prefers-reduced-motion:reduce){
+  .view.is-active{ animation:none; }
+  .toast{ animation:none; }
+  .att:hover, .type-btn:hover, .cl-card:hover{ transform:none; }
+}
 
 /* ==========================================================================
    Desktop

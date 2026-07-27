@@ -313,7 +313,11 @@
   <div class="sheet-tail"></div>
 </aside>
 
-<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+<!-- toast · doubles as the undo safety net: deleting arms [אחזר] for 5 seconds -->
+<div class="toast" id="toast" role="status" aria-live="polite" hidden>
+  <span class="toast-text" id="toastText"></span>
+  <button class="toast-undo" id="toastUndo" data-undo="1" type="button" hidden>אחזר</button>
+</div>
 
 <script src="app.js"></script>
 </body>

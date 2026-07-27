@@ -1,6 +1,6 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Sprint 5 shipped — Cloudflare D1, Worker sync API, offline outbox, v0.5
+> **Status:** Sprint 7 shipped — premium UX: haptics, targeted DOM updates, undo safety net, v0.7
 > **Repository:** `C:\calendar-app` (fresh, independent git repo — no relationship to `benja-gallery`)
 > **Created:** 2026-07-27 · **Spec injected:** 2026-07-27 (Sprint 1)
 
@@ -330,7 +330,10 @@ five and live in `styles.css` under `:root`. **No colour literal is written outs
 
 ### 7.2 Touch & Input Standard
 
-- Every interactive target is **≥ 44×44 px**.
+- Every interactive target is **≥ 44×44 px**. Since Sprint 7 this is enforced by a CSS
+  parse in `healthcheck.js`, not by inspection: any rule that sizes a control below the
+  floor fails the build. A control that must stay visually small clears the floor with a
+  transparent centred `::after` hit expander rather than a bigger box (§7.4f).
 - Every `input`, `select` and `textarea` is locked to **16px** font-size to prevent iOS
   auto-zoom on focus.
 - **Zero horizontal scroll** at any viewport ≥ 320px (`overflow-x: hidden` on the root plus
@@ -726,6 +729,93 @@ mapping both directions, the exclusive-end math with its rollovers, a local → 
 round-trip with no drift, wall-clock slicing of RFC-3339 offsets, LWW ordering including the
 equal-instant case, no-op suppression, the Google link round-tripping through the client
 serialisers, and that no OAuth secret appears in any source file.
+
+### 7.4f Premium UX — haptics, targeted rendering & the undo safety net (shipped — Sprint 7)
+
+Sprint 7 spends nothing on new features. It closes the gap between "a web app that works"
+and "an app that feels native": the four things a finger notices in the first ten seconds.
+
+**1. Haptics & tactile press states**
+
+`navigator.vibrate` exists on Android/Chrome, is permanently absent on iOS Safari, and is
+silently ignored in a tab the user has never engaged. Exactly one call site in the whole
+codebase is allowed to touch it — `Haptics.fire()` — and it is support-gated and wrapped in
+a `try`, because a tap must never fail on a device with no motor. Two pulses only:
+
+| Pulse | Pattern | When |
+|---|---|---|
+| `light` | `10ms` | every delegated control: button taps, tab switches, status toggles |
+| `done` | `[10, 40, 10]` | something finished — a task closed, a checklist filled up |
+
+The pulse is fired once, in the click delegate, immediately **after** a control has been
+matched — never on a stray tap on the background.
+
+Visually the same press is answered by `transform: scale(.97)` over `.1s ease` on every
+control. `transform` is the only animated property, so a press never triggers layout of
+anything around it, and `.fab` composes its own rule so it keeps its positioning transform.
+Keyboard focus paints a `2px` gold ring through **`:focus-visible`**, and
+`:focus:not(:focus-visible)` clears it so a finger never leaves a ring behind.
+
+**2. Targeted DOM updates**
+
+Until Sprint 7 every tap called `render()`, which rewrote the `innerHTML` of every container
+in the app — including the one the finger was still on. The pressed card was destroyed and
+rebuilt mid-press: the `:active` state died and the layout flickered.
+
+A simple state change now takes two steps:
+
+1. **`Patch.record(collection, id)`** — every row builder stamps
+   **`data-rec="collection:id"`** (plus `data-compact="1"` for the dense calendar variant)
+   on its root node, so one record can be repainted *in place*, in every pane it appears in
+   — My Day, the tasks list, a calendar pane, an open client file. No container is touched.
+2. **`Patch.settle()`** — the derived surfaces refresh (counters, the summary line, the
+   attention strip — all cheap text), and a list container is rebuilt **only if its
+   membership changed**. Membership is the ordered list of `data-rec` keys the container
+   *should* hold, compared against the ones it *does* hold. A task that just left
+   `לביצוע היום` still has to disappear; a task that merely changed priority does not cost a
+   single container rewrite. Containers belonging to an off-screen view are skipped
+   entirely — `setView()` runs a full `render()` on the way in.
+
+Every list renderer takes a `quiet` flag: when set it skips its markup and refreshes only
+its meta line. The calendar publishes `Cal.keys()`; month and week draw their records as
+dots and chips rather than rows, so they answer `null` — "always rebuild me".
+
+**3. Undo instead of confirm**
+
+Deleting is one tap and asks nothing. `softDelete()` removes the record and hands `Undo` the
+exact slot it came from; the toast grows an **`אחזר`** button and stays for **5 seconds**
+(`UNDO_MS`). Letting it expire commits the deletion. The confirmation dialogue still exists
+— it is just asked afterwards, and only of the people who need it. The same net covers a
+note inside a client file (`softDeleteClientNote()`), which is a sub-record.
+
+One deletion is pending at a time; arming a second commits the first. A restore stamps the
+record with `touch()` — strictly later than its previous stamp, not merely `Date.now()` —
+so the outbox **replaces** the tombstone it just queued with an upsert. Without that, a
+delete and an undo landing inside the same millisecond would leave the tombstone standing
+and the restored record would sync as deleted.
+
+**4. Mobile ergonomics**
+
+Every control clears the **44x44** floor (§7.2), now enforced by a CSS parser in
+`healthcheck.js` rather than by inspection: the header pills, the narrow-phone icon-only
+variants of them, the checklist rows, the note quick-actions and the client contact chips
+were all resized to `var(--tap)`. The one control that must stay visually small — the
+status chip inside a 12px meta line — clears the floor with a transparent centred `::after`
+hit expander instead of a bigger box. Its anchor is deliberately physical (`left`/`top`),
+because the centring transform is physical too and mixing the two flips the overlay to the
+wrong side in RTL.
+
+`touch-action: manipulation` removes the 300ms double-tap-zoom delay app-wide, and
+`.cal-stage button` re-asserts `pan-y` so the calendar swipe navigation keeps the horizontal
+axis.
+
+**Shipped shell** — `sw.js` is bumped to `v9`.
+
+**Verification** — `healthcheck.js` §22 executes the new layer for real: haptics against a
+stubbed device with a motor, without one, and with one that throws; the full
+delete → restore → commit cycle including the outbox tombstone replacement; membership
+comparison including reorder and removal; the section registry cross-checked against the
+document; and a CSS parse that fails the build on any control that drops below 44px.
 
 ### 7.4 General layout
 
