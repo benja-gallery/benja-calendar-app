@@ -182,12 +182,22 @@
 
     <!-- ---------- VIEW: CLIENTS ---------- -->
     <section class="view" id="view-clients" aria-label="לקוחות">
+
+      <!-- pipeline sub-tabs: הכל · לידים חדשים · פעילים · ממתינים · סגורים -->
+      <div class="segmented client-tabs" role="tablist" aria-label="סינון לקוחות לפי שלב בצינור">
+        <button class="seg is-active" role="tab" aria-selected="true"  data-clientfilter="all"    type="button">הכל <b class="seg-count" data-clientcount="all">0</b></button>
+        <button class="seg"           role="tab" aria-selected="false" data-clientfilter="new"    type="button">לידים חדשים <b class="seg-count" data-clientcount="new">0</b></button>
+        <button class="seg"           role="tab" aria-selected="false" data-clientfilter="active" type="button">פעילים <b class="seg-count" data-clientcount="active">0</b></button>
+        <button class="seg"           role="tab" aria-selected="false" data-clientfilter="waiting" type="button">ממתינים <b class="seg-count" data-clientcount="waiting">0</b></button>
+        <button class="seg"           role="tab" aria-selected="false" data-clientfilter="closed" type="button">סגורים <b class="seg-count" data-clientcount="closed">0</b></button>
+      </div>
+
       <div class="block">
         <div class="block-head">
           <h2>לקוחות</h2>
           <span class="block-meta" id="clientsMeta"></span>
         </div>
-        <div class="card" id="clientsList"></div>
+        <div class="client-cards" id="clientsList"></div>
       </div>
       <div class="scroll-tail"></div>
     </section>
@@ -255,6 +265,34 @@
   </form>
   <div class="sheet-tail"></div>
 </div>
+
+<!-- ============ CLIENT DRAWER — תיק לקוח ============ -->
+<aside class="drawer" id="clientDrawer" role="dialog" aria-modal="true" aria-labelledby="drawerName" hidden>
+  <div class="sheet-grab" aria-hidden="true"></div>
+
+  <div class="drawer-head">
+    <div class="drawer-id">
+      <h2 id="drawerName">תיק לקוח</h2>
+      <p class="drawer-sub" id="drawerSub"></p>
+    </div>
+    <button class="sheet-x" data-action="close-drawer" type="button" aria-label="סגירת תיק הלקוח">✕</button>
+  </div>
+
+  <!-- direct call / WhatsApp / status, always reachable above the tabs -->
+  <div class="drawer-acts" id="drawerActions"></div>
+
+  <div class="segmented drawer-tabs" role="tablist" aria-label="חלקי תיק הלקוח">
+    <button class="seg is-active" role="tab" aria-selected="true"  data-clienttab="overview" type="button">סקירה</button>
+    <button class="seg"           role="tab" aria-selected="false" data-clienttab="meetings" type="button">פגישות</button>
+    <button class="seg"           role="tab" aria-selected="false" data-clienttab="tasks"    type="button">משימות</button>
+    <button class="seg"           role="tab" aria-selected="false" data-clienttab="lists"    type="button">רשימות</button>
+    <button class="seg"           role="tab" aria-selected="false" data-clienttab="notes"    type="button">פתקים</button>
+    <button class="seg"           role="tab" aria-selected="false" data-clienttab="history"  type="button">היסטוריה</button>
+  </div>
+
+  <div class="drawer-body" id="drawerBody"></div>
+  <div class="sheet-tail"></div>
+</aside>
 
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 

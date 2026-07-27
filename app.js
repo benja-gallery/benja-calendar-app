@@ -57,6 +57,46 @@
     done: 'עוד לא סומנה כאן משימה כהושלמה.'
   };
 
+  /* --- client CRM (Sprint 4) --- */
+  var CLIENT_STATUSES = ['lead', 'contacted', 'interested', 'quoted',
+    'awaiting', 'meeting', 'won', 'irrelevant', 'past'];
+  var CLIENT_STATUS_LABEL = {
+    lead: 'ליד חדש', contacted: 'נוצר קשר', interested: 'מתעניין',
+    quoted: 'נשלחה הצעה', awaiting: 'ממתין לתשובה', meeting: 'פגישה נקבעה',
+    won: 'עסקה נסגרה', irrelevant: 'לא רלוונטי כרגע', past: 'לקוח עבר'
+  };
+  /* a closed relationship owes nobody a next action — see clientNeedsAction() */
+  var CLIENT_CLOSED = ['won', 'irrelevant', 'past'];
+
+  var CLIENT_TABS = ['all', 'new', 'active', 'waiting', 'closed'];
+  var CLIENT_TAB_STATUSES = {
+    'new': ['lead'],
+    active: ['contacted', 'interested', 'quoted', 'meeting'],
+    waiting: ['awaiting'],
+    closed: CLIENT_CLOSED
+  };
+  var CLIENT_TAB_EMPTY = {
+    all: 'כל לקוח שתוסיף יופיע כאן עם הסטטוס והפעולה הבאה שלו.',
+    'new': 'אין לידים חדשים שממתינים לפנייה ראשונה.',
+    active: 'אין כרגע לקוח פעיל בצינור המכירות.',
+    waiting: 'אין לקוח שממתין לתשובה.',
+    closed: 'עוד לא נסגרה כאן עסקה ולא הועבר תיק לארכיון.'
+  };
+
+  /* the one string the whole Next-Action alert engine hangs on */
+  var NO_ACTION_BADGE = '⚠️ אין פעולה הבאה מוגדרת';
+
+  var DRAWER_TABS = ['overview', 'meetings', 'tasks', 'lists', 'notes', 'history'];
+  var DRAWER_TAB_LABEL = {
+    overview: 'סקירה', meetings: 'פגישות', tasks: 'משימות',
+    lists: 'רשימות', notes: 'פתקים', history: 'היסטוריה'
+  };
+
+  var HISTORY_KINDS = ['created', 'status', 'action', 'contact', 'note', 'link'];
+  var HISTORY_ICON = {
+    created: '✦', status: '⇄', action: '➜', contact: '📞', note: '✎', link: '🔗'
+  };
+
   var HE_DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
   var HE_MONTHS = ['ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני',
     'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר'];
@@ -405,6 +445,183 @@
     };
   }
 
+  /* ==========================================================================
+     Client CRM model  (Sprint 4)
+
+     Same discipline as the tasks engine: every function below is pure — it
+     takes a client record (or a plain array) and returns a value, or mutates
+     only that record. No DOM, no store lookups. That is what lets
+     healthcheck.js drive the whole CRM — the drawer tab builders included —
+     straight out of window.APP.clients.
+     ========================================================================== */
+
+  function normClientStatus(s) {
+    return CLIENT_STATUSES.indexOf(s) === -1 ? 'lead' : s;
+  }
+
+  /** עסקה נסגרה · לא רלוונטי כרגע · לקוח עבר — the pipeline is done with them */
+  function clientClosed(c) {
+    return CLIENT_CLOSED.indexOf(normClientStatus(c && c.status)) !== -1;
+  }
+
+  /**
+   * The Next-Action alert engine (mandate §3): an ACTIVE client with no
+   * designated next action is a hole in the pipeline, and the UI shouts about
+   * it — on the card, in the drawer and on "היום שלי".
+   */
+  function clientNeedsAction(c) {
+    if (!c || clientClosed(c)) return false;
+    return !String(c.nextAction == null ? '' : c.nextAction).trim();
+  }
+
+  /** {id,body,at} rows; a store that ever held raw strings is adopted, not lost */
+  function normClientNotes(rows) {
+    return (Array.isArray(rows) ? rows : [])
+      .map(function (n) {
+        if (typeof n === 'string') return { id: uid('cn'), body: n.trim(), at: Date.now() };
+        if (!n || typeof n !== 'object') return null;
+        return {
+          id: n.id || uid('cn'),
+          body: String(n.body == null ? '' : n.body).trim(),
+          at: typeof n.at === 'number' ? n.at : Date.now()
+        };
+      })
+      .filter(function (n) { return n && n.body; });
+  }
+
+  function normHistory(rows) {
+    return (Array.isArray(rows) ? rows : [])
+      .map(function (h) {
+        if (!h || typeof h !== 'object') return null;
+        return {
+          id: h.id || uid('hs'),
+          at: typeof h.at === 'number' ? h.at : Date.now(),
+          kind: HISTORY_KINDS.indexOf(h.kind) === -1 ? 'note' : h.kind,
+          text: String(h.text == null ? '' : h.text).trim()
+        };
+      })
+      .filter(function (h) { return h && h.text; });
+  }
+
+  /** a Sprint-1 client carries only name/phone/email/followUpAt/nextAction */
+  function migrateClient(c) {
+    if (!c || typeof c !== 'object') return c;
+    c.status = normClientStatus(c.status);
+    ['name', 'phone', 'email', 'interest', 'budget',
+      'nextAction', 'nextActionAt', 'followUpAt', 'lastContactAt', 'notes'].forEach(function (k) {
+        c[k] = typeof c[k] === 'string' ? c[k] : '';
+      });
+    c.clientNotes = normClientNotes(c.clientNotes);
+    c.history = normHistory(c.history);
+    return c;
+  }
+
+  /** the single writer of the timeline — newest first, capped so it cannot bloat */
+  function logHistory(client, kind, text) {
+    var body = String(text == null ? '' : text).trim();
+    if (!client || !body) return null;
+    if (!Array.isArray(client.history)) client.history = [];
+    var entry = {
+      id: uid('hs'),
+      at: Date.now(),
+      kind: HISTORY_KINDS.indexOf(kind) === -1 ? 'note' : kind,
+      text: body
+    };
+    client.history.unshift(entry);
+    if (client.history.length > 200) client.history.length = 200;
+    client.updatedAt = entry.at;
+    return entry;
+  }
+
+  /** every status move is written into the file — a pipeline you can audit */
+  function setClientStatus(client, status) {
+    if (!client) return client;
+    var prev = normClientStatus(client.status);
+    var next = normClientStatus(status);
+    if (next === prev) return client;
+    client.status = next;
+    client.updatedAt = Date.now();
+    logHistory(client, 'status',
+      'סטטוס: ' + CLIENT_STATUS_LABEL[prev] + ' ➜ ' + CLIENT_STATUS_LABEL[next]);
+    return client;
+  }
+
+  function setClientNextAction(client, text, when) {
+    if (!client) return client;
+    var next = String(text == null ? '' : text).trim();
+    var prev = String(client.nextAction == null ? '' : client.nextAction).trim();
+    client.nextAction = next;
+    client.nextActionAt = typeof when === 'string' ? when : '';
+    client.updatedAt = Date.now();
+    if (next !== prev) {
+      logHistory(client, 'action', next
+        ? 'הפעולה הבאה: ' + next + (client.nextActionAt ? ' · ' + relDay(client.nextActionAt) : '')
+        : 'הפעולה הבאה נמחקה');
+    }
+    return client;
+  }
+
+  function addClientNote(client, body) {
+    var text = String(body == null ? '' : body).trim();
+    if (!client || !text) return null;
+    if (!Array.isArray(client.clientNotes)) client.clientNotes = [];
+    var note = { id: uid('cn'), body: text, at: Date.now() };
+    client.clientNotes.unshift(note);
+    logHistory(client, 'note', 'נוסף פתק לתיק');
+    return note;
+  }
+
+  /** a real-world touch: the file remembers when you last actually spoke */
+  function markContact(client, channel) {
+    if (!client) return client;
+    client.lastContactAt = todayISO();
+    logHistory(client, 'contact',
+      channel === 'whatsapp' ? 'נשלחה הודעת וואטסאפ' : 'יצאה שיחת טלפון');
+    return client;
+  }
+
+  /** the pipeline sub-tabs: הכל · לידים חדשים · פעילים · ממתינים · סגורים */
+  function clientMatchesTab(c, tab) {
+    if (!c) return false;
+    if (tab === 'all' || CLIENT_TABS.indexOf(tab) === -1) return true;
+    return CLIENT_TAB_STATUSES[tab].indexOf(normClientStatus(c.status)) !== -1;
+  }
+
+  /** open first, holes in the pipeline at the very top, then by when it is due */
+  function sortClients(clients) {
+    return (Array.isArray(clients) ? clients.slice() : []).sort(function (a, b) {
+      var ca = clientClosed(a) ? 1 : 0, cb = clientClosed(b) ? 1 : 0;
+      if (ca !== cb) return ca - cb;
+      var na = clientNeedsAction(a) ? 0 : 1, nb = clientNeedsAction(b) ? 0 : 1;
+      if (na !== nb) return na - nb;
+      var da = a.nextActionAt || a.followUpAt || '9999-99-99';
+      var db = b.nextActionAt || b.followUpAt || '9999-99-99';
+      if (da !== db) return da < db ? -1 : 1;
+      return (b.updatedAt || 0) - (a.updatedAt || 0);
+    });
+  }
+
+  /* --- direct call / WhatsApp targets --- */
+
+  function telHref(phone) {
+    var d = String(phone == null ? '' : phone).replace(/[^\d+]/g, '');
+    return d ? 'tel:' + d : '';
+  }
+
+  /** 050-1234567 → 972501234567; an already-international number is left alone */
+  function waNumber(phone) {
+    var d = String(phone == null ? '' : phone).replace(/\D/g, '');
+    if (!d) return '';
+    if (d.indexOf('972') === 0) return d;
+    if (d.charAt(0) === '0') return '972' + d.slice(1);
+    return d;
+  }
+
+  function waHref(phone) {
+    var n = waNumber(phone);
+    return n ? 'https://wa.me/' + n : '';
+  }
+
   /* ------------------------------------------------------------------ store */
 
   var Store = {
@@ -415,7 +632,7 @@
         version: 1,
         owner: OWNER,
         prefs: {
-          filter: 'all', calView: 'month', taskTab: 'all',
+          filter: 'all', calView: 'month', taskTab: 'all', clientTab: 'all',
           notify: { on: false, lead: 10 }, fired: {}
         },
         events: [], tasks: [], lists: [], notes: [], clients: [],
@@ -447,6 +664,8 @@
           r.category = normCat(r.category);
           if (!r.id) r.id = uid(k.slice(0, 2));
           if (!r.ownerId) r.ownerId = OWNER.id;
+          // Sprint 4: the client association is a plain id, never null
+          if (k !== 'clients') r.clientId = typeof r.clientId === 'string' ? r.clientId : '';
           return r;
         });
       });
@@ -454,11 +673,16 @@
       d.tasks = d.tasks.map(migrateTask);
       d.lists = d.lists.map(migrateList);
       d.notes = d.notes.map(migrateNote);
+      // Sprint 4 shapes: a pre-CRM client holds no status, no file, no timeline
+      d.clients = d.clients.map(migrateClient);
 
       if (['all', 'personal', 'business'].indexOf(d.prefs.filter) === -1) d.prefs.filter = 'all';
 
       // the selected tasks sub-tab survives a reload exactly like the calendar view
       if (TASK_TABS.indexOf(d.prefs.taskTab) === -1) d.prefs.taskTab = 'all';
+
+      // and so does the selected pipeline sub-tab of the clients view
+      if (CLIENT_TABS.indexOf(d.prefs.clientTab) === -1) d.prefs.clientTab = 'all';
 
       // the selected calendar view survives a reload; anything unknown falls back
       if (CAL_VIEWS.indexOf(d.prefs.calView) === -1) d.prefs.calView = 'month';
@@ -485,9 +709,31 @@
       var t = todayISO();
       var d = this.data;
 
+      // the client files come first — every other record links back to them
+      var dana = this.shaped('clients', {
+        type: 'client', name: 'דנה כהן', category: 'business',
+        phone: '050-1234567', email: 'dana@example.com',
+        status: 'quoted', interest: 'פורטרט שמן 70x100, אימפסטו',
+        budget: '8,000–12,000 ₪',
+        nextAction: 'לחזור אליה ביום שלישי עם הצעת מחיר סופית',
+        nextActionAt: addDaysISO(t, 2),
+        followUpAt: t, lastContactAt: addDaysISO(t, -1),
+        notes: 'ראתה את הסדרה בתערוכה, מחפשת יצירה מרכזית לסלון.'
+      });
+      var oren = this.shaped('clients', {
+        type: 'client', name: 'אורן לוי', category: 'business',
+        phone: '052-7654321', email: '',
+        status: 'lead', interest: 'הדמיה לקיר במשרד',
+        nextAction: '',                       // deliberately empty — shows the alert badge
+        notes: 'הגיע דרך אינסטגרם.'
+      });
+      logHistory(dana, 'created', 'התיק נפתח · ' + CLIENT_STATUS_LABEL[dana.status]);
+      logHistory(oren, 'created', 'ליד חדש נכנס דרך אינסטגרם');
+      d.clients.push(dana, oren);
+
       d.events.push(
-        this.stamp({ type: 'event', title: 'פגישת היכרות — לקוח חדש', category: 'business', date: t, start: '10:00', end: '11:00', location: 'זום', notes: '' }),
-        this.stamp({ type: 'event', title: 'אימון כושר', category: 'personal', date: t, start: '18:30', end: '19:30', location: '', notes: '' })
+        this.stamp({ type: 'event', title: 'פגישת היכרות — דנה כהן', category: 'business', date: t, start: '10:00', end: '11:00', location: 'זום', notes: '', clientId: dana.id }),
+        this.stamp({ type: 'event', title: 'אימון כושר', category: 'personal', date: t, start: '18:30', end: '19:30', location: '', notes: '', clientId: '' })
       );
 
       d.tasks.push(
@@ -495,25 +741,34 @@
           type: 'task', title: 'להכין הצעת מחיר', category: 'business', due: t, time: '',
           status: 'progress', priority: 'high', nextAction: 'לאסוף מידות ולשלוח טיוטה',
           subtasks: [{ title: 'לאסוף מידות מהלקוח', done: true }, { title: 'לחשב תמחור והדפסה', done: false }],
-          notes: ''
+          notes: '', clientId: dana.id
         }),
         this.shaped('tasks', {
           type: 'task', title: 'לקנות מתנה ליום הולדת', category: 'personal', due: t, time: '',
-          status: 'todo', priority: 'medium', nextAction: '', subtasks: [], notes: ''
+          status: 'todo', priority: 'medium', nextAction: '', subtasks: [], notes: '', clientId: ''
         }),
         this.shaped('tasks', {
           type: 'task', title: 'לשלוח חוזה חתום', category: 'business', due: addDaysISO(t, -2), time: '',
-          status: 'waiting', priority: 'high', nextAction: 'לוודא שהלקוח קיבל את המסמך', subtasks: [], notes: ''
+          status: 'waiting', priority: 'high', nextAction: 'לוודא שהלקוח קיבל את המסמך',
+          subtasks: [], notes: '', clientId: dana.id
         })
       );
 
       d.lists.push(
         this.shaped('lists', {
-          type: 'list', title: 'ציוד לסטודיו', category: 'business', date: '',
+          type: 'list', title: 'ציוד לסטודיו', category: 'business', date: '', clientId: '',
           items: [
             { title: 'צבעי שמן — לבן טיטניום', done: true },
             { title: 'מדללים', done: false },
             { title: 'בדים מתוחים 70x100', done: false }
+          ]
+        }),
+        this.shaped('lists', {
+          type: 'list', title: 'מידות ותנאי קיר — דנה כהן', category: 'business', date: '', clientId: dana.id,
+          items: [
+            { title: 'למדוד רוחב קיר בסלון', done: true },
+            { title: 'לצלם את התאורה בשעות היום', done: false },
+            { title: 'לאשר סוג מסגרת', done: false }
           ]
         })
       );
@@ -523,10 +778,6 @@
           type: 'note', title: 'רעיון לקמפיין', category: 'business', pinned: true,
           body: 'סדרת פורטרטים באימפסטו — לצלם תהליך עבודה קצר לכל יצירה ולפרסם כסטורי.'
         })
-      );
-
-      d.clients.push(
-        this.stamp({ type: 'client', name: 'דנה כהן', category: 'business', phone: '', email: '', followUpAt: t, nextAction: 'לחזור אליה עם הצעת מחיר', notes: '' })
       );
 
       d.seeded = true;
@@ -545,15 +796,22 @@
 
     /** stamped AND type-normalised — the only shape a collection ever receives */
     shaped: function (collection, rec) {
+      if (collection === 'clients') return this.stamp(migrateClient(rec));
       if (collection === 'tasks') rec = migrateTask(rec);
       else if (collection === 'lists') rec = migrateList(rec);
       else if (collection === 'notes') rec = migrateNote(rec);
+      if (rec && typeof rec === 'object') {
+        rec.clientId = typeof rec.clientId === 'string' ? rec.clientId : '';
+      }
       return this.stamp(rec);
     },
 
+    /** returns the stored record so a caller can log history against it */
     add: function (collection, rec) {
-      this.data[collection].push(this.shaped(collection, rec));
+      var stored = this.shaped(collection, rec);
+      this.data[collection].push(stored);
       this.save();
+      return stored;
     },
 
     remove: function (collection, id) {
@@ -618,6 +876,11 @@
   function pendingFollowUps() {
     var t = todayISO();
     return pick('clients').filter(function (c) { return c.followUpAt && c.followUpAt <= t; });
+  }
+
+  /** the Next-Action alert engine feeding the dashboard attention card */
+  function clientsMissingAction() {
+    return pick('clients').filter(clientNeedsAction);
   }
 
   /* ----------------------------------------------------------- render: shell */
@@ -687,6 +950,7 @@
     var late = overdueTasks().length;
     var waiting = waitingTasks().length;
     var follow = pendingFollowUps().length;
+    var noAction = clientsMissingAction().length;
 
     $('#attentionCards').innerHTML =
       attCard(late, 'משימות באיחור', late ? 'דורש טיפול מיידי' : 'הכול בזמן',
@@ -694,7 +958,11 @@
       attCard(waiting, 'ממתין ללקוח', waiting ? 'הכדור אצל הלקוח' : 'אין המתנות פתוחות',
         waiting ? 'is-wait' : 'is-calm', 'data-tasktab="waiting"') +
       attCard(follow, 'מעקבי לקוחות', follow ? 'ממתין לחזרה שלך' : 'אין מעקבים פתוחים',
-        follow ? 'is-warn' : 'is-calm', 'data-nav="clients"');
+        follow ? 'is-warn' : 'is-calm', 'data-nav="clients"') +
+      // the Next-Action alert engine, surfaced on the dashboard (mandate §3)
+      attCard(noAction, 'ללא פעולה הבאה',
+        noAction ? 'לקוחות פעילים בלי צעד הבא' : 'לכל לקוח פעיל יש צעד הבא',
+        noAction ? 'is-hot' : 'is-calm', 'data-clientfilter="all"');
   }
 
   function attCard(num, label, hint, cls, attrs) {
@@ -1312,35 +1580,365 @@
       '</div>';
   }
 
-  /* -------------------------------------------------------- render: clients */
+  /* ==========================================================================
+     render: client CRM  (Sprint 4)
+
+     The list is a card pipeline; tapping a card opens the client file (drawer).
+     Every card carries the two quick actions the mandate requires — a direct
+     call and a WhatsApp thread — and its designated Next Action, or the alert
+     badge when that action is missing.
+     ========================================================================== */
+
+  function clientTab() { return Store.data.prefs.clientTab; }
+
+  function setClientTab(tab) {
+    if (CLIENT_TABS.indexOf(tab) === -1) tab = 'all';
+    Store.data.prefs.clientTab = tab;
+    Store.save();
+    if (UI.view !== 'clients') { setView('clients'); return; }   // setView() repaints
+    render();
+  }
+
+  /** 'היום · 14:32' — one stamp shape for notes and for the history timeline */
+  function stampLabel(ms) {
+    var d = new Date(typeof ms === 'number' ? ms : Date.now());
+    return relDay(isoDate(d)) + ' · ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
+  /**
+   * Quick actions. tel: and wa.me are handed to the OS through real anchors —
+   * the click is logged into the client file, never intercepted.
+   */
+  function contactButtons(c, size) {
+    var cls = 'qa' + (size === 'mini' ? ' qa-mini' : '');
+    var tel = telHref(c.phone);
+    var wa = waHref(c.phone);
+    return (tel
+      ? '<a class="' + cls + ' qa-call" href="' + esc(tel) + '" data-contact="tel:' + c.id + '">📞 התקשר</a>'
+      : '<span class="' + cls + ' is-off">📞 אין טלפון</span>') +
+      (wa
+        ? '<a class="' + cls + ' qa-wa" href="' + esc(wa) + '" target="_blank" rel="noopener" data-contact="whatsapp:' + c.id + '">💬 וואטסאפ</a>'
+        : '<span class="' + cls + ' is-off">💬 אין וואטסאפ</span>');
+  }
+
+  function clientStatusBadge(c) {
+    var s = normClientStatus(c.status);
+    return '<span class="badge cst-' + s + '">' + esc(CLIENT_STATUS_LABEL[s]) + '</span>';
+  }
+
+  function noActionBadge() {
+    return '<span class="badge no-action">' + esc(NO_ACTION_BADGE) + '</span>';
+  }
+
+  function nextActionLine(c) {
+    if (clientNeedsAction(c)) return noActionBadge();
+    var text = String(c.nextAction || '').trim();
+    if (!text) return '<span class="cl-quiet">התיק סגור — לא נדרשת פעולה</span>';
+    return '<span class="next-action"><span>הפעולה הבאה</span>' +
+      esc(text) + (c.nextActionAt ? ' · ' + esc(relDay(c.nextActionAt)) : '') + '</span>';
+  }
+
+  function clientCard(c) {
+    var status = normClientStatus(c.status);
+    var safeName = esc(c.name) || 'לקוח';
+    var contact = [c.phone, c.email].filter(Boolean).join(' · ');
+
+    return '<article class="cl-card cst-row-' + status +
+      (clientNeedsAction(c) ? ' is-missing' : '') + '">' +
+      '<button type="button" class="cl-open" data-clientopen="' + c.id + '"' +
+      ' aria-label="' + esc('פתיחת תיק הלקוח ' + (c.name || '')) + '">' +
+      '<span class="cl-name">' + safeName + '</span>' +
+      '<span class="cl-badges">' + clientStatusBadge(c) + catTag(normCat(c.category)) + '</span>' +
+      '<span class="cl-contact">' + (contact ? esc(contact) : 'אין פרטי קשר') + '</span>' +
+      '<span class="cl-interest">' +
+      esc(c.interest ? 'מתעניין ב־' + c.interest : 'טרם הוגדר תחום עניין') + '</span>' +
+      nextActionLine(c) +
+      '</button>' +
+      '<div class="cl-acts">' + contactButtons(c, 'mini') + delBtn('clients', c.id) + '</div>' +
+      '</article>';
+  }
 
   function renderClients() {
-    var t = todayISO();
-    var all = pick('clients').slice().sort(function (a, b) {
-      return (a.followUpAt || '9999') < (b.followUpAt || '9999') ? -1 : 1;
+    var tab = clientTab();
+    var all = pick('clients');
+    var shown = sortClients(all.filter(function (c) { return clientMatchesTab(c, tab); }));
+
+    // scoped to the sub-tab strip — the attention card deep-links with the same
+    // attribute but must never pick up the active-tab styling
+    $$('.client-tabs [data-clientfilter]').forEach(function (b) {
+      var on = b.dataset.clientfilter === tab;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
     });
 
-    $('#clientsList').innerHTML = all.length
-      ? all.map(function (c) {
-        var due = c.followUpAt && c.followUpAt <= t;
-        var meta = [];
-        if (c.followUpAt) meta.push('מעקב: ' + relDay(c.followUpAt));
-        if (c.nextAction) meta.push('הצעד הבא: ' + c.nextAction);
-        if (c.phone) meta.push(c.phone);
-        return '<div class="row' + (due ? ' is-late' : '') + '">' +
-          '<div class="row-body">' +
-          '<div class="row-title">' + esc(c.name) + '</div>' +
-          '<div class="row-meta">' + catTag(c.category) + esc(meta.join(' · ')) + '</div>' +
-          '</div>' +
-          delBtn('clients', c.id) +
-          '</div>';
-      }).join('')
-      : emptyState('אין לקוחות עדיין', 'הוסף לקוח כדי לנהל מעקבים וצעדים הבאים.');
+    $$('[data-clientcount]').forEach(function (el) {
+      var key = el.dataset.clientcount;
+      el.textContent = all.filter(function (c) { return clientMatchesTab(c, key); }).length;
+    });
 
+    $('#clientsList').innerHTML = shown.length
+      ? shown.map(clientCard).join('')
+      : emptyState('אין לקוחות בתצוגה הזו', CLIENT_TAB_EMPTY[tab] || CLIENT_TAB_EMPTY.all);
+
+    var missing = all.filter(clientNeedsAction).length;
     $('#clientsMeta').textContent = all.length
-      ? all.length + ' לקוחות · ' + pendingFollowUps().length + ' במעקב'
+      ? all.length + ' לקוחות · ' + pendingFollowUps().length + ' במעקב' +
+      (missing ? ' · ' + missing + ' ללא פעולה הבאה' : '')
       : '';
   }
+
+  /* ==========================================================================
+     Client drawer — תיק לקוח
+
+     Six tabs over one record. Every builder below is a pure function of
+     (client, linked records) so healthcheck.js can render a whole file
+     head-lessly and assert what it contains.
+     ========================================================================== */
+
+  function drawerGroup(title, html, emptyHint) {
+    return '<div class="dr-group">' +
+      '<div class="day-head"><span>' + esc(title) + '</span></div>' +
+      '<div class="dr-card">' + (html || emptyState('אין רשומות', emptyHint)) + '</div>' +
+      '</div>';
+  }
+
+  /** every tab can create straight into this file — the association is pre-set */
+  function drawerAdd(type, clientId, label) {
+    return '<div class="quick-acts dr-add">' +
+      '<button type="button" class="mini" data-clientadd="' + type + ':' + clientId + '">' +
+      esc(label) + '</button></div>';
+  }
+
+  function drawerEventRow(e) {
+    var when = [relDay(e.date), e.start ? e.start + (e.end ? '–' + e.end : '') : '', e.location]
+      .filter(Boolean).join(' · ');
+    return '<div class="ev ev-' + normCat(e.category) + '">' +
+      '<div class="ev-body">' +
+      '<div class="ev-title">' + esc(e.title) + '</div>' +
+      '<div class="ev-meta">' + esc(when) + '</div>' +
+      '</div></div>';
+  }
+
+  /* ---- 1. סקירה ---- */
+
+  function drawerOverview(c) {
+    var status = normClientStatus(c.status);
+    var facts = [
+      ['סטטוס', CLIENT_STATUS_LABEL[status]],
+      ['קטגוריה', CAT_LABEL[normCat(c.category)]],
+      ['טלפון', c.phone || '—'],
+      ['אימייל', c.email || '—'],
+      ['תחום עניין / יצירה', c.interest || '—'],
+      ['תקציב', c.budget || '—'],
+      ['קשר אחרון', c.lastContactAt ? relDay(c.lastContactAt) : 'טרם נוצר קשר'],
+      ['תאריך מעקב', c.followUpAt ? relDay(c.followUpAt) : '—']
+    ];
+
+    return '<div class="dr-card">' +
+      '<div class="dr-status">' +
+      '<label class="field-label" for="drawerStatusSel">שלב בצינור המכירות</label>' +
+      '<select class="select" id="drawerStatusSel" data-clientstatus="' + c.id + '">' +
+      CLIENT_STATUSES.map(function (s) {
+        return '<option value="' + s + '"' + (s === status ? ' selected' : '') + '>' +
+          esc(CLIENT_STATUS_LABEL[s]) + '</option>';
+      }).join('') +
+      '</select></div>' +
+
+      '<div class="dr-next' + (clientNeedsAction(c) ? ' is-missing' : '') + '">' +
+      '<label class="field-label" for="drawerNextInput">הפעולה הבאה</label>' +
+      (clientNeedsAction(c) ? noActionBadge() : '') +
+      '<input class="input" id="drawerNextInput" name="nextAction" value="' +
+      esc(c.nextAction || '') + '" placeholder="לחזור ביום שלישי / לבדוק הדמיה">' +
+      '<div class="dr-next-row">' +
+      '<input class="input" type="date" name="nextActionAt" value="' + esc(c.nextActionAt || '') + '">' +
+      '<button type="button" class="btn btn-gold" data-nextaction="' + c.id + '">שמירה</button>' +
+      '</div></div>' +
+
+      '<dl class="dr-facts">' + facts.map(function (r) {
+        return '<div class="dr-fact"><dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd></div>';
+      }).join('') + '</dl>' +
+
+      (c.notes ? '<p class="note-body">' + esc(c.notes) + '</p>' : '') +
+      '<div class="quick-acts">' + contactButtons(c) + '</div>' +
+      '</div>';
+  }
+
+  /* ---- 2. פגישות ---- */
+
+  function drawerMeetings(c, events) {
+    var t = todayISO();
+    var list = (Array.isArray(events) ? events.slice() : []).sort(function (a, b) {
+      if (a.date !== b.date) return (a.date || '') < (b.date || '') ? -1 : 1;
+      return timeToMinutes(a.start) - timeToMinutes(b.start);
+    });
+    var next = list.filter(function (e) { return (e.date || '') >= t; });
+    var past = list.filter(function (e) { return (e.date || '') < t; }).reverse();
+
+    return drawerAdd('event', c.id, '＋ פגישה חדשה ללקוח') +
+      drawerGroup('פגישות קרובות', next.map(drawerEventRow).join(''),
+        'אין פגישה עתידית המשויכת ללקוח הזה.') +
+      drawerGroup('פגישות שהיו', past.map(drawerEventRow).join(''),
+        'עוד לא התקיימה פגישה מתועדת.');
+  }
+
+  /* ---- 3. משימות ---- */
+
+  function drawerTasks(c, tasks) {
+    var list = sortTasks(Array.isArray(tasks) ? tasks : []);
+    return drawerAdd('task', c.id, '＋ משימה חדשה ללקוח') +
+      '<div class="dr-card">' +
+      (list.length
+        ? list.map(function (x) { return taskRow(x); }).join('')
+        : emptyState('אין משימות משויכות',
+          'כל משימה שתשייך ללקוח תופיע כאן עם מתג הסטטוס המהיר שלה.')) +
+      '</div>';
+  }
+
+  /* ---- 4. רשימות ---- */
+
+  function drawerLists(c, lists) {
+    var list = Array.isArray(lists) ? lists : [];
+    return drawerAdd('list', c.id, '＋ רשימה חדשה ללקוח') +
+      '<div class="dr-card">' +
+      (list.length
+        ? list.map(listRow).join('')
+        : emptyState('אין רשימות משויכות',
+          'מידות קיר, העדפות סגנון או צ׳ק־ליסט התקנה — הכול נשמר בתיק.')) +
+      '</div>';
+  }
+
+  /* ---- 5. פתקים ---- */
+
+  function drawerNotes(c) {
+    var rows = Array.isArray(c.clientNotes) ? c.clientNotes : [];
+    return '<div class="dr-card dr-compose">' +
+      '<label class="field-label" for="drawerNoteBox">פתק חדש לתיק</label>' +
+      '<textarea class="textarea" id="drawerNoteBox" placeholder="מה נאמר בשיחה, מה הלקוח ביקש…"></textarea>' +
+      '<button type="button" class="btn btn-gold" data-clientnote="' + c.id + '">הוספת פתק</button>' +
+      '</div>' +
+      '<div class="dr-card">' +
+      (rows.length
+        ? rows.map(function (n) {
+          return '<div class="dr-log">' +
+            '<div class="dr-log-body">' +
+            '<div class="dr-log-when">' + esc(stampLabel(n.at)) + '</div>' +
+            '<p class="note-body">' + esc(n.body) + '</p>' +
+            '</div>' +
+            '<button type="button" class="sheet-x" data-clientnotedel="' + c.id + ':' + n.id +
+            '" aria-label="מחיקת הפתק">✕</button>' +
+            '</div>';
+        }).join('')
+        : emptyState('אין פתקים בתיק',
+          'כל מה שנאמר בשיחה — כתוב כאן, ותמצא אותו בפעם הבאה.')) +
+      '</div>';
+  }
+
+  /* ---- 6. היסטוריה ---- */
+
+  function drawerHistory(c) {
+    var rows = Array.isArray(c.history) ? c.history : [];
+    return '<div class="dr-card">' +
+      (rows.length
+        ? rows.map(function (h) {
+          return '<div class="dr-log dr-' + h.kind + '">' +
+            '<span class="dr-log-ico" aria-hidden="true">' + (HISTORY_ICON[h.kind] || '•') + '</span>' +
+            '<div class="dr-log-body">' +
+            '<div class="dr-log-when">' + esc(stampLabel(h.at)) + '</div>' +
+            '<div class="dr-log-text">' + esc(h.text) + '</div>' +
+            '</div></div>';
+        }).join('')
+        : emptyState('אין היסטוריה עדיין',
+          'שינויי סטטוס, עדכוני פעולה הבאה ויצירות קשר נרשמים כאן אוטומטית.')) +
+      '</div>';
+  }
+
+  function drawerTabHTML(tab, c, links) {
+    var l = links || { events: [], tasks: [], lists: [] };
+    if (tab === 'meetings') return drawerMeetings(c, l.events);
+    if (tab === 'tasks') return drawerTasks(c, l.tasks);
+    if (tab === 'lists') return drawerLists(c, l.lists);
+    if (tab === 'notes') return drawerNotes(c);
+    if (tab === 'history') return drawerHistory(c);
+    return drawerOverview(c);
+  }
+
+  /**
+   * The drawer reads the FULL store, not pick(): a client file that silently
+   * hides half its meetings because the global filter sits on "אישי" is a data
+   * trap, not a filter. Same deliberate carve-out the reminder scan takes.
+   */
+  function clientLinks(id) {
+    function of(collection) {
+      return Store.data[collection].filter(function (r) { return r.clientId === id; });
+    }
+    return { events: of('events'), tasks: of('tasks'), lists: of('lists') };
+  }
+
+  function clientSubtitle(c) {
+    var bits = [CLIENT_STATUS_LABEL[normClientStatus(c.status)]];
+    if (c.interest) bits.push(c.interest);
+    bits.push(c.lastContactAt ? 'קשר אחרון: ' + relDay(c.lastContactAt) : 'טרם נוצר קשר');
+    return bits.join(' · ');
+  }
+
+  var Drawer = {
+    clientId: null,
+    tab: 'overview',
+
+    isOpen: function () { return !!this.clientId; },
+
+    client: function () {
+      return this.clientId ? Store.find('clients', this.clientId) : null;
+    },
+
+    open: function (id, tab) {
+      if (!Store.find('clients', id)) return;
+      this.clientId = id;
+      this.tab = DRAWER_TABS.indexOf(tab) === -1 ? 'overview' : tab;
+      $('#backdrop').hidden = false;
+      $('#clientDrawer').hidden = false;
+      document.body.style.overflow = 'hidden';
+      this.render();
+    },
+
+    close: function () {
+      this.clientId = null;
+      var el = $('#clientDrawer');
+      if (el) el.hidden = true;
+    },
+
+    setTab: function (tab) {
+      if (DRAWER_TABS.indexOf(tab) === -1) return;
+      this.tab = tab;
+      this.render();
+    },
+
+    render: function () {
+      var el = $('#clientDrawer');
+      if (!el) return;
+      var c = this.client();
+      if (!c) { closeSheets(); return; }     // the record was deleted underneath us
+
+      var self = this;
+      $$('[data-clienttab]').forEach(function (b) {
+        var on = b.dataset.clienttab === self.tab;
+        b.classList.toggle('is-active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+
+      $('#drawerName').textContent = c.name || 'לקוח';
+      $('#drawerSub').textContent = clientSubtitle(c);
+      $('#drawerActions').innerHTML =
+        clientStatusBadge(c) + catTag(normCat(c.category)) +
+        (clientNeedsAction(c) ? noActionBadge() : '') +
+        contactButtons(c, 'mini');
+      $('#drawerBody').innerHTML = drawerTabHTML(this.tab, c, clientLinks(c.id));
+      // the dialog is named by #drawerName; the body just says which tab is live
+      $('#drawerBody').setAttribute('aria-label', DRAWER_TAB_LABEL[this.tab]);
+    }
+  };
+
+  function renderDrawer() { if (Drawer.isOpen()) Drawer.render(); }
 
   /* ------------------------------------------------------- render: fragments */
 
@@ -1366,6 +1964,7 @@
     renderCalendar();
     renderTasks();
     renderClients();
+    renderDrawer();
     $('#todayLabel').textContent = hebDate(todayISO());
     $('#railUserName').textContent = OWNER.name;
   }
@@ -1382,6 +1981,7 @@
     $('#backdrop').hidden = true;
     $('#typeSheet').hidden = true;
     $('#formSheet').hidden = true;
+    Drawer.close();
     document.body.style.overflow = '';
     PREFILL = null;
   }
@@ -1409,6 +2009,7 @@
     ['date', 'due', 'followUpAt'].forEach(function (n) { set(n, PREFILL.date); });
     ['start', 'time'].forEach(function (n) { set(n, PREFILL.start); });
     if (PREFILL.start) set('end', shiftTime(PREFILL.start, 60));
+    set('clientId', PREFILL.clientId);          // created from inside a client file
   }
 
   var FIELDS = {
@@ -1422,6 +2023,7 @@
         f('end', 'שעת סיום', '<input class="input" type="time" name="end">') +
         f('location', 'מיקום', '<input class="input" name="location" placeholder="זום / כתובת">') +
         '</div>' +
+        f('clientId', 'שיוך ללקוח', clientPicker()) +
         f('notes', 'הערות', '<textarea class="textarea" name="notes" placeholder="פרטים נוספים…"></textarea>');
     },
     task: function () {
@@ -1435,12 +2037,14 @@
         f('priority', 'עדיפות', picker('priority', PRIORITIES, PRIORITY_LABEL, 'medium')) +
         '</div>' +
         f('nextAction', 'הפעולה הבאה', '<input class="input" name="nextAction" placeholder="להתקשר ללקוח ולאשר מידות">') +
+        f('clientId', 'שיוך ללקוח', clientPicker()) +
         f('subtasks', 'תת־משימות (שורה לכל אחת)', '<textarea class="textarea" name="subtasks" placeholder="לאסוף מידות&#10;לחשב תמחור"></textarea>') +
         f('notes', 'הערות', '<textarea class="textarea" name="notes"></textarea>');
     },
     list: function () {
       return f('title', 'שם הרשימה', '<input class="input" name="title" placeholder="קניות לשבת…" required>') +
         f('date', 'תאריך (לא חובה — רשימה יכולה להיות ללא תאריך)', '<input class="input" type="date" name="date">') +
+        f('clientId', 'שיוך ללקוח', clientPicker()) +
         f('items', 'פריטים (שורה לכל פריט)', '<textarea class="textarea" name="items" placeholder="חלב&#10;לחם&#10;ביצים"></textarea>');
     },
     note: function () {
@@ -1453,11 +2057,31 @@
         f('phone', 'טלפון', '<input class="input" type="tel" name="phone" placeholder="050-0000000">') +
         f('email', 'אימייל', '<input class="input" type="email" name="email" placeholder="name@mail.com">') +
         '</div>' +
-        f('nextAction', 'הצעד הבא', '<input class="input" name="nextAction" placeholder="לחזור עם הצעת מחיר">') +
+        f('status', 'שלב בצינור המכירות', picker('status', CLIENT_STATUSES, CLIENT_STATUS_LABEL, 'lead')) +
+        f('interest', 'תחום עניין / יצירה', '<input class="input" name="interest" placeholder="פורטרט שמן 70x100, אימפסטו">') +
+        f('budget', 'תקציב', '<input class="input" name="budget" placeholder="8,000–12,000 ₪">') +
+        f('nextAction', 'הפעולה הבאה', '<input class="input" name="nextAction" placeholder="לחזור ביום שלישי עם הצעת מחיר">') +
+        '<div class="field-row">' +
+        f('nextActionAt', 'מתי', '<input class="input" type="date" name="nextActionAt" value="' + addDaysISO(todayISO(), 2) + '">') +
         f('followUpAt', 'תאריך מעקב', '<input class="input" type="date" name="followUpAt" value="' + addDaysISO(todayISO(), 3) + '">') +
-        f('notes', 'הערות', '<textarea class="textarea" name="notes"></textarea>');
+        '</div>' +
+        f('notes', 'הערה כללית', '<textarea class="textarea" name="notes"></textarea>');
     }
   };
+
+  /**
+   * Optional association. The client drawer's פגישות / משימות / רשימות tabs are
+   * only as good as this select, so every creatable type that can belong to a
+   * client exposes it.
+   */
+  function clientPicker(current) {
+    var opts = ['<option value="">ללא שיוך</option>'];
+    sortClients(Store.data.clients).forEach(function (c) {
+      opts.push('<option value="' + esc(c.id) + '"' + (c.id === current ? ' selected' : '') + '>' +
+        esc(c.name) + ' · ' + esc(CLIENT_STATUS_LABEL[normClientStatus(c.status)]) + '</option>');
+    });
+    return '<select class="select" name="clientId">' + opts.join('') + '</select>';
+  }
 
   function f(name, label, control) {
     return '<div class="field"><label class="field-label" for="fld_' + name + '">' + label + '</label>' +
@@ -1483,7 +2107,8 @@
     return normItems(String(text == null ? '' : text).split('\n'), prefix);
   }
 
-  function openForm(type) {
+  function openForm(type, prefill) {
+    if (prefill) PREFILL = prefill;             // opened straight from a client file
     UI.formType = type;
     UI.formCat = (type === 'client') ? 'business' : 'personal';
 
@@ -1519,8 +2144,9 @@
       Store.add('events', {
         type: 'event', title: v.title, category: cat,
         date: v.date || todayISO(), start: v.start || '', end: v.end || '',
-        location: v.location || '', notes: v.notes || ''
+        location: v.location || '', notes: v.notes || '', clientId: v.clientId || ''
       });
+      linkLog(v.clientId, 'נקבעה פגישה: ' + v.title);
       label = 'האירוע נוסף';
     } else if (type === 'task') {
       if (!v.title) return warn('צריך שם למשימה');
@@ -1529,15 +2155,17 @@
         due: v.due || todayISO(), time: v.time || '',
         status: v.status || 'new', priority: v.priority || 'medium',
         nextAction: v.nextAction || '', subtasks: parseChecklist(v.subtasks, 'st'),
-        done: false, notes: v.notes || ''
+        done: false, notes: v.notes || '', clientId: v.clientId || ''
       });
+      linkLog(v.clientId, 'נוספה משימה: ' + v.title);
       label = 'המשימה נוספה';
     } else if (type === 'list') {
       if (!v.title) return warn('צריך שם לרשימה');
       Store.add('lists', {
         type: 'list', title: v.title, category: cat,
-        date: v.date || '', items: parseChecklist(v.items, 'li')
+        date: v.date || '', items: parseChecklist(v.items, 'li'), clientId: v.clientId || ''
       });
+      linkLog(v.clientId, 'נוספה רשימה: ' + v.title);
       label = 'הרשימה נוספה';
     } else if (type === 'note') {
       if (!v.body) return warn('הפתק ריק');
@@ -1547,17 +2175,35 @@
       label = 'הפתק נשמר';
     } else if (type === 'client') {
       if (!v.name) return warn('צריך שם ללקוח');
-      Store.add('clients', {
+      var created = Store.add('clients', {
         type: 'client', name: v.name, category: cat,
-        phone: v.phone || '', email: v.email || '',
-        nextAction: v.nextAction || '', followUpAt: v.followUpAt || '', notes: v.notes || ''
+        phone: v.phone || '', email: v.email || '', status: v.status || 'lead',
+        interest: v.interest || '', budget: v.budget || '',
+        nextAction: v.nextAction || '', nextActionAt: v.nextActionAt || '',
+        followUpAt: v.followUpAt || '', notes: v.notes || ''
       });
+      logHistory(created, 'created',
+        'התיק נפתח · ' + CLIENT_STATUS_LABEL[normClientStatus(created.status)]);
+      Store.save();
       label = 'הלקוח נוסף';
     }
 
+    // a form opened from inside a client file returns to that file, same tab
+    var backTo = (PREFILL && PREFILL.clientId) ? PREFILL.clientId : null;
+    var backTab = Drawer.tab;
+
     closeSheets();
     render();
+    if (backTo) Drawer.open(backTo, backTab);
     toast(label + ' · ' + CAT_LABEL[cat]);
+  }
+
+  /** creating a linked record writes a line into that client's timeline */
+  function linkLog(clientId, text) {
+    var c = clientId ? Store.find('clients', clientId) : null;
+    if (!c) return;
+    logHistory(c, 'link', text);
+    Store.save();
   }
 
   /* ----------------------------------------------------------------- toast */
@@ -1832,11 +2478,14 @@
     var el = e.target.closest ? e.target.closest(
       '[data-nav],[data-action],[data-type],[data-filter],[data-cat],[data-toggle],[data-del],' +
       '[data-calview],[data-calnav],[data-calslot],' +
-      '[data-tasktab],[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert]') : null;
+      '[data-tasktab],[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
+      '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
+      '[data-nextaction],[data-clientnote],[data-clientnotedel]') : null;
     if (!el) return;
 
     if (el.dataset.action === 'master-add') { openTypeSheet(); return; }
     if (el.dataset.action === 'close-sheet') { closeSheets(); return; }
+    if (el.dataset.action === 'close-drawer') { closeSheets(); return; }
     if (el.dataset.type) { openForm(el.dataset.type); return; }
     if (el.dataset.filter) { setFilter(el.dataset.filter); return; }
     if (el.dataset.cat) { setFormCat(el.dataset.cat); return; }
@@ -1851,6 +2500,72 @@
     }
 
     if (el.dataset.tasktab) { setTaskTab(el.dataset.tasktab); return; }
+
+    /* ---------- client CRM ---------- */
+
+    if (el.dataset.clientfilter) { setClientTab(el.dataset.clientfilter); return; }
+    if (el.dataset.clientopen) { Drawer.open(el.dataset.clientopen); return; }
+    if (el.dataset.clienttab) { Drawer.setTab(el.dataset.clienttab); return; }
+
+    if (el.dataset.clientadd) {
+      var ap = el.dataset.clientadd.split(':');
+      openForm(ap[0], { clientId: ap[1] });
+      return;
+    }
+
+    if (el.dataset.contact) {
+      var chp = el.dataset.contact.split(':');
+      var chc = Store.find('clients', chp[1]);
+      if (chc) {
+        markContact(chc, chp[0]);
+        Store.save();
+        // repaint only AFTER the browser has followed tel:/wa.me — pulling the
+        // anchor out mid-dispatch cancels the navigation on some mobile browsers
+        setTimeout(function () { render(); }, 0);
+      }
+      return;                                   // never preventDefault: the OS owns the link
+    }
+
+    if (el.dataset.nextaction) {
+      var nac = Store.find('clients', el.dataset.nextaction);
+      var panel = el.closest('.dr-next');
+      if (nac && panel) {
+        var txt = panel.querySelector('[name="nextAction"]');
+        var when = panel.querySelector('[name="nextActionAt"]');
+        setClientNextAction(nac, txt ? txt.value : '', when ? when.value : '');
+        Store.save();
+        render();
+        toast(clientNeedsAction(nac) ? 'הפעולה הבאה נמחקה' : 'הפעולה הבאה עודכנה');
+      }
+      return;
+    }
+
+    if (el.dataset.clientnote) {
+      var cnc = Store.find('clients', el.dataset.clientnote);
+      var box = el.closest('.dr-compose');
+      var area = box ? box.querySelector('textarea') : null;
+      if (cnc && area) {
+        if (!addClientNote(cnc, area.value)) { warn('הפתק ריק'); return; }
+        area.value = '';
+        Store.save();
+        render();
+        toast('הפתק נוסף לתיק');
+      }
+      return;
+    }
+
+    if (el.dataset.clientnotedel) {
+      var dnp = el.dataset.clientnotedel.split(':');
+      var dnc = Store.find('clients', dnp[0]);
+      if (dnc) {
+        dnc.clientNotes = (dnc.clientNotes || []).filter(function (n) { return n.id !== dnp[1]; });
+        dnc.updatedAt = Date.now();
+        Store.save();
+        render();
+        toast('הפתק נמחק');
+      }
+      return;
+    }
 
     if (el.dataset.nav) { setView(el.dataset.nav); return; }
 
@@ -1941,12 +2656,25 @@
     }
   }
 
+  /** the only <select> that mutates the store outside a form submit */
+  function onChange(e) {
+    var el = e.target;
+    if (!el || !el.dataset || !el.dataset.clientstatus) return;
+    var c = Store.find('clients', el.dataset.clientstatus);
+    if (!c) return;
+    setClientStatus(c, el.value);
+    Store.save();
+    render();
+    toast('סטטוס: ' + CLIENT_STATUS_LABEL[normClientStatus(c.status)]);
+  }
+
   /* -------------------------------------------------------------- bootstrap */
 
   function init() {
     Store.load();
     Cal.init();
     document.addEventListener('click', onClick);
+    document.addEventListener('change', onChange);
     $('#entityForm').addEventListener('submit', submitForm);
     $('#backdrop').addEventListener('click', closeSheets);
     document.addEventListener('keydown', function (e) {
@@ -2003,6 +2731,35 @@
       sortNotes: sortNotes,
       noteToTask: noteToTask,
       noteToEvent: noteToEvent
+    },
+
+    // pure client CRM — statuses, the Next-Action alert engine and every
+    // drawer tab builder, all executable head-lessly by the healthcheck
+    clients: {
+      STATUSES: CLIENT_STATUSES,
+      STATUS_LABEL: CLIENT_STATUS_LABEL,
+      CLOSED: CLIENT_CLOSED,
+      TABS: CLIENT_TABS,
+      TAB_STATUSES: CLIENT_TAB_STATUSES,
+      DRAWER_TABS: DRAWER_TABS,
+      DRAWER_TAB_LABEL: DRAWER_TAB_LABEL,
+      NO_ACTION_BADGE: NO_ACTION_BADGE,
+      normClientStatus: normClientStatus,
+      migrateClient: migrateClient,
+      clientClosed: clientClosed,
+      clientNeedsAction: clientNeedsAction,
+      clientMatchesTab: clientMatchesTab,
+      sortClients: sortClients,
+      setClientStatus: setClientStatus,
+      setClientNextAction: setClientNextAction,
+      addClientNote: addClientNote,
+      markContact: markContact,
+      logHistory: logHistory,
+      telHref: telHref,
+      waHref: waHref,
+      waNumber: waNumber,
+      clientCard: clientCard,
+      drawerTabHTML: drawerTabHTML
     },
 
     // pure date math — no DOM, no store; the healthcheck exercises it directly

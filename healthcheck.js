@@ -975,13 +975,320 @@ check('note conversion preserves the text and the category', () => {
   return true;
 });
 
-/* ------------------------------------------- 17. Sprint 3 spec & delivery */
+/* ====== 18. client CRM · drawer · Next-Action engine (Sprint 4) ========== */
+
+/* ---- 18a. structure ---- */
+
+const CLIENT_STAGES = ['ליד חדש', 'נוצר קשר', 'מתעניין', 'נשלחה הצעה',
+  'ממתין לתשובה', 'פגישה נקבעה', 'עסקה נסגרה', 'לא רלוונטי כרגע', 'לקוח עבר'];
+
+check('the nine mandated client statuses ship with their Hebrew labels', () => {
+  if (!/CLIENT_STATUSES = \['lead', 'contacted', 'interested', 'quoted',\s*\n?\s*'awaiting', 'meeting', 'won', 'irrelevant', 'past'\]/.test(js)) {
+    return 'client status vocabulary changed';
+  }
+  const missing = CLIENT_STAGES.filter(l => js.indexOf(l) === -1);
+  return missing.length ? 'missing status labels: ' + missing.join(', ') : true;
+});
+
+check('clients view exposes the five pipeline sub-tabs', () => {
+  const view = (html.match(/<section class="view" id="view-clients"[\s\S]*?<\/section>/) || [''])[0];
+  if (!view) return 'no #view-clients section';
+  ['all', 'new', 'active', 'waiting', 'closed'].forEach(t => {
+    if (view.indexOf('data-clientfilter="' + t + '"') === -1) throw new Error('no sub-tab for ' + t);
+  });
+  ['הכל', 'לידים חדשים', 'פעילים', 'ממתינים', 'סגורים'].forEach(l => {
+    if (view.indexOf('>' + l + ' <') === -1) throw new Error('missing sub-tab label ' + l);
+  });
+  if (view.indexOf('role="tablist"') === -1) return 'sub-tabs are not exposed as a tablist';
+  if (!/CLIENT_TABS = \['all', 'new', 'active', 'waiting', 'closed'\]/.test(js)) {
+    return 'CLIENT_TABS vocabulary changed';
+  }
+  return true;
+});
+
+check('the client drawer ships all six mandated tabs', () => {
+  const drawer = (html.match(/<aside class="drawer"[\s\S]*?<\/aside>/) || [''])[0];
+  if (!drawer) return 'no client drawer in index.html';
+  if (drawer.indexOf('role="dialog"') === -1 || drawer.indexOf('aria-modal="true"') === -1) {
+    return 'the drawer is not an accessible modal dialog';
+  }
+  const tabs = ['overview', 'meetings', 'tasks', 'lists', 'notes', 'history'];
+  tabs.forEach(t => {
+    if (drawer.indexOf('data-clienttab="' + t + '"') === -1) throw new Error('no drawer tab ' + t);
+  });
+  ['סקירה', 'פגישות', 'משימות', 'רשימות', 'פתקים', 'היסטוריה'].forEach(l => {
+    if (drawer.indexOf('>' + l + '<') === -1) throw new Error('missing drawer tab label ' + l);
+  });
+  ['drawerName', 'drawerSub', 'drawerActions', 'drawerBody'].forEach(id => {
+    if (drawer.indexOf('id="' + id + '"') === -1) throw new Error('no #' + id);
+    if (js.indexOf("$('#" + id + "')") === -1) throw new Error('#' + id + ' is never painted');
+  });
+  return true;
+});
+
+check('every client card carries the two mandated quick actions', () => {
+  if (!/function contactButtons/.test(js)) return 'no contactButtons()';
+  if (js.indexOf('📞 התקשר') === -1) return 'no direct-call action';
+  if (js.indexOf('💬 וואטסאפ') === -1) return 'no WhatsApp action';
+  if (js.indexOf('wa.me/') === -1) return 'WhatsApp does not target wa.me';
+  if (!/function clientCard/.test(js)) return 'no clientCard() renderer';
+  if (js.indexOf('esc(c.name)') === -1) return 'the client name is rendered unescaped';
+  return true;
+});
+
+check('the Next-Action alert badge reaches the dashboard attention cards', () => {
+  if (!/NO_ACTION_BADGE = '⚠️ אין פעולה הבאה מוגדרת'/.test(js)) return 'alert badge copy changed';
+  if (!/function clientNeedsAction/.test(js)) return 'no clientNeedsAction() engine';
+  if (!/function clientsMissingAction/.test(js)) return 'no dashboard selector';
+  const att = (js.match(/function renderAttention[\s\S]*?\n  \}/) || [''])[0];
+  if (att.indexOf('clientsMissingAction()') === -1) return 'attention cards ignore the alert engine';
+  if (att.indexOf('ללא פעולה הבאה') === -1) return 'no attention card label';
+  return true;
+});
+
+check('client CRUD and the drawer persist through the store', () => {
+  if (!/clientTab: 'all'/.test(js)) return 'no clientTab default in the blank store';
+  if (!/CLIENT_TABS\.indexOf\(d\.prefs\.clientTab\) === -1/.test(js)) return 'clientTab is not normalised on load';
+  if (!/prefs\.clientTab = tab;\s*\n\s*Store\.save\(\);/.test(js)) return 'the pipeline tab is never saved';
+  if (!/d\.clients = d\.clients\.map\(migrateClient\)/.test(js)) return 'clients are not migrated on load';
+  // every drawer mutation writes before it repaints
+  ['data-clientstatus', 'data-nextaction', 'data-clientnote', 'data-clientnotedel', 'data-contact']
+    .forEach(a => { if (js.indexOf(a) === -1) throw new Error('no handler wiring for ' + a); });
+  const onChange = (js.match(/function onChange[\s\S]*?\n  \}/) || [''])[0];
+  if (onChange.indexOf('Store.save()') === -1) return 'a status change never reaches localStorage';
+  return true;
+});
+
+check('events / tasks / lists can be associated with a client', () => {
+  if (!/function clientPicker/.test(js)) return 'no clientPicker()';
+  const builders = ['event', 'task', 'list'];
+  builders.forEach(t => {
+    const block = (js.match(new RegExp('\\b' + t + ': function \\(\\) \\{[\\s\\S]*?\\n    \\},')) || [''])[0];
+    if (block.indexOf('clientPicker()') === -1) throw new Error('the ' + t + ' form has no client select');
+  });
+  if (!/function clientLinks/.test(js)) return 'no clientLinks() resolver';
+  return true;
+});
+
+/* ---- 18b. the CRM engine, executed for real ---- */
+
+let C = null;
+
+check('app.js exports the client CRM engine head-lessly', () => {
+  const APP = loadApp();
+  C = APP && APP.clients;
+  if (!C) return 'no APP.clients export';
+  ['normClientStatus', 'migrateClient', 'clientClosed', 'clientNeedsAction',
+    'clientMatchesTab', 'sortClients', 'setClientStatus', 'setClientNextAction',
+    'addClientNote', 'markContact', 'logHistory', 'telHref', 'waHref', 'waNumber',
+    'clientCard', 'drawerTabHTML'].forEach(k => {
+      if (typeof C[k] !== 'function') throw new Error('APP.clients.' + k + ' is missing');
+    });
+  if (C.STATUSES.length !== 9) return 'expected 9 statuses, got ' + C.STATUSES.length;
+  if (C.DRAWER_TABS.length !== 6) return 'expected 6 drawer tabs, got ' + C.DRAWER_TABS.length;
+  const unlabelled = C.STATUSES.filter(s => !C.STATUS_LABEL[s]);
+  return unlabelled.length ? 'unlabelled statuses: ' + unlabelled.join(', ') : true;
+});
+
+check('client creation lands as a normalised, D1-shaped record', () => {
+  const raw = { type: 'client', name: 'דנה כהן', category: 'business', phone: '050-1234567' };
+  const c = C.migrateClient(raw);
+  if (c.status !== 'lead') return 'a status-less client did not default to ליד חדש';
+  ['interest', 'budget', 'nextAction', 'nextActionAt', 'followUpAt', 'lastContactAt', 'notes']
+    .forEach(k => { if (typeof c[k] !== 'string') throw new Error(k + ' is not a string'); });
+  if (!Array.isArray(c.clientNotes) || !Array.isArray(c.history)) return 'the file arrays are missing';
+  // a garbage status can never crash a render
+  if (C.migrateClient({ status: 'לא-קיים' }).status !== 'lead') return 'unknown status is not normalised';
+  if (C.normClientStatus(undefined) !== 'lead') return 'undefined status is not normalised';
+  return true;
+});
+
+check('status transitions are recorded in the client timeline', () => {
+  const c = C.migrateClient({ name: 'אורן לוי', status: 'lead' });
+  C.setClientStatus(c, 'contacted');
+  C.setClientStatus(c, 'quoted');
+  if (c.status !== 'quoted') return 'the final status is ' + c.status;
+  if (c.history.length !== 2) return 'expected 2 history rows, got ' + c.history.length;
+  if (c.history[0].kind !== 'status') return 'the newest row is not a status change';
+  if (c.history[0].text.indexOf('נשלחה הצעה') === -1) return 'the transition lost its target label';
+  // newest first
+  if (c.history[0].text.indexOf('נוצר קשר') === -1) return 'the transition lost its source label';
+  // a no-op transition writes nothing
+  C.setClientStatus(c, 'quoted');
+  if (c.history.length !== 2) return 'a no-op transition still wrote history';
+  // an unknown status is normalised, never stored raw
+  C.setClientStatus(c, 'nonsense');
+  if (c.status !== 'lead') return 'an unknown status did not fall back to lead';
+  return true;
+});
+
+check('Next-Action alert fires for active clients and stays silent for closed ones', () => {
+  const open = C.migrateClient({ name: 'א', status: 'interested', nextAction: '' });
+  if (!C.clientNeedsAction(open)) return 'an active client with no next action was not flagged';
+  open.nextAction = '   ';
+  if (!C.clientNeedsAction(open)) return 'whitespace passed as a real next action';
+  C.setClientNextAction(open, 'לחזור ביום שלישי', '2026-08-04');
+  if (C.clientNeedsAction(open)) return 'a defined next action still raises the alert';
+  if (open.nextActionAt !== '2026-08-04') return 'the next-action date was lost';
+  if (open.history[0].kind !== 'action') return 'the next action was not logged';
+
+  C.CLOSED.forEach(s => {
+    const closed = C.migrateClient({ name: 'ב', status: s, nextAction: '' });
+    if (!C.clientClosed(closed)) throw new Error(s + ' is not treated as closed');
+    if (C.clientNeedsAction(closed)) throw new Error(s + ' was wrongly flagged');
+  });
+
+  // clearing the action puts the hole back in the pipeline
+  C.setClientNextAction(open, '', '');
+  if (!C.clientNeedsAction(open)) return 'clearing the next action did not re-raise the alert';
+  return true;
+});
+
+check('pipeline sub-tabs partition every status exactly once', () => {
+  const buckets = C.TABS.filter(t => t !== 'all');
+  const seen = {};
+  buckets.forEach(t => C.TAB_STATUSES[t].forEach(s => {
+    if (seen[s]) throw new Error(s + ' appears in two sub-tabs');
+    seen[s] = t;
+  }));
+  const orphan = C.STATUSES.filter(s => !seen[s]);
+  if (orphan.length) return 'statuses no sub-tab shows: ' + orphan.join(', ');
+
+  const lead = C.migrateClient({ name: 'ג', status: 'lead' });
+  if (!C.clientMatchesTab(lead, 'new')) return 'a lead is not in לידים חדשים';
+  if (!C.clientMatchesTab(lead, 'all')) return 'a lead is not in הכל';
+  if (C.clientMatchesTab(lead, 'closed')) return 'a lead leaked into סגורים';
+  const won = C.migrateClient({ name: 'ד', status: 'won' });
+  if (!C.clientMatchesTab(won, 'closed')) return 'a won deal is not in סגורים';
+  if (C.clientMatchesTab(won, 'active')) return 'a won deal leaked into פעילים';
+  return true;
+});
+
+check('client sorting floats the missing next actions to the top', () => {
+  const mk = (name, status, action, at) =>
+    C.migrateClient({ name, status, nextAction: action, nextActionAt: at || '', updatedAt: 1 });
+  const sorted = C.sortClients([
+    mk('סגור', 'won', ''),
+    mk('פעיל עם פעולה', 'quoted', 'לשלוח חוזה', '2026-08-01'),
+    mk('חור בצינור', 'interested', ''),
+    mk('דחוף', 'contacted', 'להתקשר', '2026-07-28')
+  ]).map(c => c.name);
+  if (sorted[0] !== 'חור בצינור') return 'the pipeline hole is not first: ' + sorted.join(' | ');
+  if (sorted[1] !== 'דחוף') return 'the earliest next action is not second: ' + sorted.join(' | ');
+  if (sorted[3] !== 'סגור') return 'a closed client did not sink: ' + sorted.join(' | ');
+  return true;
+});
+
+check('call and WhatsApp targets are built from a real Israeli number', () => {
+  if (C.telHref('050-123-4567') !== 'tel:0501234567') return 'tel: got ' + C.telHref('050-123-4567');
+  if (C.waNumber('050-1234567') !== '972501234567') return 'wa got ' + C.waNumber('050-1234567');
+  if (C.waNumber('+972 50 123 4567') !== '972501234567') return 'an international number was mangled';
+  if (C.waHref('050-1234567') !== 'https://wa.me/972501234567') return 'wrong wa.me href';
+  ['', null, undefined, 'לא ידוע'].forEach(v => {
+    if (C.telHref(v) !== '' || C.waHref(v) !== '') throw new Error('a missing number produced a link');
+  });
+  return true;
+});
+
+check('logging a contact stamps the file and its timeline', () => {
+  const c = C.migrateClient({ name: 'ה', status: 'contacted', nextAction: 'לחזור' });
+  C.markContact(c, 'whatsapp');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(c.lastContactAt)) return 'lastContactAt is ' + c.lastContactAt;
+  if (c.history[0].kind !== 'contact') return 'the contact was not logged';
+  if (c.history[0].text.indexOf('וואטסאפ') === -1) return 'the channel was lost';
+  C.markContact(c, 'tel');
+  if (c.history[0].text.indexOf('טלפון') === -1) return 'a phone call was not logged';
+  return true;
+});
+
+check('client notes are captured, ordered and never blank', () => {
+  const c = C.migrateClient({ name: 'ו' });
+  if (C.addClientNote(c, '   ') !== null) return 'a blank note was accepted';
+  C.addClientNote(c, 'ביקשה מסגרת כהה');
+  C.addClientNote(c, 'התקציב עלה ל-15,000');
+  if (c.clientNotes.length !== 2) return 'expected 2 notes, got ' + c.clientNotes.length;
+  if (c.clientNotes[0].body !== 'התקציב עלה ל-15,000') return 'notes are not newest-first';
+  if (!c.clientNotes[0].id) return 'a note has no id';
+  if (c.history.filter(h => h.kind === 'note').length !== 2) return 'notes are not in the timeline';
+  // a store that ever held raw strings is adopted, not dropped
+  const legacy = C.migrateClient({ name: 'ז', clientNotes: ['פתק ישן', '  ', 7] });
+  if (legacy.clientNotes.length !== 1) return 'legacy note adoption is wrong';
+  if (legacy.clientNotes[0].body !== 'פתק ישן') return 'a legacy note lost its text';
+  return true;
+});
+
+check('every drawer tab renders real content for a real client file', () => {
+  const c = C.migrateClient({
+    id: 'cl_1', name: 'דנה <כהן>', status: 'quoted', category: 'business',
+    phone: '050-1234567', email: 'dana@example.com',
+    interest: 'פורטרט שמן 70x100', budget: '8,000 ₪',
+    nextAction: 'לשלוח הצעה סופית', nextActionAt: '2026-08-04',
+    lastContactAt: '2026-07-26', notes: 'הערה כללית'
+  });
+  C.logHistory(c, 'created', 'התיק נפתח');
+  C.addClientNote(c, 'ביקשה מסגרת כהה');
+
+  const links = {
+    events: [{ id: 'ev1', title: 'פגישת היכרות', category: 'business', date: '2099-01-01', start: '10:00', end: '11:00', location: 'זום' }],
+    tasks: [{ id: 'tk1', title: 'להכין הצעה', category: 'business', status: 'progress', priority: 'high', due: '2099-01-01', subtasks: [] }],
+    lists: [{ id: 'ls1', title: 'מידות קיר', category: 'business', date: '', items: [{ id: 'i1', title: 'רוחב', done: true }] }]
+  };
+
+  const expected = {
+    overview: ['הפעולה הבאה', 'לשלוח הצעה סופית', 'תקציב', '📞 התקשר', 'wa.me'],
+    meetings: ['פגישות קרובות', 'פגישות שהיו', 'פגישת היכרות'],
+    tasks: ['להכין הצעה', 'data-cycle'],
+    lists: ['מידות קיר', 'prog-fill'],
+    notes: ['ביקשה מסגרת כהה', 'data-clientnote'],
+    history: ['התיק נפתח']
+  };
+
+  C.DRAWER_TABS.forEach(tab => {
+    const out = C.drawerTabHTML(tab, c, links);
+    if (typeof out !== 'string' || out.length < 40) throw new Error(tab + ' rendered nothing');
+    (expected[tab] || []).forEach(needle => {
+      if (out.indexOf(needle) === -1) throw new Error(tab + ' is missing "' + needle + '"');
+    });
+    if (out.indexOf('<כהן>') !== -1) throw new Error(tab + ' injects the client name unescaped');
+  });
+
+  // an unknown tab falls back to the overview rather than blanking the file
+  if (C.drawerTabHTML('nonsense', c, links).indexOf('תקציב') === -1) {
+    return 'an unknown tab did not fall back to סקירה';
+  }
+  // an empty file still renders every tab
+  const bare = C.migrateClient({ id: 'cl_2', name: 'ריק', status: 'lead' });
+  C.DRAWER_TABS.forEach(tab => {
+    const out = C.drawerTabHTML(tab, bare, null);
+    if (typeof out !== 'string' || !out.length) throw new Error(tab + ' crashed on an empty file');
+  });
+  return true;
+});
+
+check('the client card shows the alert badge only when it should', () => {
+  const hole = C.migrateClient({ id: 'cl_3', name: 'אורן', status: 'lead', nextAction: '' });
+  const cardA = C.clientCard(hole);
+  if (cardA.indexOf(C.NO_ACTION_BADGE) === -1) return 'the alert badge is missing from the card';
+  if (cardA.indexOf('data-clientopen="cl_3"') === -1) return 'the card does not open the file';
+  if (cardA.indexOf('is-missing') === -1) return 'the card is not visually flagged';
+
+  const ok = C.migrateClient({ id: 'cl_4', name: 'דנה', status: 'quoted', nextAction: 'לשלוח חוזה' });
+  const cardB = C.clientCard(ok);
+  if (cardB.indexOf(C.NO_ACTION_BADGE) !== -1) return 'a covered client still shows the alert';
+  if (cardB.indexOf('לשלוח חוזה') === -1) return 'the next action is not on the card';
+
+  const done = C.migrateClient({ id: 'cl_5', name: 'סגור', status: 'won', nextAction: '' });
+  if (C.clientCard(done).indexOf(C.NO_ACTION_BADGE) !== -1) return 'a closed deal shows the alert';
+  return true;
+});
+
+/* ------------------------------------------- 19. Sprint 4 spec & delivery */
 
 check('service worker cache version was bumped for this sprint', () => {
   const m = sw.match(/CACHE_VERSION = '(v\d+)'/);
   if (!m) return 'no CACHE_VERSION';
   const n = parseInt(m[1].slice(1), 10);
-  return n >= 3 ? true : 'CACHE_VERSION is ' + m[1] + ', expected v3 or later';
+  return n >= 4 ? true : 'CACHE_VERSION is ' + m[1] + ', expected v4 or later';
 });
 
 check('PROJECT_PLAN documents the Sprint 3 engine', () => {
@@ -989,6 +1296,15 @@ check('PROJECT_PLAN documents the Sprint 3 engine', () => {
     'Tasks Engine', 'Smart Checklist Lists', 'Quick Notes',
     'ממתין ללקוח', 'הפעולה הבאה', 'הצמד למעלה'
   ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+check('PROJECT_PLAN documents the Sprint 4 client CRM', () => {
+  const required = [
+    'Client CRM', 'תיק לקוח', 'Next Action',
+    'אין פעולה הבאה מוגדרת', 'וואטסאפ'
+  ].concat(CLIENT_STAGES);
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
 });

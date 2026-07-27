@@ -37,6 +37,12 @@
   --progress-soft:rgba(122,167,232,.14);
   --muted-soft:   rgba(151,161,180,.12);
 
+  /* --- client CRM edges (Sprint 4) --- */
+  --personal-edge:rgba(80,200,120,.42);
+  --business-edge:rgba(74,144,226,.42);
+  --danger-edge:  rgba(226,114,91,.45);
+  --danger-glow:  0 0 0 3px rgba(226,114,91,.10);
+
   /* --- geometry --- */
   --r-sm: 10px;
   --r-md: 14px;
@@ -52,6 +58,7 @@
   --scrim:     rgba(6,8,13,.62);
 
   --rail-w: 244px;
+  --drawer-w: 460px;              /* client file — full-width sheet on mobile */
   --bar-h: 68px;
   --hour-h: 56px;                 /* day-view hour row — mirrors HOUR_PX in app.js */
   --safe-b: env(safe-area-inset-bottom, 0px);
@@ -351,7 +358,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
    3. To-do today  /  generic rows
    ========================================================================== */
 
-.todo, #tasksList, #clientsList, #listsList, #notesList{ padding:6px 4px; }
+.todo, #tasksList, #listsList, #notesList{ padding:6px 4px; }
 
 .row{
   display:flex; align-items:center; gap:12px;
@@ -882,6 +889,209 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 }
 
 /* ==========================================================================
+   Client CRM · client drawer · Next-Action alert engine   (Sprint 4)
+   ========================================================================== */
+
+/* ---------- pipeline sub-tabs (5 stages wrap onto 2 rows on a phone) ---------- */
+.client-tabs{ margin-top:14px; flex-wrap:wrap; }
+.client-tabs .seg{ flex:1 1 30%; padding:9px 4px; font-size:12.5px; }
+.client-tabs .seg.is-active .seg-count{ color:var(--gold); }
+
+/* ---------- client status badges — colour AND the Hebrew stage name ---------- */
+.cst-lead{        background:var(--gold-soft);     color:var(--gold); }
+.cst-contacted{   background:var(--progress-soft); color:var(--progress); }
+.cst-interested{  background:var(--personal-soft); color:var(--personal); }
+.cst-quoted{      background:var(--business-soft); color:var(--business); border-color:var(--business-edge); }
+.cst-awaiting{    background:var(--waiting-soft);  color:var(--waiting);  border-color:var(--waiting-edge); }
+.cst-meeting{     background:var(--gold-soft);     color:var(--gold);     border-color:var(--gold-edge); }
+.cst-won{         background:var(--personal-soft); color:var(--personal); border-color:var(--personal-edge); }
+.cst-irrelevant{  background:var(--muted-soft);    color:var(--faint); }
+.cst-past{        background:var(--muted-soft);    color:var(--muted); }
+
+/* the mandated alert badge — the loudest thing on a client card */
+.badge.no-action{
+  background:var(--danger-soft); color:var(--danger);
+  border-color:var(--danger-edge);
+  box-shadow:var(--danger-glow);
+}
+
+/* ---------- client card list ---------- */
+.client-cards{ display:flex; flex-direction:column; gap:12px; }
+
+.cl-card{
+  display:flex; flex-direction:column;
+  background:var(--card); border:1px solid var(--line-soft);
+  border-radius:var(--r-lg);
+  border-inline-start:3px solid var(--line-soft);
+  overflow:hidden;
+  transition:border-color .18s, transform .16s;
+}
+.cl-card:hover{ transform:translateY(-2px); border-color:var(--gold-edge); }
+
+/* the stage is carried by the card rail too, never by the badge alone */
+.cst-row-lead{        border-inline-start-color:var(--gold); }
+.cst-row-contacted{   border-inline-start-color:var(--progress); }
+.cst-row-interested{  border-inline-start-color:var(--personal); }
+.cst-row-quoted{      border-inline-start-color:var(--business); }
+.cst-row-awaiting{    border-inline-start-color:var(--waiting); }
+.cst-row-meeting{     border-inline-start-color:var(--gold); }
+.cst-row-won{         border-inline-start-color:var(--personal); }
+.cst-row-irrelevant,
+.cst-row-past{        border-inline-start-color:var(--faint); }
+
+.cl-card.is-missing{ border-color:var(--danger-edge); }
+
+/* the whole identity block is one tap target that opens the file */
+.cl-open{
+  display:flex; flex-direction:column; align-items:flex-start; gap:7px;
+  width:100%; padding:15px 16px 13px;
+  background:transparent; border:0;
+  text-align:start; color:var(--ink);
+}
+.cl-name{ font-size:16px; font-weight:800; line-height:1.3; }
+.cl-badges{ display:flex; flex-wrap:wrap; gap:7px; }
+.cl-contact{
+  font-size:12.5px; color:var(--muted); direction:ltr; text-align:start;
+  font-variant-numeric:tabular-nums;
+  overflow:hidden; text-overflow:ellipsis; max-width:100%; white-space:nowrap;
+}
+.cl-interest{ font-size:12.5px; color:var(--faint); line-height:1.5; }
+.cl-quiet{ font-size:12px; color:var(--faint); font-style:italic; }
+.cl-open .next-action{ width:100%; }
+
+.cl-acts{
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  padding:0 12px 12px;
+}
+
+/* ---------- direct call / WhatsApp ---------- */
+.qa{
+  display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  min-height:var(--tap); padding:0 15px;
+  border-radius:999px;
+  background:var(--card-2); border:1px solid var(--line-soft);
+  color:var(--ink); font-size:13px; font-weight:700; white-space:nowrap;
+  text-decoration:none;
+  transition:border-color .16s, color .16s, background .16s;
+}
+.qa-mini{ min-height:38px; padding:0 13px; font-size:12.5px; }
+.qa-call:hover{ color:var(--business); border-color:var(--business-edge); }
+.qa-wa:hover{ color:var(--personal); border-color:var(--personal-edge); }
+.qa.is-off{ color:var(--faint); background:transparent; cursor:default; }
+.cl-acts .sheet-x{ margin-inline-start:auto; }
+
+/* ==========================================================================
+   Client drawer (תיק לקוח) — slide-over, mobile-first
+   ========================================================================== */
+
+.drawer{
+  position:fixed; z-index:55;
+  inset-inline:0; bottom:0;
+  max-height:92vh; overflow-y:auto;
+  padding:8px 16px calc(18px + var(--safe-b));
+  background:var(--card);
+  border-top:1px solid var(--line);
+  border-radius:var(--r-xl) var(--r-xl) 0 0;
+  box-shadow:var(--shadow);
+  animation:slideUp .26s cubic-bezier(.2,.8,.25,1) both;
+}
+.drawer[hidden]{ display:none; }
+
+.drawer-head{
+  display:flex; align-items:flex-start; justify-content:space-between; gap:12px;
+  margin-bottom:12px;
+}
+.drawer-id{ min-width:0; }
+.drawer-id h2{ font-size:20px; font-weight:800; line-height:1.3; }
+.drawer-sub{ margin-top:4px; font-size:12.5px; color:var(--faint); line-height:1.5; }
+
+.drawer-acts{ display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
+
+/* six tabs never fit a phone row — they scroll, the page never does */
+.drawer-tabs{
+  margin-top:14px;
+  overflow-x:auto;
+  -webkit-overflow-scrolling:touch;
+  scrollbar-width:none;
+}
+.drawer-tabs::-webkit-scrollbar{ display:none; }
+.drawer-tabs .seg{ flex:0 0 auto; padding:9px 14px; font-size:13px; }
+
+.drawer-body{ margin-top:14px; }
+
+.dr-card{
+  padding:14px;
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:var(--r-md);
+}
+.dr-card + .dr-card{ margin-top:12px; }
+.dr-group{ margin-bottom:14px; }
+.dr-add{ margin-bottom:12px; }
+
+/* ---------- overview: status picker + next-action editor ---------- */
+.dr-status{ margin-bottom:14px; }
+
+.dr-next{
+  margin-bottom:16px; padding:12px;
+  background:var(--gold-soft); border:1px solid var(--gold-edge);
+  border-radius:var(--r-md);
+}
+.dr-next.is-missing{
+  background:var(--danger-soft); border-color:var(--danger-edge);
+}
+.dr-next .badge{ margin-bottom:8px; }
+.dr-next-row{ display:flex; gap:8px; margin-top:8px; }
+.dr-next-row .input{ flex:1 1 auto; min-width:0; }
+.dr-next-row .btn{ flex:0 0 auto; width:auto; padding:0 20px; }
+
+/* ---------- overview: the fact sheet ---------- */
+.dr-facts{ margin:0; display:flex; flex-direction:column; }
+.dr-fact{
+  display:flex; align-items:baseline; justify-content:space-between; gap:14px;
+  padding:9px 0;
+  border-bottom:1px solid var(--line-soft);
+}
+.dr-fact:last-child{ border-bottom:0; }
+.dr-fact dt{ flex:0 0 auto; font-size:12.5px; font-weight:700; color:var(--faint); }
+.dr-fact dd{
+  margin:0; min-width:0;
+  font-size:13.5px; font-weight:650; color:var(--ink);
+  text-align:end; word-break:break-word;
+}
+
+/* ---------- notes composer + history timeline ---------- */
+.dr-compose .textarea{ min-height:80px; margin-bottom:10px; }
+.dr-compose .btn{ width:100%; }
+
+.dr-log{
+  display:flex; align-items:flex-start; gap:10px;
+  padding:11px 2px;
+  border-bottom:1px solid var(--line-soft);
+}
+.dr-log:last-child{ border-bottom:0; }
+.dr-log-body{ flex:1 1 auto; min-width:0; }
+.dr-log-ico{
+  flex:0 0 auto;
+  width:26px; height:26px;
+  display:grid; place-items:center;
+  border-radius:50%;
+  background:var(--muted-soft); color:var(--muted); font-size:12px;
+}
+.dr-log-when{
+  font-size:11.5px; font-weight:700; color:var(--faint);
+  font-variant-numeric:tabular-nums;
+}
+.dr-log-text{ margin-top:3px; font-size:13.5px; line-height:1.55; color:var(--ink); }
+.dr-log .note-body{ margin-top:4px; }
+
+/* the timeline reads its own kinds at a glance */
+.dr-log.dr-status  .dr-log-ico{ background:var(--progress-soft); color:var(--progress); }
+.dr-log.dr-action  .dr-log-ico{ background:var(--gold-soft);     color:var(--gold); }
+.dr-log.dr-contact .dr-log-ico{ background:var(--business-soft); color:var(--business); }
+.dr-log.dr-created .dr-log-ico{ background:var(--personal-soft); color:var(--personal); }
+.dr-log.dr-link    .dr-log-ico{ background:var(--waiting-soft);  color:var(--waiting); }
+
+/* ==========================================================================
    Desktop
    ========================================================================== */
 
@@ -910,7 +1120,21 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 
   .toast{ bottom:104px; }
 
-  .attention{ grid-template-columns:repeat(3,1fr); gap:14px; margin-top:16px; }
+  .attention{ grid-template-columns:repeat(4,1fr); gap:14px; margin-top:16px; }
+
+  /* the client file becomes a real side panel instead of a bottom sheet */
+  .drawer{
+    inset-inline:auto 0; top:0; bottom:0;
+    width:var(--drawer-w); max-width:92vw; max-height:none;
+    padding:18px 22px 40px;
+    border-radius:0;
+    border-top:0; border-inline-start:1px solid var(--line);
+    animation:slideIn .26s cubic-bezier(.2,.8,.25,1) both;
+  }
+  @keyframes slideIn{ from{ transform:translateX(-100%); } to{ transform:none; } }
+
+  .client-cards{ display:grid; grid-template-columns:repeat(2,1fr); gap:14px; }
+  .client-tabs .seg{ flex:1 1 0; font-size:13.5px; }
 
   /* calendar gets the extra room a desktop canvas offers */
   .cal-cell{ min-height:92px; padding:10px 4px; }

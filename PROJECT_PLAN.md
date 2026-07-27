@@ -1,6 +1,6 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Core product specification injected, v0.2
+> **Status:** Sprint 4 shipped — client CRM, client drawer, Next-Action engine, v0.4
 > **Repository:** `C:\calendar-app` (fresh, independent git repo — no relationship to `benja-gallery`)
 > **Created:** 2026-07-27 · **Spec injected:** 2026-07-27 (Sprint 1)
 
@@ -418,6 +418,84 @@ The `משימות` section is one screen carrying three stacked modules: tasks, 
 **Persistence** — every mutation above (status cycle, check-off, sub-task, list item, pin,
 conversion) writes through `Store.save()` to `localStorage` and repaints immediately.
 `healthcheck.js` executes the whole engine out of `window.APP.tasks / .lists / .notes`.
+
+### 7.4c Client CRM, Client Drawer & the "Next Action" Engine (shipped — Sprint 4)
+
+The `לקוחות` section is a sales pipeline, not an address book. Every record answers one
+question on sight: **what do I owe this person next?**
+
+**Client CRM — the card pipeline (אזור הלקוחות)**
+
+| Field | Values |
+|---|---|
+| `name` | free text (required) |
+| `category` | `personal` / `business` (§0.2) |
+| `phone` / `email` | contact channels; both optional, both drive the quick actions |
+| `status` | the nine pipeline stages below |
+| `interest` | Initial Interest / Artwork — *תחום עניין / יצירה* |
+| `budget` | free text, deliberately not a number (ranges and currencies are real) |
+| `nextAction` + `nextActionAt` | **הפעולה הבאה** — the single next physical move, and when |
+| `followUpAt` / `lastContactAt` | follow-up date, and when you actually last spoke |
+| `clientNotes` | `{id,body,at}[]` — the פתקים tab |
+| `history` | `{id,at,kind,text}[]` — the היסטוריה timeline, newest first, capped at 200 |
+
+Statuses, in pipeline order: **ליד חדש · נוצר קשר · מתעניין · נשלחה הצעה · ממתין לתשובה ·
+פגישה נקבעה · עסקה נסגרה · לא רלוונטי כרגע · לקוח עבר**. `normClientStatus()` folds anything
+unknown back to `ליד חדש`, so a legacy or corrupt row can never crash a render.
+
+- **Card list:** name, status badge, category tag, phone + email, initial interest and the
+  defined Next Action — or the alert badge when there is none. Colour is never the sole
+  carrier: the stage shows as a badge *and* as the card's start rail.
+- **Sub-tabs:** `הכל · לידים חדשים · פעילים · ממתינים · סגורים`, each with a live count.
+  The five buckets **partition all nine statuses exactly once** — no status is unreachable
+  and none is double-counted. The selection persists in `prefs.clientTab`.
+- **Quick actions on every card:** `📞 התקשר` (`tel:`) and `💬 וואטסאפ` (`wa.me`). Israeli
+  numbers are normalised for WhatsApp (`050-1234567` → `972501234567`); an already
+  international number is left alone, and a missing number renders a disabled affordance
+  instead of a dead link. Both are real anchors — the OS owns the link, the app only logs
+  the touch and stamps `lastContactAt`.
+- **Ordering:** open before closed, **holes in the pipeline first**, then by when the next
+  action is due. A deep-link from the dashboard therefore always lands on the gaps.
+
+**Client Drawer (תיק לקוח)**
+
+Tapping a card opens a mobile-first slide-over: a bottom sheet under 900px, a right-anchored
+side panel above it. Six tabs over one record:
+
+| Tab | Contents |
+|---|---|
+| סקירה | stage picker, the Next-Action editor, a fact sheet (budget, interest, last contact, follow-up), the general note, and the quick contact buttons |
+| פגישות | linked events split into **פגישות קרובות** and **פגישות שהיו** |
+| משימות | linked tasks with the full Sprint-3 row — one-tap check-off and the status chip |
+| רשימות | linked checklists with their progress bars |
+| פתקים | free-text notes tied to this client, newest first, with a composer |
+| היסטוריה | chronological log: file opened, status moves, next-action edits, contacts, linked records |
+
+- **Association:** events, tasks and lists carry an optional `clientId`. Every one of those
+  create forms exposes a client select, and each drawer tab can create straight into the file
+  with the association pre-filled — the form returns to the same tab on save.
+- **The drawer reads the full store, not `pick()`.** This is a deliberate carve-out from
+  §0.3, the same one the reminder scan takes (§8.1): a client file that silently hides half
+  its meetings because the global filter sits on `אישי` is a data trap, not a filter.
+- Every drawer tab builder is a pure function of `(client, links)`, so `healthcheck.js`
+  renders whole client files head-lessly and asserts what they contain.
+
+**"Next Action" alert engine (מנגנון הפעולה הבאה)**
+
+- Every **active** client must carry a designated Next Action (`"לחזור ביום שלישי"`,
+  `"לבדוק הדמיה"`). Whitespace is not an action.
+- When one is missing, the client is badged **⚠️ אין פעולה הבאה מוגדרת** — on the card, and
+  again at the top of the drawer.
+- The dashboard gains a fourth **attention card**, `ללא פעולה הבאה`, counting exactly those
+  clients and deep-linking into the clients view, where they already sort to the top.
+- **Closed files are exempt.** The mandate names עסקה נסגרה and לא רלוונטי כרגע; **לקוח עבר
+  is exempted too**, because a past client is by definition a finished relationship and
+  flagging every archived file would flood the attention card and destroy the signal. The
+  exempt set is one constant, `CLIENT_CLOSED`, shared by the closed sub-tab and the engine.
+
+**Persistence** — client CRUD, status moves, next-action edits, notes and every logged
+contact write through `Store.save()` to `localStorage` and repaint immediately, drawer
+included. `healthcheck.js` executes the whole CRM out of `window.APP.clients`.
 
 ### 7.4 General layout
 
