@@ -57,6 +57,9 @@
   --bar-bg:    rgba(18,22,31,.94);
   --scrim:     rgba(6,8,13,.62);
 
+  /* finished work recedes but stays legible — one knob for every card type */
+  --dim-done: .55;
+
   --rail-w: 244px;
   --drawer-w: 460px;              /* client file — full-width sheet on mobile */
   --bar-h: 68px;
@@ -311,6 +314,32 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 .seg:hover{ color:var(--ink); }
 .seg.is-active{ background:var(--gold-soft); color:var(--gold); }
 .segmented-cat{ margin-top:8px; }
+
+/* ---------- the filter strip shares its row with the multi-select gate ---------- */
+.filter-row{ display:flex; align-items:center; gap:10px; }
+.filter-row .segmented{ flex:1 1 auto; min-width:0; }
+
+.select-btn{
+  flex:0 0 auto;
+  display:inline-flex; align-items:center; justify-content:center; gap:7px;
+  margin-top:14px;
+  padding:0 14px; height:var(--tap); min-height:var(--tap);
+  background:var(--card); border:1px solid var(--line-soft);
+  border-radius:999px;
+  color:var(--muted); font-size:12.5px; font-weight:700; white-space:nowrap;
+  transition:color .18s, background .18s, border-color .18s;
+}
+.select-btn:hover{ color:var(--ink); border-color:var(--gold-edge); }
+.select-btn.is-on{
+  color:var(--gold); background:var(--gold-soft); border-color:var(--gold-edge);
+}
+.select-ico{ font-size:14px; line-height:1; }
+
+/* the narrowest phones keep the pill square rather than let it eat the filter */
+@media (max-width:420px){
+  .select-label{ display:none; }
+  .select-btn{ padding:0; width:var(--tap); min-width:var(--tap); }
+}
 .segmented-cat .seg[data-cat="personal"].is-active{ background:var(--personal-soft); color:var(--personal); }
 .segmented-cat .seg[data-cat="business"].is-active{ background:var(--business-soft); color:var(--business); }
 
@@ -598,6 +627,112 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 
 .row.list.is-complete .row-title{ color:var(--personal); }
 
+/* ==========================================================================
+   Finished work recedes (Wave 2)
+
+   A completed task, a cancelled one, a filled checklist and a closed client
+   file are all done: they stay on the board (nothing disappears behind the
+   user's back) but they stop competing for attention with what is still open.
+   --dim-done is held at .55 deliberately — the dimmed title still clears the
+   4.5:1 contrast floor against --card (§7.4 accessibility).
+   ========================================================================== */
+
+.row.is-done,
+.row.is-cancelled,
+.row.list.is-complete,
+.cl-card.is-closed{
+  opacity:var(--dim-done);
+  transition:opacity .2s ease;
+}
+/* a deliberate visit brings it back to full strength */
+.row.is-done:hover,
+.row.is-cancelled:hover,
+.row.list.is-complete:hover,
+.cl-card.is-closed:hover,
+.row.is-done:focus-within,
+.row.is-cancelled:focus-within,
+.row.list.is-complete:focus-within,
+.cl-card.is-closed:focus-within{
+  opacity:1;
+}
+/* a picked card is never dimmed — the finger has to see what it chose */
+.row.is-picked,
+.cl-card.is-picked{ opacity:1; }
+
+/* ---------- the universal edit affordance (Wave 2) ---------- */
+.row-edit{
+  flex:0 0 auto;
+  display:grid; place-items:center;
+  background:transparent; border:0; padding:0;
+  color:var(--faint); font-size:15px;
+  border-radius:50%;
+}
+.row-edit:hover{ color:var(--gold); }
+.cl-acts .row-edit{ margin-inline-start:auto; }
+.cl-acts .row-edit + .sheet-x{ margin-inline-start:0; }
+
+/* ==========================================================================
+   Multi-select & the batch action bar (Wave 3)
+   ========================================================================== */
+
+.sel-box{
+  flex:0 0 auto;
+  width:24px; height:24px;
+  display:grid; place-items:center;
+  border-radius:7px;
+  border:1.5px solid var(--faint);
+  background:transparent;
+  color:var(--surface); font-size:13px; line-height:1;
+}
+.sel-box.is-picked{ background:var(--gold); border-color:var(--gold); }
+
+/* the whole card is the tap target while a selection is live */
+.is-pickable{ cursor:pointer; }
+.row.is-picked,
+.ev.is-picked{
+  background:var(--gold-soft);
+  border-radius:var(--r-sm);
+}
+.cl-card.is-picked{ border-color:var(--gold-edge); background:var(--gold-soft); }
+/* a client card is a column — its checkbox rides above the identity block */
+.cl-card .sel-box{ margin:12px 14px 0; }
+
+.batchbar{
+  position:fixed; z-index:45;
+  inset-inline:10px;
+  bottom:calc(var(--bar-h) + var(--safe-b) + 10px);
+  display:flex; align-items:center; flex-wrap:wrap; gap:8px;
+  padding:9px 12px;
+  background:var(--bar-bg); border:1px solid var(--gold-edge);
+  border-radius:var(--r-lg);
+  box-shadow:var(--shadow);
+  backdrop-filter:blur(10px);
+  animation:rise .2s ease both;
+}
+/* display:flex above beats the UA rule for [hidden] — restore it explicitly */
+.batchbar[hidden]{ display:none; }
+
+.batch-count{
+  flex:1 1 100%;
+  font-size:12.5px; font-weight:800; color:var(--gold);
+  font-variant-numeric:tabular-nums;
+}
+.batch-btn{
+  flex:1 1 auto;
+  min-height:var(--tap); min-width:0; padding:0 12px;
+  background:var(--card-2); border:1px solid var(--line-soft);
+  border-radius:999px;
+  color:var(--ink); font-size:12.5px; font-weight:700; white-space:nowrap;
+  transition:color .16s, border-color .16s, background .16s;
+}
+.batch-btn:hover{ border-color:var(--gold-edge); color:var(--gold); }
+.batch-btn.is-danger{ color:var(--danger); border-color:var(--danger-edge); }
+.batch-btn.is-danger:hover{ background:var(--danger-soft); color:var(--danger); }
+.batch-btn.is-quiet{ color:var(--muted); }
+
+/* the batch bar is two rows tall — the toast steps over it rather than onto it */
+body.is-selecting .toast{ bottom:calc(var(--bar-h) + var(--safe-b) + 132px); }
+
 /* ---------- quick notes ---------- */
 .row.note{ align-items:flex-start; }
 .row.note.is-pinned{
@@ -854,10 +989,21 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   background:var(--gold); color:var(--surface);
   font-size:15px; font-weight:800; white-space:nowrap;
   box-shadow:var(--glow-fab);
-  transition:transform .18s, filter .18s;
+  transition:transform .22s ease, opacity .22s ease, filter .18s;
 }
 .fab:hover{ filter:brightness(1.06); }
 .fab:active{ transform:translateX(50%) scale(.97); }
+
+/* Wave 1 — the CTA sits exactly where a thumb scrolls, so it ducks out on the
+   way down and comes back on the way up. transform and opacity only: ducking
+   costs no layout, and the composited slide never stutters a scroll. */
+.fab.is-hidden{
+  transform:translateX(50%) translateY(150%);
+  opacity:0;
+  pointer-events:none;
+}
+/* selection mode owns the bottom of the screen — the batch bar replaces the CTA */
+body.is-selecting .fab{ opacity:0; pointer-events:none; }
 
 /* ==========================================================================
    Bottom sheets
@@ -956,6 +1102,21 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 .btn-gold:hover{ filter:brightness(1.06); }
 .btn-ghost{ background:transparent; border-color:var(--line-soft); color:var(--muted); }
 .btn-ghost:hover{ color:var(--ink); background:var(--line-soft); }
+/* the only button in the app that destroys something — it says so */
+.btn-danger{ background:var(--danger); color:var(--surface); }
+.btn-danger:hover{ filter:brightness(1.06); }
+
+/* ---------- delete confirmation (Wave 2) ---------- */
+.confirm[hidden]{ display:none; }
+.confirm .sheet-head h2{ font-size:17px; line-height:1.4; }
+.confirm-what{
+  padding:12px 14px;
+  background:var(--danger-soft); border:1px solid var(--danger-edge);
+  border-radius:var(--r-md);
+  font-size:14px; font-weight:700; line-height:1.5; color:var(--ink);
+  word-break:break-word;
+}
+.confirm-hint{ margin-top:10px; font-size:12.5px; line-height:1.6; color:var(--faint); }
 
 /* ==========================================================================
    Toast
@@ -973,6 +1134,10 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   color:var(--ink); font-size:13.5px; font-weight:700;
   box-shadow:var(--shadow-sm);
   animation:rise .2s ease both;
+  /* Wave 1 — the pill floats over the last rows of every list for up to five
+     seconds. It is a message, not a surface: a tap meant for the card beneath
+     it must reach that card. Only אחזר takes the finger back. */
+  pointer-events:none;
 }
 /* display:flex above beats the UA rule for [hidden] — restore it explicitly */
 .toast[hidden]{ display:none; }
@@ -983,6 +1148,7 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 .toast.has-action{ padding-block:5px; padding-inline-end:5px; }
 .toast-undo{
   flex:0 0 auto;
+  pointer-events:auto;                 /* the one part of the pill that IS a control */
   padding:0 16px; min-height:var(--tap); min-width:var(--tap);
   background:var(--gold-soft); border:1px solid var(--gold-edge);
   border-radius:999px;
@@ -1218,7 +1384,8 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
    ========================================================================== */
 
 button, .tap, .qa, .cl-open, .att, .type-btn, .seg, .cl-item,
-.mini, .badge-btn, .cal-cell, .wk-cell, .dv-slot, .toast-undo{
+.mini, .badge-btn, .cal-cell, .wk-cell, .dv-slot, .toast-undo,
+.row-edit, .batch-btn, .select-btn{
   transition:transform .1s ease;
   -webkit-tap-highlight-color:transparent;
   touch-action:manipulation;                 /* no 300ms double-tap-zoom delay */
@@ -1227,7 +1394,7 @@ button, .tap, .qa, .cl-open, .att, .type-btn, .seg, .cl-item,
 button:active, .tap:active, .qa:active, .cl-open:active, .att:active,
 .type-btn:active, .seg:active, .cl-item:active, .mini:active,
 .badge-btn:active, .cal-cell:active, .wk-cell:active, .dv-slot:active,
-.toast-undo:active{
+.toast-undo:active, .row-edit:active, .batch-btn:active, .select-btn:active{
   transform:scale(.97);
 }
 
@@ -1287,8 +1454,16 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
     height:52px; font-size:16px;
   }
   .fab:active{ transform:scale(.97); }
+  /* the desktop CTA carries no centring transform, so it ducks straight down */
+  .fab.is-hidden{ transform:translateY(150%); }
 
   .toast{ bottom:104px; }
+
+  /* the batch bar has no bottom bar to clear on a desktop canvas */
+  .batchbar{
+    inset-inline:auto 34px; bottom:34px;
+    width:min(520px, 92vw);
+  }
 
   .attention{ grid-template-columns:repeat(4,1fr); gap:14px; margin-top:16px; }
 

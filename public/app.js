@@ -171,8 +171,32 @@
   /** what the undo toast calls the thing that just disappeared */
   var DELETED_LABEL = {
     events: 'האירוע', tasks: 'המשימה', lists: 'הרשימה',
-    notes: 'הפתק', clients: 'הלקוח', clientNotes: 'הפתק'
+    notes: 'הפתק', clients: 'הלקוח', clientNotes: 'הפתק',
+    batch: 'הפריטים'
   };
+
+  /* --- Wave 1: the floating CTA yields the screen while a finger scrolls --- */
+
+  /** above this offset the page is "at the top" and the CTA is always offered */
+  var FAB_TOP = 24;
+  /** travel a single scroll event must carry before it counts as a direction */
+  var FAB_DELTA = 6;
+
+  /* --- Wave 2: confirmation before a destructive tap --- */
+
+  var CONFIRM_QUESTION = 'האם אתה בטוח שברצונך למחוק?';
+
+  /* --- Wave 3: multi-select, batch actions and the wider undo window --- */
+
+  /** the collections a card can be picked from; every row carries data-rec */
+  var SELECTABLE = ['events', 'tasks', 'lists', 'notes', 'clients'];
+  /** losing a whole batch is a bigger loss than losing one row — hold it longer */
+  var UNDO_BATCH_MS = 9000;
+  var SELECT_LABEL = { off: 'בחירה מרובה', on: 'סיום בחירה' };
+  /** how long a finger has to rest on a card before selection mode opens */
+  var LONG_PRESS_MS = 500;
+  /** a press that travels further than this is a scroll, not a long press */
+  var LONG_PRESS_SLOP = 12;
 
   /* ------------------------------------------------------------- utilities */
 
@@ -204,6 +228,80 @@
 
     /** something completed — a task closed, a checklist filled up */
     done: function () { return Haptics.fire(HAPTIC_DONE); }
+  };
+
+  /* ==========================================================================
+     The floating CTA (Wave 1)
+
+     "＋ הוספה חדשה" is fixed above the bottom bar, so on a phone it sits on top
+     of the last rows of every list — exactly where a thumb scrolls. It now
+     ducks out of the way the moment the page starts moving downward and comes
+     straight back on the way up, or at the top of the page.
+
+     decide() is pure and takes both offsets, so the whole behaviour is
+     executable head-lessly; nothing here reads the DOM.
+     ========================================================================== */
+
+  var Fab = {
+    last: 0,
+    hidden: false,
+    frame: null,
+
+    /**
+     * Should the CTA be out of the way?
+     * @param prev   the offset the last decision was taken at
+     * @param now    the current offset
+     * @param hidden where the CTA is right now
+     */
+    decide: function (prev, now, hidden) {
+      if (now <= FAB_TOP) return false;                  // at the top: always offered
+      if (now - prev > FAB_DELTA) return true;           // travelling down
+      if (prev - now > FAB_DELTA) return false;          // travelling up
+      return !!hidden;                                   // jitter changes nothing
+    },
+
+    /** paint it — a CTA that is out of the way must not keep its tap target */
+    set: function (hide) {
+      var el = $('#fab');
+      Fab.hidden = !!hide;
+      if (!el) return Fab.hidden;
+      el.classList.toggle('is-hidden', Fab.hidden);
+      el.setAttribute('aria-hidden', Fab.hidden ? 'true' : 'false');
+      el.tabIndex = Fab.hidden ? -1 : 0;
+      return Fab.hidden;
+    },
+
+    /** one scroll sample — coalesced into a frame so it never fights the compositor */
+    sample: function (y) {
+      var now = typeof y === 'number' ? y : 0;
+      var next = Fab.decide(Fab.last, now, Fab.hidden);
+      Fab.last = now;
+      if (next !== Fab.hidden) Fab.set(next);
+      return next;
+    },
+
+    offset: function () {
+      var y = window.pageYOffset;
+      if (typeof y !== 'number') {
+        var doc = document.documentElement || document.body || {};
+        y = doc.scrollTop || 0;
+      }
+      return y;
+    },
+
+    onScroll: function () {
+      if (Fab.frame) return;                     // one decision per painted frame
+      Fab.frame = true;
+      var run = function () { Fab.frame = null; Fab.sample(Fab.offset()); };
+      if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run);
+      else setTimeout(run, 60);
+    },
+
+    init: function () {
+      Fab.last = Fab.offset();
+      Fab.set(false);
+      window.addEventListener('scroll', Fab.onScroll, { passive: true });
+    }
   };
 
   function uid(prefix) {
@@ -1712,7 +1810,7 @@
 
   /* ------------------------------------------------------------------ state */
 
-  var UI = { view: 'today', formType: 'event', formCat: 'personal' };
+  var UI = { view: 'today', formType: 'event', formCat: 'personal', editId: null };
 
   function filterCat() { return Store.data.prefs.filter; }
 
@@ -1864,23 +1962,62 @@
    * markup is skipped and only the derived meta line is refreshed. Nothing the
    * finger is touching gets destroyed.
    */
-  function renderTimeline(quiet) {
-    var events = todaysEvents();
-    var byHour = {};
+  /**
+   * The hour the timeline actually paints an event in: everything outside
+   * 08:00–22:00 — an untimed event included — is clamped into the window
+   * rather than dropped.
+   */
+  function timelineHour(e) {
+    var h = hourOf(e.start);
+    if (h === null) h = DAY_START;
+    if (h < DAY_START) h = DAY_START;
+    if (h > DAY_END) h = DAY_END;
+    return h;
+  }
 
-    events.forEach(function (e) {
-      var h = hourOf(e.start);
-      if (h === null) h = DAY_START;
-      if (h < DAY_START) h = DAY_START;
-      if (h > DAY_END) h = DAY_END;
+  /**
+   * The hour buckets of the timeline, in the order they are painted.
+   *
+   * Wave 1 · B0 — renderTimeline() and the membership check used to derive
+   * their order separately: the renderer clamps an untimed event into the
+   * 08:00 bucket, while todaysEvents() sorts it LAST (no time = 24:01). With
+   * one untimed event on the board the DOM order and the expected order could
+   * never agree, sameKeys() answered "changed" on every single tap, and the
+   * container the finger was on was rebuilt every time — the exact regression
+   * the targeted-patch engine exists to prevent. Both sides now read this one
+   * function, so they cannot drift again.
+   */
+  function timelineRows() {
+    var byHour = {};
+    todaysEvents().forEach(function (e) {
+      var h = timelineHour(e);
       (byHour[h] = byHour[h] || []).push(e);
     });
+
+    var out = [];
+    for (var h = DAY_START; h <= DAY_END; h++) out.push({ hour: h, list: byHour[h] || [] });
+    return out;
+  }
+
+  /** the ordered record keys #timeline holds once painted */
+  function timelineKeys() {
+    var out = [];
+    timelineRows().forEach(function (row) {
+      out = out.concat(recKeys('events', row.list));
+    });
+    return out;
+  }
+
+  function renderTimeline(quiet) {
+    var buckets = timelineRows();
+    var events = todaysEvents();
 
     var nowH = new Date().getHours();
     var rows = [];
 
-    for (var h = DAY_START; h <= DAY_END; h++) {
-      var list = byHour[h] || [];
+    for (var i = 0; i < buckets.length; i++) {
+      var h = buckets[i].hour;
+      var list = buckets[i].list;
       rows.push(
         '<div class="tl-row' + (h === nowH ? ' is-now' : '') + '">' +
         '<div class="tl-hour">' + pad2(h) + ':00</div>' +
@@ -1899,12 +2036,15 @@
   function eventCard(e) {
     var when = e.start ? (e.start + (e.end ? '–' + e.end : '')) : 'ללא שעה';
     var meta = [when, e.location].filter(Boolean).join(' · ');
-    return '<div class="ev ev-' + e.category + '" data-rec="events:' + e.id + '">' +
+    return '<div class="ev ev-' + e.category + pickCls('events', e.id) +
+      '" data-rec="events:' + e.id + '">' +
+      selBox('events', e.id) +
       '<div class="ev-body">' +
       '<div class="ev-title">' + esc(e.title) + '</div>' +
       '<div class="ev-meta">' + esc(meta) + '</div>' +
       '</div>' +
       catTag(e.category) +
+      editBtn('events', e.id) +
       delBtn('events', e.id) +
       '</div>';
   }
@@ -1939,12 +2079,14 @@
       (t.done ? ' is-done' : '') +
       (status === 'cancelled' ? ' is-cancelled' : '') +
       (status === 'waiting' ? ' is-waiting' : '') +
-      (late ? ' is-late' : '');
+      (late ? ' is-late' : '') +
+      pickCls('tasks', t.id);
 
     // data-rec is what lets Patch.record() repaint this one row in place, in
     // every pane it happens to appear in, without rebuilding any container
     return '<div class="' + cls + '" data-rec="tasks:' + t.id + '"' +
       (compact ? ' data-compact="1"' : '') + '>' +
+      selBox('tasks', t.id) +
       '<button type="button" class="check-tap" data-toggle="' + t.id + '" aria-label="סימון כבוצע">' +
       '<span class="check">' + (t.done ? '✓' : '') + '</span></button>' +
       '<div class="row-body">' +
@@ -1959,6 +2101,7 @@
         ? '<div class="next-action"><span>הפעולה הבאה</span>' + esc(t.nextAction) + '</div>' : '') +
       (!compact && prog.total ? checklist(prog, t.subtasks, 'subtask', t.id) : '') +
       '</div>' +
+      editBtn('tasks', t.id) +
       delBtn('tasks', t.id) +
       '</div>';
   }
@@ -2457,7 +2600,8 @@
     var complete = p.total > 0 && p.done === p.total;
 
     return '<div class="row list' + (complete ? ' is-complete' : '') +
-      '" data-rec="lists:' + l.id + '">' +
+      pickCls('lists', l.id) + '" data-rec="lists:' + l.id + '">' +
+      selBox('lists', l.id) +
       '<div class="row-body">' +
       '<div class="row-title">☰ ' + esc(l.title) + '</div>' +
       '<div class="row-meta">' + catTag(l.category) +
@@ -2470,6 +2614,7 @@
         ? checklist(p, l.items, 'listitem', l.id)
         : '<div class="row-meta">רשימה ריקה</div>') +
       '</div>' +
+      editBtn('lists', l.id) +
       delBtn('lists', l.id) +
       '</div>';
   }
@@ -2495,7 +2640,8 @@
 
   function noteRow(n) {
     return '<div class="row note' + (n.pinned ? ' is-pinned' : '') +
-      '" data-rec="notes:' + n.id + '">' +
+      pickCls('notes', n.id) + '" data-rec="notes:' + n.id + '">' +
+      selBox('notes', n.id) +
       '<div class="row-body">' +
       '<div class="row-title">' + (n.pinned ? '📌 ' : '✎ ') + esc(n.title || 'פתק') + '</div>' +
       '<div class="row-meta">' + catTag(n.category) +
@@ -2508,6 +2654,7 @@
       '<button type="button" class="mini" data-convert="event:' + n.id + '">➜ הפוך לאירוע</button>' +
       '</div>' +
       '</div>' +
+      editBtn('notes', n.id) +
       delBtn('notes', n.id) +
       '</div>';
   }
@@ -2576,7 +2723,11 @@
     var contact = [c.phone, c.email].filter(Boolean).join(' · ');
 
     return '<article class="cl-card cst-row-' + status +
-      (clientNeedsAction(c) ? ' is-missing' : '') + '" data-rec="clients:' + c.id + '">' +
+      (clientNeedsAction(c) ? ' is-missing' : '') +
+      // a closed file is finished work and recedes exactly like a done task
+      (clientClosed(c) ? ' is-closed' : '') +
+      pickCls('clients', c.id) + '" data-rec="clients:' + c.id + '">' +
+      selBox('clients', c.id) +
       '<button type="button" class="cl-open" data-clientopen="' + c.id + '"' +
       ' aria-label="' + esc('פתיחת תיק הלקוח ' + (c.name || '')) + '">' +
       '<span class="cl-name">' + safeName + '</span>' +
@@ -2586,7 +2737,8 @@
       esc(c.interest ? 'מתעניין ב־' + c.interest : 'טרם הוגדר תחום עניין') + '</span>' +
       nextActionLine(c) +
       '</button>' +
-      '<div class="cl-acts">' + contactButtons(c, 'mini') + delBtn('clients', c.id) + '</div>' +
+      '<div class="cl-acts">' + contactButtons(c, 'mini') +
+      editBtn('clients', c.id) + delBtn('clients', c.id) + '</div>' +
       '</article>';
   }
 
@@ -2904,6 +3056,30 @@
     return '<button type="button" class="sheet-x" data-del="' + collection + ':' + id + '" aria-label="מחיקה">✕</button>';
   }
 
+  /**
+   * Universal edit affordance (Wave 2). Every card in the app — event, task,
+   * list, note, client — opens the SAME typed form it was created with,
+   * pre-filled, and saves back into the same record.
+   */
+  function editBtn(collection, id) {
+    return '<button type="button" class="row-edit" data-edit="' + collection + ':' + id +
+      '" aria-label="עריכה">✎</button>';
+  }
+
+  /** the checkbox a card grows while selection mode is live (Wave 3) */
+  function selBox(collection, id) {
+    if (!Select.on) return '';
+    var picked = Select.has(collection + ':' + id);
+    return '<span class="sel-box' + (picked ? ' is-picked' : '') + '" aria-hidden="true">' +
+      (picked ? '✓' : '') + '</span>';
+  }
+
+  /** ...and the classes that go with it, so the whole card reads as picked */
+  function pickCls(collection, id) {
+    if (!Select.on) return '';
+    return ' is-pickable' + (Select.has(collection + ':' + id) ? ' is-picked' : '');
+  }
+
   function emptyState(title, hint) {
     return '<div class="empty"><b>' + esc(title) + '</b>' + esc(hint) + '</div>';
   }
@@ -2972,7 +3148,7 @@
   /** every list container, the ids it should hold, and how to redraw it */
   var SECTIONS = [
     { view: 'today', sel: '#timeline', draw: renderTimeline,
-      keys: function () { return recKeys('events', todaysEvents()); } },
+      keys: timelineKeys },                      // paint order, not sort order (B0)
     { view: 'today', sel: '#todoToday', draw: renderTodo,
       keys: function () { return recKeys('tasks', unscheduledToday()); } },
     // scope: the stage keeps the markup of every pane it has ever drawn, and
@@ -3135,31 +3311,458 @@
     var entry = { collection: 'clientNotes', id: noteId, index: index, label: DELETED_LABEL.clientNotes };
 
     Undo.arm(entry, function () {
-      var live = Array.isArray(c.clientNotes) ? c.clientNotes : [];
-      live.splice(Math.min(index, live.length), 0, note);
-      c.clientNotes = live;
-      touch(c);
+      // Wave 1 · B2 — re-resolve the client instead of closing over the object.
+      // Sync.merge() REPLACES a record whose server copy is newer
+      // (arr[arr.indexOf(local)] = incoming), so a cloud round-trip landing
+      // inside the five-second window left this closure holding a detached
+      // copy: the note was pushed back into an object nothing renders and the
+      // restore silently did nothing.
+      var live = Store.find('clients', clientId);
+      if (!live) return;
+      var rows = Array.isArray(live.clientNotes) ? live.clientNotes : [];
+      if (rows.some(function (n) { return n.id === noteId; })) return;   // already back
+      rows.splice(Math.min(index, rows.length), 0, note);
+      live.clientNotes = rows;
+      touch(live);
       Store.save();
     });
 
     return entry;
   }
 
+  /**
+   * The same safety net over a whole selection (Wave 3). One Undo entry holds
+   * every record with the slot it left, so אחזר puts the entire batch back
+   * where it was — in one tap, in the original order.
+   */
+  function softDeleteMany(keys) {
+    var slots = [];
+
+    (Array.isArray(keys) ? keys : []).forEach(function (key) {
+      var parts = String(key).split(':');
+      var list = Store.data && Store.data[parts[0]];
+      if (!list || SELECTABLE.indexOf(parts[0]) === -1) return;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].id === parts[1]) {
+          slots.push({ collection: parts[0], id: parts[1], index: i, rec: list[i] });
+          return;
+        }
+      }
+    });
+
+    if (!slots.length) return null;
+
+    // remove from the back forwards, so every recorded slot is still the slot
+    // the record actually came from by the time the next splice runs
+    slots.slice().sort(function (a, b) { return b.index - a.index; })
+      .forEach(function (s) { Store.data[s.collection].splice(s.index, 1); });
+    Store.save();
+
+    var entry = {
+      collection: 'batch', id: '', index: -1, count: slots.length,
+      keys: slots.map(function (s) { return s.collection + ':' + s.id; }),
+      label: slots.length + ' פריטים'
+    };
+
+    Undo.arm(entry, function () {
+      // ascending, so each record lands back in its own slot rather than
+      // shifting the ones that follow it
+      slots.slice().sort(function (a, b) { return a.index - b.index; })
+        .forEach(function (s) {
+          var live = Store.data[s.collection];
+          if (!live || Store.find(s.collection, s.id)) return;
+          touch(s.rec);                       // replaces the queued tombstone
+          live.splice(Math.min(s.index, live.length), 0, s.rec);
+        });
+      Store.save();
+    });
+
+    return entry;
+  }
+
+  /* ==========================================================================
+     Delete confirmation (Wave 2)
+
+     Sprint 7's doctrine was "delete first, ask afterwards". The mandate asks
+     explicitly — so the question is put BEFORE the record leaves, and the
+     five-second אחזר window still arms behind it. A destructive tap now costs
+     one deliberate confirmation, and even that stays recoverable.
+
+     The module owns no markup decisions: ask() takes the sentence and the
+     closure to run, which is what lets the same door serve one row, a client
+     note and a whole batch.
+     ========================================================================== */
+
+  var Confirm = {
+    pending: null,                        // { what, run } — one question at a time
+
+    isOpen: function () { return Confirm.pending !== null; },
+
+    ask: function (what, run) {
+      if (typeof run !== 'function') return null;
+      Confirm.pending = { what: String(what == null ? '' : what), run: run };
+
+      var title = $('#confirmTitle');
+      var line = $('#confirmWhat');
+      if (title) title.textContent = CONFIRM_QUESTION;
+      if (line) line.textContent = Confirm.pending.what;
+      openSheet('confirmSheet');
+      return Confirm.pending;
+    },
+
+    /** כן, מחק */
+    accept: function () {
+      var p = Confirm.pending;
+      Confirm.pending = null;
+      if (!p) return false;
+      p.run();
+      return true;
+    },
+
+    /** ביטול · Esc · a tap on the backdrop — nothing is deleted */
+    dismiss: function () {
+      var had = Confirm.pending !== null;
+      Confirm.pending = null;
+      return had;
+    }
+  };
+
+  function recTitle(collection, rec) {
+    if (!rec) return '';
+    if (collection === 'clients') return String(rec.name || '');
+    return String(rec.title || rec.body || '');
+  }
+
+  /** the sentence under the question: "המשימה · לשלוח חוזה חתום" */
+  function recSummary(collection, rec) {
+    var label = DELETED_LABEL[collection] || 'הפריט';
+    var title = recTitle(collection, rec).replace(/\s+/g, ' ').slice(0, 70);
+    return title ? label + ' · ' + title : label;
+  }
+
+  /** the ONE door every destructive tap in the app goes through */
+  function confirmDelete(what, run) { return Confirm.ask(what, run); }
+
+  /* ==========================================================================
+     Multi-select & batch actions (Wave 3)
+
+     Selection mode is entered from the header pill or by long-pressing any
+     card. While it is live every tap that lands on a card picks it instead of
+     acting on it, the batch bar takes over the bottom of the screen, and a
+     batch deletion arms ONE undo entry that puts every record back in the slot
+     it came from.
+
+     The state transitions below are pure (no DOM, no toast): the delegate is
+     what repaints. That is what lets healthcheck.js drive a whole
+     select → batch → undo cycle head-lessly.
+     ========================================================================== */
+
+  var Select = {
+    on: false,
+    picked: {},                  // { 'tasks:id': 1 } — namespaced, so types can mix
+    swallow: false,              // the click that follows a long press is not a tap
+
+    /* ---- pure state ---- */
+
+    has: function (key) { return !!Select.picked[key]; },
+    keys: function () { return Object.keys(Select.picked); },
+    count: function () { return Select.keys().length; },
+
+    toggle: function (key) {
+      if (!key) return false;
+      if (Select.picked[key]) delete Select.picked[key];
+      else Select.picked[key] = 1;
+      return Select.has(key);
+    },
+
+    enter: function (key) {
+      Select.on = true;
+      Select.picked = {};
+      if (key) Select.picked[key] = 1;
+      return Select.on;
+    },
+
+    exit: function () {
+      Select.on = false;
+      Select.picked = {};
+      return Select.on;
+    },
+
+    /**
+     * Every record key the ACTIVE view is showing, in the order it shows them —
+     * read straight off the section registry, so "בחר הכל" can never disagree
+     * with what is on screen. A pane that publishes null (the month and week
+     * grids draw dots, not cards) simply offers nothing to select.
+     */
+    visibleKeys: function () {
+      var out = [];
+      SECTIONS.forEach(function (s) {
+        if (s.view !== UI.view) return;
+        var keys = s.keys();
+        if (Array.isArray(keys)) out = out.concat(keys);
+      });
+      return out.filter(function (k) {
+        return SELECTABLE.indexOf(String(k).split(':')[0]) !== -1;
+      });
+    },
+
+    all: function () {
+      Select.visibleKeys().forEach(function (k) { Select.picked[k] = 1; });
+      return Select.count();
+    },
+
+    /**
+     * Pure batch completion: closes every open task and fills every unfinished
+     * checklist in the selection, and reports what it actually changed.
+     */
+    complete: function (keys) {
+      var out = { tasks: 0, lists: 0 };
+
+      (Array.isArray(keys) ? keys : []).forEach(function (key) {
+        var p = String(key).split(':');
+        var rec = Store.find(p[0], p[1]);
+        if (!rec) return;
+
+        if (p[0] === 'tasks') {
+          if (isClosed(rec.status)) return;
+          setTaskStatus(rec, 'done');
+          touch(rec);
+          out.tasks++;
+          return;
+        }
+        if (p[0] === 'lists') {
+          var items = Array.isArray(rec.items) ? rec.items : [];
+          if (!items.length || !items.some(function (it) { return !it.done; })) return;
+          items.forEach(function (it) { it.done = true; });
+          touch(rec);
+          out.lists++;
+        }
+      });
+
+      if (out.tasks || out.lists) Store.save();
+      return out;
+    },
+
+    /* ---- painting ---- */
+
+    paint: function () {
+      var n = Select.count();
+      var bar = $('#batchBar');
+      var count = $('#batchCount');
+      var btn = $('#selectBtn');
+      var label = $('#selectLabel');
+
+      if (bar) bar.hidden = !Select.on;
+      if (count) count.textContent = n ? n + ' נבחרו' : 'בחר פריטים';
+      if (btn) {
+        btn.classList.toggle('is-on', Select.on);
+        btn.setAttribute('aria-pressed', Select.on ? 'true' : 'false');
+      }
+      if (label) label.textContent = Select.on ? SELECT_LABEL.on : SELECT_LABEL.off;
+      if (document.body && document.body.classList) {
+        document.body.classList.toggle('is-selecting', Select.on);
+      }
+      return n;
+    },
+
+    /** state + a full repaint: every card grows or loses its checkbox */
+    setMode: function (on, key) {
+      if (on) Select.enter(key); else Select.exit();
+      Select.paint();
+      render();
+      return Select.on;
+    },
+
+    toggleMode: function () { return Select.setMode(!Select.on); },
+
+    /* ---- input ---- */
+
+    /** selection mode owns every tap that lands on a card */
+    tap: function (target) {
+      if (!Select.on || !target || !target.closest) return false;
+      if (Select.swallow) { Select.swallow = false; return true; }   // the long press itself
+      if (target.closest('#batchBar,.sheet,.drawer,.topbar,.tabbar,.rail,.toast')) return false;
+
+      var node = target.closest('[data-rec]');
+      var key = node && node.dataset ? node.dataset.rec : '';
+      if (!key || SELECTABLE.indexOf(String(key).split(':')[0]) === -1) return false;
+
+      Haptics.light();
+      Select.toggle(key);
+      var p = String(key).split(':');
+      if (!Patch.record(p[0], p[1])) render();       // repaint that one card
+      Select.paint();
+      return true;
+    },
+
+    /** the batch bar: done · all · delete · exit */
+    run: function (action) {
+      if (action === 'exit') {
+        Select.setMode(false);
+        toast('הבחירה בוטלה');
+        return;
+      }
+
+      if (action === 'all') {
+        var n = Select.all();
+        Select.paint();
+        render();
+        toast(n ? n + ' פריטים נבחרו' : 'אין פריטים לבחירה בתצוגה הזו');
+        return;
+      }
+
+      var keys = Select.keys();
+      if (!keys.length) { toast('לא נבחר אף פריט'); return; }
+
+      if (action === 'done') {
+        var did = Select.complete(keys);
+        if (!did.tasks && !did.lists) { toast('אין מה לסמן כהושלם בבחירה הזו'); return; }
+        Haptics.done();
+        Select.setMode(false);
+        toast([
+          did.tasks ? plural(did.tasks, 'משימה אחת', 'משימות') : '',
+          did.lists ? plural(did.lists, 'רשימה אחת', 'רשימות') : ''
+        ].filter(Boolean).join(' ו־') + ' סומנו כהושלמו ✓');
+        return;
+      }
+
+      if (action === 'delete') {
+        confirmDelete(plural(keys.length, 'פריט אחד', 'פריטים') + ' ייצאו מהרשימה', function () {
+          var gone = softDeleteMany(keys);
+          Select.setMode(false);
+          if (!gone) { toast('לא נמחק דבר'); return; }
+          // a whole batch is a bigger loss — the net stays open longer
+          toast(gone.count + ' פריטים נמחקו', UNDO_LABEL, UNDO_BATCH_MS);
+        });
+      }
+    },
+
+    /**
+     * A long press on any card opens selection mode with that card picked —
+     * the gesture a phone user reaches for first. A press that travels is a
+     * scroll and cancels; the click that follows the press is swallowed, or it
+     * would immediately un-pick the card the finger was resting on.
+     */
+    bindLongPress: function () {
+      var timer = null, x0 = 0, y0 = 0, key = null;
+
+      function cancel() {
+        if (timer) { clearTimeout(timer); timer = null; }
+        key = null;
+      }
+
+      document.addEventListener('touchstart', function (e) {
+        cancel();
+        // a new gesture starts clean: the click that belonged to the previous
+        // long press has either already been swallowed or will never arrive
+        Select.swallow = false;
+        if (Select.on || !e.touches || e.touches.length !== 1) return;
+        var t = e.target;
+        if (!t || !t.closest) return;
+        if (t.closest('#batchBar,.sheet,.drawer,.topbar,.tabbar,.rail,.toast')) return;
+
+        var node = t.closest('[data-rec]');
+        var k = node && node.dataset ? node.dataset.rec : '';
+        if (!k || SELECTABLE.indexOf(String(k).split(':')[0]) === -1) return;
+
+        key = k;
+        x0 = e.touches[0].clientX;
+        y0 = e.touches[0].clientY;
+        timer = setTimeout(function () {
+          timer = null;
+          if (!key) return;
+          Haptics.done();
+          Select.swallow = true;
+          Select.setMode(true, key);
+          toast('מצב בחירה — סמן פריטים ובחר פעולה בסרגל שלמטה');
+          key = null;
+        }, LONG_PRESS_MS);
+      }, { passive: true });
+
+      document.addEventListener('touchmove', function (e) {
+        if (!timer || !e.touches || !e.touches.length) return;
+        var t = e.touches[0];
+        if (Math.abs(t.clientX - x0) > LONG_PRESS_SLOP ||
+          Math.abs(t.clientY - y0) > LONG_PRESS_SLOP) cancel();
+      }, { passive: true });
+
+      document.addEventListener('touchend', cancel, { passive: true });
+      document.addEventListener('touchcancel', cancel, { passive: true });
+    }
+  };
+
   /* ------------------------------------------------------------ master add */
 
   function openSheet(id) {
-    $('#backdrop').hidden = false;
-    $('#' + id).hidden = false;
-    document.body.style.overflow = 'hidden';
+    var backdrop = $('#backdrop');
+    var el = $('#' + id);
+    if (backdrop) backdrop.hidden = false;
+    if (el) el.hidden = false;
+    if (document.body && document.body.style) document.body.style.overflow = 'hidden';
   }
 
   function closeSheets() {
+    Confirm.dismiss();
     $('#backdrop').hidden = true;
     $('#typeSheet').hidden = true;
     $('#formSheet').hidden = true;
+    $('#confirmSheet').hidden = true;
     Drawer.close();
     document.body.style.overflow = '';
     PREFILL = null;
+    UI.editId = null;
+  }
+
+  /** is anything else still layered over the app? */
+  function anySheetOpen() {
+    return !$('#typeSheet').hidden || !$('#formSheet').hidden || Drawer.isOpen();
+  }
+
+  /**
+   * The confirmation closes on its own, without taking the sheet or the client
+   * file underneath it with it — a note deleted from inside a client file must
+   * leave the file open.
+   */
+  function closeConfirmUI() {
+    $('#confirmSheet').hidden = true;
+    if (anySheetOpen()) return;
+    $('#backdrop').hidden = true;
+    document.body.style.overflow = '';
+  }
+
+  function closeConfirm() { closeConfirmUI(); Confirm.dismiss(); }
+
+  /** כן, מחק — the sheet closes first, so the toast lands on a clear screen */
+  function acceptConfirm() { closeConfirmUI(); return Confirm.accept(); }
+
+  /** ✕ on a card: ask, then soft-delete with the undo window behind it */
+  function askDelete(key) {
+    var parts = String(key).split(':');
+    var rec = Store.find(parts[0], parts[1]);
+    if (!rec) { toast('הפריט לא נמצא'); return false; }
+
+    return !!confirmDelete(recSummary(parts[0], rec), function () {
+      var gone = softDelete(parts[0], parts[1]);
+      if (!gone) return;
+      render();                              // the row is leaving — membership moved
+      toast(gone.label + ' נמחק', UNDO_LABEL);
+    });
+  }
+
+  /** the same door for a note inside a client file, which is a sub-record */
+  function askDeleteClientNote(key) {
+    var parts = String(key).split(':');
+    var c = Store.find('clients', parts[0]);
+    var rows = c && Array.isArray(c.clientNotes) ? c.clientNotes : [];
+    var note = rows.filter(function (n) { return n.id === parts[1]; })[0];
+    if (!note) { toast('הפתק לא נמצא'); return false; }
+
+    return !!confirmDelete(recSummary('clientNotes', { title: note.body }), function () {
+      var goneNote = softDeleteClientNote(parts[0], parts[1]);
+      if (!goneNote) return;
+      render();
+      toast(goneNote.label + ' נמחק', UNDO_LABEL);
+    });
   }
 
   /** date/time handed over by a tapped calendar cell, consumed by the next form */
@@ -3283,15 +3886,178 @@
     return normItems(String(text == null ? '' : text).split('\n'), prefix);
   }
 
-  function openForm(type, prefill) {
+  /* ==========================================================================
+     Universal edit (Wave 2)
+
+     Every card in the app opens the SAME typed form it was created with,
+     pre-filled, and saves back into the same record. Two rules make that safe:
+
+       * a collection with a dedicated writer is edited THROUGH it —
+         setTaskStatus() keeps `done` in lockstep with status, setClientStatus()
+         and setClientNextAction() keep writing the client timeline. An edit is
+         not a back door around the model.
+       * a checklist keeps its progress. mergeChecklist() matches an edited line
+         back to the row it came from by title, so fixing a typo in a ten-item
+         list does not un-tick the nine that were already done.
+     ========================================================================== */
+
+  var EDIT_TYPE = {
+    events: 'event', tasks: 'task', lists: 'list', notes: 'note', clients: 'client'
+  };
+  var COLLECTION_OF = {
+    event: 'events', task: 'tasks', list: 'lists', note: 'notes', client: 'clients'
+  };
+
+  /** checklist rows → the textarea shape the form edits them in */
+  function itemLines(items) {
+    return (Array.isArray(items) ? items : [])
+      .map(function (it) { return it && it.title ? it.title : ''; })
+      .filter(Boolean).join('\n');
+  }
+
+  /** record → form values, keyed by input name. The inverse of submitForm(). */
+  var TO_FORM = {
+    events: function (r) {
+      return {
+        title: r.title, date: r.date, start: r.start, end: r.end,
+        location: r.location, notes: r.notes, clientId: r.clientId
+      };
+    },
+    tasks: function (r) {
+      return {
+        title: r.title, due: r.due, time: r.time,
+        status: normStatus(r.status), priority: normPriority(r.priority),
+        nextAction: r.nextAction, clientId: r.clientId,
+        subtasks: itemLines(r.subtasks), notes: r.notes
+      };
+    },
+    lists: function (r) {
+      return { title: r.title, date: r.date, clientId: r.clientId, items: itemLines(r.items) };
+    },
+    notes: function (r) { return { title: r.title, body: r.body }; },
+    clients: function (r) {
+      return {
+        name: r.name, phone: r.phone, email: r.email,
+        status: normClientStatus(r.status), interest: r.interest, budget: r.budget,
+        nextAction: r.nextAction, nextActionAt: r.nextActionAt,
+        followUpAt: r.followUpAt, notes: r.notes
+      };
+    }
+  };
+
+  /** an edited line keeps the id and the done state of the row it came from */
+  function mergeChecklist(existing, text, prefix) {
+    var pool = (Array.isArray(existing) ? existing : []).filter(Boolean).slice();
+    return parseChecklist(text, prefix).map(function (row) {
+      for (var i = 0; i < pool.length; i++) {
+        if (pool[i].title === row.title) {
+          var keep = pool.splice(i, 1)[0];
+          return { id: keep.id, title: row.title, done: !!keep.done };
+        }
+      }
+      return row;
+    });
+  }
+
+  /**
+   * Write an edited form back into its record. Returns the Hebrew toast label,
+   * or '' when validation stopped the save (the warning has already fired).
+   */
+  function applyEdit(collection, id, v, cat) {
+    var rec = Store.find(collection, id);
+    if (!rec) { warn('הפריט לא נמצא — ייתכן שנמחק'); return ''; }
+
+    var label = '';
+    rec.category = normCat(cat);
+
+    if (collection === 'events') {
+      if (!v.title) { warn('צריך כותרת לאירוע'); return ''; }
+      rec.title = v.title;
+      rec.date = v.date || todayISO();
+      rec.start = v.start || '';
+      rec.end = v.end || '';
+      rec.location = v.location || '';
+      rec.notes = v.notes || '';
+      rec.clientId = v.clientId || '';
+      label = 'האירוע עודכן';
+    } else if (collection === 'tasks') {
+      if (!v.title) { warn('צריך שם למשימה'); return ''; }
+      rec.title = v.title;
+      rec.due = v.due || '';
+      rec.time = v.time || '';
+      rec.priority = normPriority(v.priority);
+      rec.nextAction = v.nextAction || '';
+      rec.notes = v.notes || '';
+      rec.clientId = v.clientId || '';
+      rec.subtasks = mergeChecklist(rec.subtasks, v.subtasks, 'st');
+      setTaskStatus(rec, v.status || rec.status);        // keeps `done` in lockstep
+      label = 'המשימה עודכנה';
+    } else if (collection === 'lists') {
+      if (!v.title) { warn('צריך שם לרשימה'); return ''; }
+      rec.title = v.title;
+      rec.date = v.date || '';
+      rec.clientId = v.clientId || '';
+      rec.items = mergeChecklist(rec.items, v.items, 'li');
+      label = 'הרשימה עודכנה';
+    } else if (collection === 'notes') {
+      if (!v.body) { warn('הפתק ריק'); return ''; }
+      rec.title = v.title || 'פתק';
+      rec.body = v.body;
+      label = 'הפתק עודכן';
+    } else if (collection === 'clients') {
+      if (!v.name) { warn('צריך שם ללקוח'); return ''; }
+      rec.name = v.name;
+      rec.phone = v.phone || '';
+      rec.email = v.email || '';
+      rec.interest = v.interest || '';
+      rec.budget = v.budget || '';
+      rec.followUpAt = v.followUpAt || '';
+      rec.notes = v.notes || '';
+      setClientStatus(rec, v.status || rec.status);                        // logs the move
+      setClientNextAction(rec, v.nextAction || '', v.nextActionAt || '');  // logs it too
+      label = 'תיק הלקוח עודכן';
+    } else {
+      return '';
+    }
+
+    touch(rec);                 // strictly newer, so the outbox pushes the edit
+    Store.save();
+    return label;
+  }
+
+  /** fill the freshly built form with the record it is editing */
+  function fillForm(type, rec) {
+    var fields = $('#formFields');
+    var map = TO_FORM[COLLECTION_OF[type]];
+    if (!fields || !map || !rec) return false;
+
+    var values = map(rec);
+    Object.keys(values).forEach(function (name) {
+      var el = fields.querySelector('[name="' + name + '"]');
+      if (!el) return;
+      el.value = values[name] == null ? '' : values[name];
+    });
+    return true;
+  }
+
+  function openEdit(collection, id) {
+    var type = EDIT_TYPE[collection];
+    var rec = type ? Store.find(collection, id) : null;
+    if (!rec) return false;
+    openForm(type, null, rec);
+    return true;
+  }
+
+  function openForm(type, prefill, edit) {
     if (prefill) PREFILL = prefill;             // opened straight from a client file
     UI.formType = type;
-    UI.formCat = (type === 'client') ? 'business' : 'personal';
+    UI.editId = edit ? edit.id : null;
+    UI.formCat = edit ? normCat(edit.category) : ((type === 'client') ? 'business' : 'personal');
 
-    $('#formSheetTitle').textContent = TYPE_LABEL[type];
+    $('#formSheetTitle').textContent = (edit ? 'עריכה · ' : '') + TYPE_LABEL[type];
     $('#formFields').innerHTML = FIELDS[type]();
     setFormCat(UI.formCat);
-    applyPrefill();
+    if (edit) fillForm(type, edit); else applyPrefill();
 
     $('#typeSheet').hidden = true;
     openSheet('formSheet');
@@ -3315,7 +4081,11 @@
 
     var type = UI.formType, cat = UI.formCat, label;
 
-    if (type === 'event') {
+    // the same sheet edits what it created (Wave 2) — no second form, no drift
+    if (UI.editId) {
+      label = applyEdit(COLLECTION_OF[type], UI.editId, v, cat);
+      if (!label) return false;                 // validation already warned
+    } else if (type === 'event') {
       if (!v.title) return warn('צריך כותרת לאירוע');
       Store.add('events', {
         type: 'event', title: v.title, category: cat,
@@ -3392,7 +4162,14 @@
    * that timer runs out the pending deletion is committed — the toast IS the
    * confirmation dialogue, asked after the fact so the common case is free.
    */
-  function toast(msg, action) {
+  function toast(msg, action, ms) {
+    // Wave 1 · B1 — a plain toast REPLACES the pill, hiding אחזר while the
+    // pending deletion stayed armed with no way to reach it. The window closes
+    // with the button that carried it: whatever this toast is about, an undo
+    // the user can no longer see is an undo that has already expired. Decided
+    // before the pill is even looked up — this is state, not paint.
+    if (!action) Undo.commit();
+
     var el = $('#toast');
     if (!el) return;
     var txt = $('#toastText'), btn = $('#toastUndo');
@@ -3408,7 +4185,7 @@
       el.classList.remove('has-action');
       if (btn) btn.hidden = true;
       if (action) Undo.commit();            // the window closed — the deletion stands
-    }, action ? UNDO_MS : TOAST_MS);
+    }, action ? (ms || UNDO_MS) : TOAST_MS);
   }
 
   function hideToast() {
@@ -3677,12 +4454,17 @@
   /* ------------------------------------------------------------- delegation */
 
   function onClick(e) {
+    // selection mode owns every tap that lands on a card (Wave 3), so it is
+    // asked before any control branch below can act on that card
+    if (Select.tap(e.target)) return;
+
     var el = e.target.closest ? e.target.closest(
       '[data-nav],[data-action],[data-type],[data-filter],[data-cat],[data-toggle],[data-del],' +
       '[data-calview],[data-calnav],[data-calslot],' +
       '[data-tasktab],[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
       '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
-      '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo]') : null;
+      '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo],' +
+      '[data-edit],[data-batch],[data-confirmdel]') : null;
     if (!el) return;
 
     // one light pulse for every control in the app — button taps, tab switches
@@ -3692,9 +4474,28 @@
     if (el.dataset.undo) {
       var back = Undo.fire();
       hideToast();
-      if (back) { render(); toast(back.label + ' שוחזר'); }
+      if (back) {
+        render();
+        // a batch carries a count, and Hebrew declines the verb with it
+        toast(back.label + (back.count > 1 ? ' שוחזרו' : ' שוחזר'));
+      }
       return;
     }
+
+    /* ---------- confirmation · editing · batch actions ---------- */
+
+    if (el.dataset.confirmdel) { acceptConfirm(); return; }
+
+    if (el.dataset.edit) {
+      var ep = el.dataset.edit.split(':');
+      if (!openEdit(ep[0], ep[1])) toast('הפריט לא נמצא');
+      return;
+    }
+
+    if (el.dataset.batch) { Select.run(el.dataset.batch); return; }
+
+    if (el.dataset.action === 'select-mode') { Select.toggleMode(); return; }
+    if (el.dataset.action === 'close-confirm') { closeConfirm(); return; }
 
     if (el.dataset.action === 'master-add') { openTypeSheet(); return; }
     if (el.dataset.action === 'close-sheet') { closeSheets(); return; }
@@ -3767,15 +4568,7 @@
       return;
     }
 
-    if (el.dataset.clientnotedel) {
-      var dnp = el.dataset.clientnotedel.split(':');
-      var goneNote = softDeleteClientNote(dnp[0], dnp[1]);
-      if (goneNote) {
-        render();
-        toast(goneNote.label + ' נמחק', UNDO_LABEL);
-      }
-      return;
-    }
+    if (el.dataset.clientnotedel) { askDeleteClientNote(el.dataset.clientnotedel); return; }
 
     if (el.dataset.nav) { setView(el.dataset.nav); return; }
 
@@ -3862,15 +4655,8 @@
       return;
     }
 
-    if (el.dataset.del) {
-      var parts = el.dataset.del.split(':');
-      var gone = softDelete(parts[0], parts[1]);
-      if (gone) {
-        render();                              // the row is leaving — membership moved
-        toast(gone.label + ' נמחק', UNDO_LABEL);
-      }
-      return;
-    }
+    // every destructive tap asks first (Wave 2) and stays undoable afterwards
+    if (el.dataset.del) { askDelete(el.dataset.del); return; }
   }
 
   /** the only <select> that mutates the store outside a form submit */
@@ -3900,6 +4686,9 @@
     });
     setFilter(Store.data.prefs.filter);
     setView('today');
+    Fab.init();                       // the CTA ducks while the page scrolls
+    Select.paint();                   // the batch bar starts closed, the pill off
+    Select.bindLongPress();           // long press on a card opens selection mode
     registerServiceWorker();
     Notify.init();
     Sync.init();
@@ -3938,7 +4727,33 @@
       shownTasks: shownTasks,
       shownLists: shownLists,
       shownNotes: shownNotes,
-      shownClients: shownClients
+      shownClients: shownClients,
+
+      // Waves 1–3 (post-Sprint-7 hardening): the scroll-aware CTA, the
+      // membership source of truth for the timeline, the confirmation door,
+      // universal editing and the multi-select batch layer. Every one of them
+      // is executable head-lessly — no DOM, no scroll, no finger.
+      FAB_TOP: FAB_TOP,
+      FAB_DELTA: FAB_DELTA,
+      CONFIRM_QUESTION: CONFIRM_QUESTION,
+      SELECTABLE: SELECTABLE,
+      UNDO_BATCH_MS: UNDO_BATCH_MS,
+      LONG_PRESS_MS: LONG_PRESS_MS,
+      Fab: Fab,
+      Confirm: Confirm,
+      Select: Select,
+      toast: toast,
+      softDeleteMany: softDeleteMany,
+      timelineRows: timelineRows,
+      timelineKeys: timelineKeys,
+      recSummary: recSummary,
+      recTitle: recTitle,
+      itemLines: itemLines,
+      mergeChecklist: mergeChecklist,
+      applyEdit: applyEdit,
+      TO_FORM: TO_FORM,
+      EDIT_TYPE: EDIT_TYPE,
+      COLLECTION_OF: COLLECTION_OF
     },
 
     // cloud sync engine — schema, serialisers, outbox and merge, all pure

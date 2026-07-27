@@ -1,6 +1,7 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Sprint 7 shipped — premium UX: haptics, targeted DOM updates, undo safety net, v0.7
+> **Status:** Waves 1–3 shipped (§7.4g) — breakage fixes, delete confirmation, universal edit,
+> multi-select & batch actions, v0.7.3. Sprint 7 before them — haptics, targeted DOM updates, undo.
 > **Repository:** `C:\calendar-app` (fresh, independent git repo — no relationship to `benja-gallery`)
 > **Created:** 2026-07-27 · **Spec injected:** 2026-07-27 (Sprint 1)
 
@@ -816,6 +817,67 @@ stubbed device with a motor, without one, and with one that throws; the full
 delete → restore → commit cycle including the outbox tombstone replacement; membership
 comparison including reorder and removal; the section registry cross-checked against the
 document; and a CSS parse that fails the build on any control that drops below 44px.
+
+### 7.4g Field-report waves — breakage fixes, confirm + universal edit, multi-select (shipped)
+
+Three waves ordered by how badly they hurt on a real phone, requested from the field after
+Sprint 7 shipped: **גל 1** repairs what was broken, **גל 2** closes the gaps in the editing
+model, **גל 3** adds the batch layer on top of both.
+
+**גל 1 — תיקוני שבר**
+
+| # | Symptom on the phone | Cause | Fix |
+|---|---|---|---|
+| — | a tap near the bottom of a list did nothing for a few seconds after any action | the toast pill is `position:fixed; z-index:80` over the last rows and swallowed the tap | `.toast { pointer-events:none }`, with `pointer-events:auto` restored on `.toast-undo` — the pill is a message, only אחזר is a control |
+| — | "＋ הוספה חדשה" sat on top of the content a thumb was scrolling | the CTA is fixed above the bottom bar with nothing to move it | `Fab.decide(prev, now, hidden)` — a pure decision (down ⇒ duck, up ⇒ return, ≤24px ⇒ always shown, ±6px jitter ⇒ no change) driven by a **passive** scroll listener coalesced into one `requestAnimationFrame`. Ducking is `transform` + `opacity` only, and the ducked CTA drops its tap target, its `tabIndex` and its accessibility name |
+| B0 | the list under the finger flickered and rebuilt on every tap | `#timeline` paints hour buckets (an untimed event is clamped into 08:00) while its membership was read from `todaysEvents()`, where an untimed event sorts **last**. The two orders could never agree, so `sameKeys()` answered "changed" forever and the container was rewritten mid-press — the exact regression Sprint 7's patch engine exists to prevent | `timelineRows()` is now the single source of paint order; `timelineKeys()` flattens it and the section registry reads that. Renderer and membership can no longer drift |
+| B1 | a deletion sometimes could not be undone, and the window never closed | any plain `toast()` replaced the pill and took אחזר off screen while `Undo.pending` stayed armed | `toast()` commits the pending deletion whenever the new toast carries no undo action — an undo the user cannot see has already expired |
+| B2 | undo restored a client note into nothing | the restore closure captured the client **object**; `Sync.merge()` replaces a record whose server copy is newer, so a cloud round-trip inside the five-second window left the closure holding a detached copy | the closure re-resolves through `Store.find('clients', id)` and refuses to double-insert |
+
+**גל 2 — אישור מחיקה · עריכה אוניברסלית · עמעום**
+
+- **Confirmation.** Every destructive tap goes through one door: `askDelete()` /
+  `askDeleteClientNote()` / the batch bar all call `confirmDelete(what, run)`, which opens a
+  real dialog asking **`האם אתה בטוח שברצונך למחוק?`** above the name of the record. Sprint 7's
+  net stays behind it — a confirmed deletion is still a `softDelete()` with אחזר armed. The
+  question closes on its own (`close-confirm`), so a note deleted from inside a client file
+  leaves that file open.
+- **Universal edit.** Every card — event, task, list, note, client — carries a `✎` that
+  reopens the **same typed form it was created with**, pre-filled by `TO_FORM` and saved by
+  `applyEdit()`. Two rules keep an edit from becoming a back door: it is written *through* the
+  model's own writers (`setTaskStatus` keeps `done` in lockstep, `setClientStatus` /
+  `setClientNextAction` keep writing the client timeline), and `mergeChecklist()` matches an
+  edited line back to the row it came from by title, so fixing a typo in a ten-item list does
+  not un-tick the nine already done. The record is `touch()`ed, so the outbox pushes the edit.
+- **Dimming.** A completed task, a cancelled one, a filled checklist and a closed client file
+  all recede to `--dim-done: .55` (still ≥4.5:1 against `--card`), return to full strength on
+  hover/focus, and are never dimmed while picked.
+
+**גל 3 — בחירה מרובה · סרגל פעולות · Undo מורחב**
+
+- Selection mode is entered from the header pill (`בחירה מרובה`) or by a **500ms long press**
+  on any card; a press that travels more than 12px is a scroll and cancels, and the click that
+  follows the press is swallowed so it cannot un-pick the card underneath the finger.
+- While it is live, `Select.tap()` claims every tap that lands on a `[data-rec]` card before
+  any control branch can act on it, and repaints that one card through `Patch.record()`.
+- The batch bar offers **סמן כהושלם · בחר הכל · מחיקה · סיום בחירה**. `בחר הכל` reads the
+  section registry, so it can never disagree with what is on screen. `Select.complete()` closes
+  open tasks and fills unfinished checklists and reports exactly what it changed.
+- **Undo מורחב:** `softDeleteMany()` removes a whole mixed selection (records are spliced back
+  to front so every recorded slot stays valid) and arms **one** undo entry that restores every
+  record into its own slot, front to back, `touch()`ing each so the queued tombstones are
+  replaced by upserts. The window widens to `UNDO_BATCH_MS = 9000` — a batch is a bigger loss
+  than a row — while a single deletion stays at `UNDO_MS = 5000`.
+
+**Shipped shell** — `sw.js` is bumped to `v10`.
+
+**Verification** — `healthcheck.js` §23 executes all three waves: the CTA decision table, the
+timeline membership (with an untimed event, a pre-08:00 event and a 23:30 event on the board),
+B1 driven through the real `toast()`, B2 driven through a real `Sync.merge()` that replaces the
+record mid-window, the confirmation's accept/dismiss/no-double-run contract, `TO_FORM`
+cross-checked field-by-field against the form builders, an edit round-trip that proves the
+record count never moves and the checklist keeps its ticks, and a mixed batch
+delete → restore cycle including the outbox tombstone replacement.
 
 ### 7.4 General layout
 

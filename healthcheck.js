@@ -2689,15 +2689,47 @@ check('the undo toast is in the document, labelled and wired to five seconds', (
   return true;
 });
 
+/**
+ * The body of a top-level function declaration, brace-matched rather than
+ * regex-terminated: a delete path now nests a confirmation closure inside
+ * itself, and any `[\s\S]*?` pattern would stop at the first inner return.
+ */
+function bodyOf(src, signature) {
+  const start = src.indexOf(signature);
+  if (start === -1) return '';
+  let i = src.indexOf('{', start);
+  if (i === -1) return '';
+  let depth = 0;
+  for (let j = i; j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}' && --depth === 0) return src.slice(i, j + 1);
+  }
+  return '';
+}
+
 check('no deletion path bypasses the undo window', () => {
-  const del = (js.match(/if \(el\.dataset\.del\) \{[\s\S]*?\n      return;/) || [''])[0];
+  // Wave 2 — the delegate hands off to a named door instead of deleting inline
+  const del = (js.match(/if \(el\.dataset\.del\) \{[^}]*\}/) || [''])[0];
   if (!del) return 'no delete branch in the delegate';
-  if (del.indexOf('softDelete(') === -1) return 'the delete branch removes without arming an undo';
+  if (del.indexOf('askDelete(') === -1) return 'the delete branch does not go through the confirmation door';
   if (del.indexOf('Store.remove(') !== -1) return 'the delete branch still removes permanently';
 
-  const noteDel = (js.match(/if \(el\.dataset\.clientnotedel\) \{[\s\S]*?\n      return;/) || [''])[0];
+  const door = bodyOf(js, 'function askDelete(');
+  if (!door) return 'no askDelete()';
+  if (door.indexOf('confirmDelete(') === -1) return 'a row is deleted without asking first';
+  if (door.indexOf('softDelete(') === -1) return 'the confirmed deletion removes without arming an undo';
+  if (door.indexOf('UNDO_LABEL') === -1) return 'the confirmed deletion never offers אחזר';
+  if (door.indexOf('Store.remove(') !== -1) return 'the confirmed deletion removes permanently';
+
+  const noteDel = (js.match(/if \(el\.dataset\.clientnotedel\) \{[^}]*\}/) || [''])[0];
   if (!noteDel) return 'no client-note delete branch';
-  if (noteDel.indexOf('softDeleteClientNote(') === -1) return 'a client note is still deleted permanently';
+  if (noteDel.indexOf('askDeleteClientNote(') === -1) return 'a client note skips the confirmation door';
+
+  const noteDoor = bodyOf(js, 'function askDeleteClientNote(');
+  if (!noteDoor) return 'no askDeleteClientNote()';
+  ['confirmDelete(', 'softDeleteClientNote(', 'UNDO_LABEL'].forEach(n => {
+    if (noteDoor.indexOf(n) === -1) throw new Error('the client-note path is missing ' + n);
+  });
   return true;
 });
 
@@ -2722,7 +2754,9 @@ const CONTROLS = [
   'push-btn', 'sync-btn', 'gcal-btn', 'gcal-unlink', 'seg', 'tab', 'rail-item',
   'att', 'type-btn', 'btn', 'fab', 'sheet-x', 'check-tap', 'cl-item', 'mini',
   'qa', 'qa-mini', 'cal-arrow', 'cal-today', 'cal-cell', 'wk-cell', 'dv-slot',
-  'cl-open', 'badge-btn', 'toast-undo'
+  'cl-open', 'badge-btn', 'toast-undo',
+  // Waves 2–3: universal editing, the multi-select gate and the batch bar
+  'row-edit', 'select-btn', 'batch-btn'
 ];
 
 /** chips that stay visually small and clear the floor with a hit expander */
@@ -2877,6 +2911,571 @@ check('PROJECT_PLAN documents the Sprint 7 premium UX layer', () => {
   const required = [
     'Sprint 7', 'navigator.vibrate', 'data-rec', 'Patch.record', 'Patch.settle',
     'softDelete', 'אחזר', '44x44', ':focus-visible', 'v9'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ==========================================================================
+   23. Waves 1–3 — breakage fixes, confirm + universal edit, multi-select
+
+   Wave 1  pointer-events on the toast · the scroll-aware CTA · the timeline
+           membership drift (B0) · a stranded undo window (B1) · a restore that
+           held a detached record (B2)
+   Wave 2  the mandated delete confirmation · editing every card in the form it
+           was created with · finished work recedes
+   Wave 3  multi-select, the batch action bar and one undo over a whole batch
+   ========================================================================== */
+
+/* ---- 23a. Wave 1: the breakage fixes ---- */
+
+check('the toast can never swallow a tap meant for the card underneath', () => {
+  const rules = cssRules(css);
+  const pill = rules.filter(r => r.sel === '.toast')[0];
+  if (!pill) return 'no .toast rule';
+  if (!/pointer-events:\s*none/.test(pill.body)) {
+    return 'the pill still intercepts every tap in the strip it floats over';
+  }
+  const undo = rules.filter(r => r.sel === '.toast-undo')[0];
+  if (!undo || !/pointer-events:\s*auto/.test(undo.body)) {
+    return 'אחזר inherited pointer-events:none — the undo button is unreachable';
+  }
+  return true;
+});
+
+check('the floating CTA ducks on the way down and returns on the way up', () => {
+  const F = loadApp().ui.Fab;
+  if (!F || typeof F.decide !== 'function') return 'no APP.ui.Fab.decide()';
+
+  const cases = [
+    [0, 0, false, false, 'at the top with no travel'],
+    [0, 10, false, false, 'inside the top zone'],
+    [300, 400, false, true, 'travelling down'],
+    [400, 300, true, false, 'travelling up'],
+    [400, 402, true, true, 'a jitter while ducked'],
+    [400, 402, false, false, 'a jitter while shown'],
+    [900, 5, true, false, 'scrolled back to the top']
+  ];
+  for (const [prev, now, hidden, want, why] of cases) {
+    const got = F.decide(prev, now, hidden);
+    if (got !== want) return why + ': decide(' + prev + ',' + now + ',' + hidden + ') = ' + got;
+  }
+  return true;
+});
+
+check('a ducked CTA keeps neither a tap target nor a keyboard stop', () => {
+  const set = bodyOf(js, 'set: function (hide)');
+  if (!set) return 'no Fab.set()';
+  if (set.indexOf("classList.toggle('is-hidden'") === -1) return 'nothing paints the ducked state';
+  if (set.indexOf('aria-hidden') === -1) return 'a screen reader still announces the hidden CTA';
+  if (!/tabIndex\s*=\s*Fab\.hidden \? -1 : 0/.test(set)) return 'the ducked CTA is still a keyboard stop';
+
+  const rule = (css.match(/\.fab\.is-hidden\{[^}]*\}/) || [''])[0];
+  if (!rule) return 'no .fab.is-hidden rule';
+  if (!/pointer-events:\s*none/.test(rule)) return 'the invisible CTA still eats taps';
+  if (!/opacity:\s*0/.test(rule)) return 'the ducked CTA is still painted';
+  if (!/transform:/.test(rule)) return 'the CTA is hidden without moving out of the way';
+  // the desktop CTA carries no centring transform and must compose its own duck
+  const desktop = (css.match(/@media\s*\(min-width:900px\)\{[\s\S]*?\n\}/) || [''])[0];
+  if (desktop.indexOf('.fab.is-hidden') === -1) return 'the desktop CTA ducks sideways instead of down';
+  return true;
+});
+
+check('the scroll listener is passive and coalesced into one frame', () => {
+  if (!/addEventListener\('scroll', Fab\.onScroll, \{ passive: true \}\)/.test(js)) {
+    return 'the scroll listener is missing or not passive — it would block the scroll';
+  }
+  const onScroll = bodyOf(js, 'onScroll: function ()');
+  if (!onScroll) return 'no Fab.onScroll()';
+  if (onScroll.indexOf('requestAnimationFrame') === -1) return 'every scroll event repaints synchronously';
+  if (onScroll.indexOf('if (Fab.frame) return;') === -1) return 'the frame is not coalesced';
+  return true;
+});
+
+check('the timeline reports the rows it PAINTS, not the rows it sorted (B0)', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+  const t = APP.isoDate(new Date());
+
+  Store.data.events.length = 0;
+  const untimed = Store.add('events', {
+    type: 'event', title: 'ללא שעה', category: 'business',
+    date: t, start: '', end: '', location: '', notes: '', clientId: ''
+  });
+  const nine = Store.add('events', {
+    type: 'event', title: 'תשע בבוקר', category: 'personal',
+    date: t, start: '09:00', end: '10:00', location: '', notes: '', clientId: ''
+  });
+  const late = Store.add('events', {
+    type: 'event', title: 'אחרי החלון', category: 'personal',
+    date: t, start: '23:30', end: '', location: '', notes: '', clientId: ''
+  });
+
+  const keys = U.timelineKeys();
+  // an untimed event paints in the first bucket but sorts LAST (no time = 24:01):
+  // the two orders disagreed, so the container was rebuilt under the finger
+  if (keys[0] !== 'events:' + untimed.id) return 'the untimed event is not reported first';
+  if (keys[1] !== 'events:' + nine.id) return '09:00 is not reported second';
+  if (keys[2] !== 'events:' + late.id) return 'the out-of-window event was dropped from the membership';
+
+  const flat = [];
+  U.timelineRows().forEach(r => r.list.forEach(e => flat.push('events:' + e.id)));
+  if (flat.join(',') !== keys.join(',')) return 'the painted rows and the reported keys disagree';
+
+  const section = U.SECTIONS.filter(s => s.sel === '#timeline')[0];
+  if (!section) return 'no registered section for #timeline';
+  if (section.keys().join(',') !== keys.join(',')) return 'the section registry uses a different order';
+  if (!U.sameKeys(section.keys(), U.timelineKeys())) return 'the membership is not stable across two reads';
+  return true;
+});
+
+check('the timeline clamps every hour into its window and hides nothing', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+  const t = APP.isoDate(new Date());
+  Store.data.events.length = 0;
+  Store.add('events', {
+    type: 'event', title: 'לפני הזריחה', category: 'personal',
+    date: t, start: '05:00', end: '', location: '', notes: '', clientId: ''
+  });
+
+  const rows = U.timelineRows();
+  if (rows.length !== 15) return 'the timeline paints ' + rows.length + ' hour rows, not 08:00–22:00';
+  if (rows[0].hour !== 8 || rows[14].hour !== 22) return 'the window is not 08:00 → 22:00';
+  if (rows[0].list.length !== 1) return 'an event before 08:00 was dropped instead of clamped';
+  if (U.timelineKeys().length !== 1) return 'the clamped event is missing from the membership';
+  return true;
+});
+
+check('a plain toast closes the undo window instead of stranding it (B1)', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+  if (typeof U.toast !== 'function') return 'no APP.ui.toast export';
+
+  const victim = Store.data.tasks[0];
+  U.softDelete('tasks', victim.id);
+  if (!U.Undo.has()) return 'the deletion armed no undo';
+
+  // any other tap shows a plain acknowledgement, which replaces the pill and
+  // takes אחזר off screen with it — an undo the user cannot see has expired
+  U.toast('המשימה הושלמה ✓');
+  if (U.Undo.has()) return 'the window stayed armed with no button left to reach it';
+  if (Store.find('tasks', victim.id)) return 'the deletion was rolled back instead of committed';
+
+  // ...and a toast that DOES carry אחזר must leave the window open
+  const second = Store.data.tasks[0];
+  U.softDelete('tasks', second.id);
+  U.toast('המשימה נמחקה', U.UNDO_LABEL);
+  if (!U.Undo.has()) return 'an undo toast closed its own window';
+  return true;
+});
+
+check('an undo restore re-resolves its record instead of trusting a captured one (B2)', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store, S = APP.sync;
+  Store.load();
+
+  const before = Store.data.clients[0];
+  if (!before) return 'no seeded client';
+  APP.clients.addClientNote(before, 'פתק שנמחק תוך כדי סנכרון');
+  Store.save();
+  const noteId = before.clientNotes[0].id;
+
+  if (!U.softDeleteClientNote(before.id, noteId)) return 'softDeleteClientNote refused a live note';
+
+  // a cloud round-trip lands inside the five-second window: merge() REPLACES
+  // the record object, and the restore used to write into the detached copy
+  const row = S.toRow('clients', before);
+  row.updated_at = S.toISOStamp(Date.now() + 60000);
+  S.Sync.merge({ clients: [row] });
+
+  const live = Store.find('clients', before.id);
+  if (!live) return 'the merge dropped the client';
+  if (live === before) return 'the merge did not replace the record — this test proves nothing';
+
+  U.Undo.fire();
+  const back = Store.find('clients', before.id).clientNotes.some(n => n.id === noteId);
+  if (!back) return 'the restore wrote into a detached copy and the note was lost';
+  return true;
+});
+
+/* ---- 23b. Wave 2: confirmation, universal editing, dimming ---- */
+
+const CONFIRM_Q = 'האם אתה בטוח שברצונך למחוק?';
+
+check('every destructive tap asks the mandated question first', () => {
+  if (html.indexOf(CONFIRM_Q) === -1) return 'the confirmation sheet does not carry the mandated question';
+  if (js.indexOf(CONFIRM_Q) === -1) return 'the question is not the one the code paints';
+  ['id="confirmSheet"', 'id="confirmWhat"', 'data-confirmdel', '>כן, מחק<', '>ביטול<'].forEach(n => {
+    if (html.indexOf(n) === -1) throw new Error('missing ' + n);
+  });
+  if (html.indexOf('role="dialog"') === -1) return 'the confirmation is not a dialog';
+  if (js.indexOf('[data-confirmdel]') === -1) return 'כן, מחק is not wired into the delegate';
+  if (js.indexOf('data-action="close-confirm"') === -1 && html.indexOf('close-confirm') === -1) {
+    return 'the confirmation cannot be dismissed on its own';
+  }
+  return true;
+});
+
+check('the confirmation runs the deletion only once, and only when accepted', () => {
+  const C = loadApp().ui.Confirm;
+  if (!C) return 'no APP.ui.Confirm export';
+
+  let ran = 0;
+  C.ask('המשימה · לבדיקה', () => { ran++; });
+  if (!C.isOpen()) return 'ask() did not open a question';
+  C.dismiss();
+  if (ran !== 0) return 'ביטול still deleted the record';
+  if (C.isOpen()) return 'the question stayed open after ביטול';
+
+  C.ask('המשימה · לבדיקה', () => { ran++; });
+  if (C.accept() !== true) return 'accept() refused an open question';
+  if (ran !== 1) return 'כן, מחק ran the deletion ' + ran + ' times';
+  if (C.accept() !== false || ran !== 1) return 'a second accept re-ran the deletion';
+  if (C.ask('x', null)) return 'a question was armed with nothing to run';
+  return true;
+});
+
+check('the confirmation closes without taking the client file underneath it', () => {
+  const close = bodyOf(js, 'function closeConfirmUI(');
+  if (!close) return 'no closeConfirmUI()';
+  if (close.indexOf('Drawer.close(') !== -1) return 'dismissing the question closes the client file too';
+  if (close.indexOf('anySheetOpen()') === -1) return 'the backdrop is dropped while a sheet is still open';
+  const any = bodyOf(js, 'function anySheetOpen(');
+  if (!any || any.indexOf('Drawer.isOpen()') === -1) return 'anySheetOpen() ignores the client drawer';
+  return true;
+});
+
+check('every card type carries an edit affordance wired to the delegate', () => {
+  ['events', 'tasks', 'lists', 'notes', 'clients'].forEach(c => {
+    if (js.indexOf("editBtn('" + c + "'") === -1) throw new Error(c + ' cards cannot be edited');
+  });
+  if (js.indexOf('data-edit="') === -1) return 'the edit button carries no record key';
+  if (js.indexOf('[data-edit]') === -1) return 'the edit button is not in the click delegate';
+  if (js.indexOf('function openEdit(') === -1) return 'no openEdit()';
+  if (!/openForm\(type, null, rec\)/.test(js)) return 'editing does not reuse the typed form';
+  return true;
+});
+
+check('the edit form exposes every field the mapper writes back', () => {
+  const U = loadApp().ui;
+  // the form-building region: the FIELDS builders plus the shared control
+  // helpers they delegate to (clientPicker() owns name="clientId")
+  const from = js.indexOf('var FIELDS = {');
+  const to = js.indexOf('function parseChecklist(');
+  const fields = from !== -1 && to > from ? js.slice(from, to) : '';
+  if (!fields) return 'no FIELDS block';
+
+  const dummy = {};
+  Object.keys(U.TO_FORM).forEach(collection => {
+    const values = U.TO_FORM[collection](dummy);
+    const type = U.EDIT_TYPE[collection];
+    if (!type) throw new Error(collection + ' has no editable type');
+    if (U.COLLECTION_OF[type] !== collection) throw new Error(type + ' maps back to the wrong collection');
+    Object.keys(values).forEach(name => {
+      // a field is either written out literally, or declared through the
+      // f(name, …) / picker(name, …) helpers that name the control for it
+      const declared = fields.indexOf('name="' + name + '"') !== -1 ||
+        fields.indexOf("f('" + name + "'") !== -1;
+      if (!declared) throw new Error(collection + ': the form has no field named ' + name);
+    });
+  });
+  if (!/querySelector\('\[name="' \+ name \+ '"\]'\)/.test(js)) return 'fillForm() does not address fields by name';
+  return true;
+});
+
+check('an edit saves back into the same record instead of creating a second one', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+
+  const before = Store.data.tasks.map(t => t.id);
+  const victim = Store.find('tasks', before[0]);
+  const stamp = victim.updatedAt;
+
+  const label = U.applyEdit('tasks', victim.id, {
+    title: 'כותרת מעודכנת', due: APP.isoDate(new Date()), time: '11:30',
+    status: 'done', priority: 'low', nextAction: '', clientId: '',
+    subtasks: '', notes: 'הערה חדשה'
+  }, 'business');
+
+  if (!label) return 'the edit reported no result';
+  if (Store.data.tasks.map(t => t.id).join(',') !== before.join(',')) {
+    return 'the edit added or moved a record instead of updating one';
+  }
+  const after = Store.find('tasks', victim.id);
+  if (after.title !== 'כותרת מעודכנת') return 'the title was not written back';
+  if (after.priority !== 'low' || after.category !== 'business') return 'a field was dropped on save';
+  // the status writer is what keeps the legacy done flag in lockstep
+  if (after.status !== 'done' || after.done !== true) return 'the edit bypassed setTaskStatus()';
+  if (!(after.updatedAt > stamp)) return 'the edit was not stamped, so the outbox would never push it';
+  if (U.applyEdit('tasks', victim.id, { title: '' }, 'personal') !== '') {
+    return 'an empty title was accepted';
+  }
+  if (U.applyEdit('tasks', 'no_such_id', { title: 'x' }, 'personal') !== '') {
+    return 'an edit of a deleted record was accepted';
+  }
+  return true;
+});
+
+check('editing a checklist keeps the progress it already had', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+
+  const rows = U.mergeChecklist(
+    [{ id: 'a', title: 'ראשון', done: true }, { id: 'b', title: 'שני', done: false }],
+    'ראשון\nשלישי', 'li');
+  if (rows.length !== 2) return 'the edited list holds ' + rows.length + ' rows';
+  if (rows[0].id !== 'a' || rows[0].done !== true) return 'a surviving row lost its identity or its tick';
+  if (rows[1].title !== 'שלישי' || rows[1].done !== false) return 'a new row did not arrive clean';
+
+  // and through the real save path: a seeded list keeps its ticked items
+  const list = Store.data.lists.filter(l => l.items.some(i => i.done))[0];
+  if (!list) return 'no seeded list with a ticked item';
+  const donePre = list.items.filter(i => i.done).length;
+  U.applyEdit('lists', list.id, {
+    title: list.title, date: '', clientId: '',
+    items: U.itemLines(list.items) + '\nפריט חדש'
+  }, list.category);
+  const after = Store.find('lists', list.id);
+  if (after.items.length !== list.items.length) return 'the round-trip changed the item count';
+  if (after.items.filter(i => i.done).length !== donePre) return 'the round-trip un-ticked completed items';
+  if (after.items[after.items.length - 1].title !== 'פריט חדש') return 'the appended item was lost';
+  return true;
+});
+
+check('a client edit still writes the pipeline timeline', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+
+  const c = Store.data.clients.filter(x => !APP.clients.clientClosed(x))[0];
+  if (!c) return 'no open client file';
+  const logs = c.history.length;
+
+  U.applyEdit('clients', c.id, {
+    name: c.name, phone: c.phone, email: c.email, status: 'won',
+    interest: c.interest, budget: c.budget,
+    nextAction: 'לשלוח חשבונית', nextActionAt: APP.isoDate(new Date()), notes: ''
+  }, 'business');
+
+  const after = Store.find('clients', c.id);
+  if (after.status !== 'won') return 'the status move was not saved';
+  if (!APP.clients.clientClosed(after)) return 'a won deal is not treated as closed';
+  if (after.history.length <= logs) return 'the edit changed the pipeline without logging it';
+  if (!after.history.some(h => h.kind === 'status')) return 'the status move is missing from the timeline';
+  if (!after.history.some(h => h.kind === 'action')) return 'the next action is missing from the timeline';
+  if (after.nextAction !== 'לשלוח חשבונית') return 'the next action was not written back';
+  return true;
+});
+
+check('finished work recedes without dropping below the contrast floor', () => {
+  const token = (css.match(/--dim-done:\s*([0-9.]+)/) || [])[1];
+  if (!token) return 'no --dim-done token';
+  const dim = parseFloat(token);
+  if (!(dim >= 0.45 && dim <= 0.7)) return '--dim-done is ' + dim + ' — either invisible or pointless';
+
+  const dimmed = cssRules(css).filter(r => /opacity:\s*var\(--dim-done\)/.test(r.body));
+  if (!dimmed.length) return 'nothing is dimmed by the token';
+  const sel = dimmed.map(r => r.sel).join(' ');
+  ['.row.is-done', '.row.is-cancelled', '.row.list.is-complete', '.cl-card.is-closed'].forEach(s => {
+    if (sel.indexOf(s) === -1) throw new Error(s + ' is not dimmed when it is finished');
+  });
+  // a picked card must never be dimmed — the finger has to see what it chose
+  if (!/\.row\.is-picked[\s\S]{0,80}opacity:\s*1/.test(css)) return 'a picked card can still be dimmed';
+  if (js.indexOf("' is-closed'") === -1) return 'a closed client file never gets the dimmed class';
+  return true;
+});
+
+/* ---- 23c. Wave 3: multi-select, batch actions, the wider undo ---- */
+
+check('selection mode is reachable from the header and by a long press', () => {
+  ['id="selectBtn"', 'data-action="select-mode"', 'id="batchBar"', 'id="batchCount"'].forEach(n => {
+    if (html.indexOf(n) === -1) throw new Error('missing ' + n);
+  });
+  ['done', 'all', 'delete', 'exit'].forEach(a => {
+    if (html.indexOf('data-batch="' + a + '"') === -1) throw new Error('no batch action: ' + a);
+  });
+  if (html.indexOf('בחירה מרובה') === -1) return 'the gate is not labelled in Hebrew';
+  if (js.indexOf('[data-batch]') === -1) return 'the batch bar is not in the click delegate';
+
+  const press = bodyOf(js, 'bindLongPress: function ()');
+  if (!press) return 'no long-press binding';
+  if (!/var LONG_PRESS_MS = 500/.test(js)) return 'the long press is not 500ms';
+  if (press.indexOf('LONG_PRESS_SLOP') === -1) return 'a scroll would be mistaken for a long press';
+  if (press.indexOf('{ passive: true }') === -1) return 'the touch listeners are not passive';
+  if (press.indexOf('Select.swallow = true') === -1) {
+    return 'the click after the press would immediately un-pick the card';
+  }
+  return true;
+});
+
+check('picking cards is pure state, and every card type can be picked', () => {
+  const U = loadApp().ui;
+  const S = U.Select;
+  if (!S) return 'no APP.ui.Select export';
+  ['events', 'tasks', 'lists', 'notes', 'clients'].forEach(c => {
+    if (U.SELECTABLE.indexOf(c) === -1) throw new Error(c + ' cannot be selected');
+  });
+  if (S.on !== false || S.count() !== 0) return 'selection mode does not start closed and empty';
+
+  S.enter('tasks:one');
+  if (!S.on || !S.has('tasks:one')) return 'entering selection mode did not pick the card it was given';
+  if (S.toggle('tasks:two') !== true || S.count() !== 2) return 'a second card could not be picked';
+  if (S.toggle('tasks:two') !== false || S.count() !== 1) return 'a picked card could not be un-picked';
+  S.exit();
+  if (S.on || S.count()) return 'leaving selection mode left state behind';
+  return true;
+});
+
+check('"בחר הכל" picks exactly what the active view is showing', () => {
+  const APP = loadApp(), U = APP.ui, S = U.Select;
+  APP.Store.load();
+
+  S.enter();
+  const visible = S.visibleKeys();
+  if (!visible.length) return 'the seeded store shows nothing selectable on "היום שלי"';
+  if (visible.some(k => U.SELECTABLE.indexOf(k.split(':')[0]) === -1)) {
+    return 'a key outside the selectable collections was offered';
+  }
+  if (S.all() !== visible.length) return 'בחר הכל picked a different number of cards';
+  if (S.keys().sort().join(',') !== visible.slice().sort().join(',')) {
+    return 'בחר הכל picked cards that are not on screen';
+  }
+  S.exit();
+  return true;
+});
+
+check('a batch deletion removes every picked card and restores all of them at once', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+
+  const tasks = Store.data.tasks.map(t => t.id);
+  const notes = Store.data.notes.map(n => n.id);
+  if (tasks.length < 3 || !notes.length) return 'the seeded store is too small for a mixed batch';
+
+  const keys = ['tasks:' + tasks[0], 'tasks:' + tasks[2], 'notes:' + notes[0]];
+  const entry = U.softDeleteMany(keys);
+  if (!entry) return 'softDeleteMany refused a live selection';
+  if (entry.count !== 3) return 'the batch reported ' + entry.count + ' records, not 3';
+  if (!entry.label || entry.label.indexOf('3') === -1) return 'the toast label does not name the batch';
+  keys.forEach(k => {
+    const p = k.split(':');
+    if (Store.find(p[0], p[1])) throw new Error(k + ' never left the store');
+  });
+  if (!U.Undo.has()) return 'a batch deletion armed no undo';
+
+  U.Undo.fire();
+  if (Store.data.tasks.map(t => t.id).join(',') !== tasks.join(',')) {
+    return 'the restored tasks came back in the wrong slots';
+  }
+  if (Store.data.notes.map(n => n.id).join(',') !== notes.join(',')) {
+    return 'the restored note came back in the wrong slot';
+  }
+  if (U.Undo.has()) return 'the window stayed open after the batch was restored';
+  if (U.softDeleteMany(['tasks:no_such_id'])) return 'a batch of nothing armed an undo';
+  return true;
+});
+
+check('a restored batch replaces every queued tombstone', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store, S = APP.sync;
+  Store.load();
+  const c = Store.data.sync;
+
+  // drain: pretend the server applied everything, so the shadow is authoritative
+  const batch = c.queue.slice();
+  S.Sync.settle(batch, { applied: batch.map(o => o.opId), rejected: [], changes: {}, cursor: '' });
+
+  const keys = [Store.data.tasks[0], Store.data.tasks[1]].map(t => 'tasks:' + t.id);
+  U.softDeleteMany(keys);
+  keys.forEach(k => {
+    const id = k.split(':')[1];
+    if (!c.queue.some(op => op.id === id && op.action === 'delete')) {
+      throw new Error(k + ' never reached the outbox as a tombstone');
+    }
+  });
+
+  U.Undo.fire();
+  keys.forEach(k => {
+    const id = k.split(':')[1];
+    const ops = c.queue.filter(op => op.id === id);
+    if (ops.length !== 1) throw new Error(k + ' holds ' + ops.length + ' ops');
+    if (ops[0].action !== 'upsert') throw new Error(k + ' would still sync as a deletion');
+  });
+  return true;
+});
+
+check('the batch undo window is wider than a single deletion, and honoured', () => {
+  const U = loadApp().ui;
+  if (!(U.UNDO_BATCH_MS > U.UNDO_MS)) {
+    return 'a whole batch gets no more time than one row (' + U.UNDO_BATCH_MS + 'ms)';
+  }
+  if (!/var UNDO_MS = 5000/.test(js)) return 'the single-row window is no longer 5 seconds';
+  if (!/function toast\(msg, action, ms\)/.test(js)) return 'toast() cannot take a custom window';
+  if (!/action \? \(ms \|\| UNDO_MS\) : TOAST_MS/.test(js)) return 'the custom window is ignored';
+
+  const run = bodyOf(js, 'run: function (action)');
+  if (!run) return 'no Select.run()';
+  if (run.indexOf('confirmDelete(') === -1) return 'a batch is deleted without asking first';
+  if (run.indexOf('softDeleteMany(') === -1) return 'the batch deletion bypasses the undo layer';
+  if (run.indexOf('UNDO_BATCH_MS') === -1) return 'the batch toast uses the short window';
+  return true;
+});
+
+check('batch completion closes tasks, fills checklists and reports what it changed', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store, S = U.Select;
+  Store.load();
+
+  const open = Store.data.tasks.filter(t => !APP.tasks.isClosed(t.status))[0];
+  const list = Store.data.lists.filter(l => l.items.some(i => !i.done))[0];
+  if (!open || !list) return 'the seeded store has no open task and unfinished list to close';
+
+  const keys = ['tasks:' + open.id, 'lists:' + list.id];
+  const did = S.complete(keys);
+  if (did.tasks !== 1 || did.lists !== 1) {
+    return 'the batch reported {tasks:' + did.tasks + ', lists:' + did.lists + '}';
+  }
+  if (Store.find('tasks', open.id).status !== 'done') return 'the task was not closed';
+  if (Store.find('tasks', open.id).done !== true) return 'the legacy done flag drifted from the status';
+  if (Store.find('lists', list.id).items.some(i => !i.done)) return 'the checklist was not filled';
+
+  const again = S.complete(keys);
+  if (again.tasks || again.lists) return 'a finished batch was counted a second time';
+  if (S.complete(['clients:' + Store.data.clients[0].id]).tasks) return 'a client was closed as a task';
+  return true;
+});
+
+check('selection mode owns every tap that lands on a card', () => {
+  const tap = bodyOf(js, 'tap: function (target)');
+  if (!tap) return 'no Select.tap()';
+  if (tap.indexOf("closest('[data-rec]')") === -1) return 'the tap is not resolved to a record';
+  if (tap.indexOf('#batchBar,.sheet,.drawer,.topbar,.tabbar,.rail,.toast') === -1) {
+    return 'a tap on the chrome would be swallowed as a selection';
+  }
+  if (tap.indexOf('Patch.record(') === -1) return 'picking a card repaints the whole app';
+
+  const onClick = (js.match(/function onClick\(e\) \{[\s\S]*?\n  \}\n/) || [''])[0];
+  if (onClick.indexOf('if (Select.tap(e.target)) return;') === -1) {
+    return 'the delegate acts on a card before asking the selection layer';
+  }
+  const guard = onClick.indexOf('Select.tap(e.target)');
+  const first = onClick.indexOf('el.dataset.');
+  if (guard === -1 || (first !== -1 && guard > first)) {
+    return 'a control branch runs before the selection layer sees the tap';
+  }
+  return true;
+});
+
+/* ---- 23d. shipped shell and specification ---- */
+
+check('the service worker cache version was bumped for waves 1–3', () => {
+  const m = read('sw.js').match(/CACHE_VERSION\s*=\s*'v(\d+)'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[1], 10) < 10) return 'the cache is still v' + m[1] + ' — returning phones keep the old shell';
+  return true;
+});
+
+check('PROJECT_PLAN documents waves 1–3', () => {
+  const required = [
+    'גל 1', 'גל 2', 'גל 3', 'pointer-events', 'Fab.decide', 'timelineKeys',
+    CONFIRM_Q, 'mergeChecklist', 'softDeleteMany', '--dim-done', 'v10'
   ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
