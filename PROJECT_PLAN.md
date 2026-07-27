@@ -393,6 +393,37 @@ only the day-column order mirrors.
 4. Deletions are tombstones (`deleted_at`), never hard deletes, so sync can propagate them.
 5. Hydration from IndexedDB must render a usable calendar before any network call resolves.
 
+### 8.1 PWA Delivery Layer (shipped — Sprint 2)
+
+**Install shell**
+- `manifest.json`: `display: standalone`, `start_url: ./index.html`, `scope: ./`, RTL Hebrew,
+  background `#12161f`, theme `#e4c278`. Every path is **relative** so the app installs
+  correctly from a GitHub Pages sub-path as well as from a domain root.
+- Icons are generated deterministically by `tools/gen-icons.js` (dependency-free PNG encoder)
+  — 32 / 180 / 192 / 512 `any` plus a 512 `maskable` whose mark sits inside the 80% safe zone.
+- iOS install tags: `apple-mobile-web-app-capable`, `apple-mobile-web-app-status-bar-style`,
+  `apple-mobile-web-app-title`, `apple-touch-icon`.
+
+**Service worker (`sw.js`)**
+- Pre-caches the core shell (`index.html`, `styles.css`, `app.js`, `manifest.json`, icons) per
+  asset, so a single 404 can never abort the install and leave the app uncached.
+- Navigations: network-first with a cached-shell fallback → fresh code wins, offline still opens.
+- Same-origin static assets: cache-first, refreshed in the background. Cross-origin and non-GET
+  traffic is never touched.
+- `CACHE_VERSION` is bumped on every shell change; `activate` evicts every other cache.
+
+**Notifications**
+- Top-bar toggle (`🔔 הפעל התראות פוש`) drives `Notification.requestPermission()` and reflects
+  the three real browser states: default / granted / denied.
+- Reminders are raised via `registration.showNotification()` (survives a backgrounded tab), with
+  the plain `Notification` constructor as the desktop fallback.
+- A 30s scan fires once per record per day for events and timed tasks entering the lead window
+  (default 10 min). The fired-ledger lives in `prefs.fired` and is pruned daily.
+- **The reminder scan deliberately bypasses the global category filter** (§0.3): the filter is a
+  *view* concern, and hiding "עסקי" must never silently mute business meetings.
+- `sw.js` implements the `push` event against `self.registration.showNotification()`, so
+  server-sent push works the moment a VAPID key is wired into `Notify.subscribe()` (§12.5).
+
 ---
 
 ## 9. Milestones
@@ -435,6 +466,14 @@ the change is fixed or reverted — the repository is never left broken.
 ```
 C:\calendar-app\
 ├── PROJECT_PLAN.md      ← this file
+├── index.html           ← app shell (V1 ships flat, at the repo root)
+├── styles.css
+├── app.js
+├── manifest.json        ← PWA install descriptor
+├── sw.js                ← service worker: offline cache + push
+├── icons/               ← generated PNGs (do not hand-edit)
+├── tools/gen-icons.js   ← regenerates icons/ from the brand tokens
+├── healthcheck.js       ← repo-local verification suite (§10)
 ├── public/              ← static client assets (Pages)
 ├── src/
 │   ├── ui/              ← views and components
@@ -459,3 +498,6 @@ C:\calendar-app\
 2. Is multi-user attendee invitation in v1 scope, or single-user-first?
 3. Email reminder delivery — which provider binding?
 4. Should subscribed ICS calendars land in v1 rather than v1.1?
+5. Server-sent push: where do the VAPID keys live and which Worker route stores the
+   subscription? The client hook (`APP.Notify.subscribe(publicKey)`) and the `sw.js` `push`
+   handler are already in place — only the key and the send endpoint are missing.

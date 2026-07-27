@@ -154,10 +154,42 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   padding:18px 0 12px;
   background:linear-gradient(var(--surface) 76%, transparent);
 }
-.topbar-row{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.topbar-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.topbar-title{ min-width:0; flex:1 1 auto; }
 .topbar-title h1{ font-size:22px; font-weight:800; letter-spacing:-.2px; }
 .topbar-sub{ color:var(--faint); font-size:13px; margin-top:2px; }
-.topbar-avatar{ margin-inline-start:auto; }
+.topbar-avatar{ flex:0 0 auto; }
+
+/* ---------- push notification toggle ---------- */
+.push-btn{
+  flex:0 0 auto;
+  display:inline-flex; align-items:center; gap:7px;
+  margin-inline-start:auto;
+  padding:0 13px; height:38px; min-height:38px;
+  background:var(--card-2); border:1px solid var(--line-soft);
+  border-radius:999px;
+  color:var(--muted); font-size:12.5px; font-weight:700; white-space:nowrap;
+  transition:color .18s, background .18s, border-color .18s;
+}
+.push-btn:hover{ color:var(--ink); border-color:var(--gold-edge); }
+.push-ico{ font-size:14px; line-height:1; }
+
+/* permission granted and reminders armed */
+.push-btn.is-on{
+  color:var(--gold); background:var(--gold-soft); border-color:var(--gold-edge);
+}
+/* blocked at the OS/browser level — nothing the app can do */
+.push-btn.is-blocked{
+  color:var(--danger); background:var(--danger-soft); border-color:var(--danger-soft);
+  cursor:not-allowed;
+}
+/* browser has no Notification support — never rendered */
+.push-btn[hidden]{ display:none; }
+
+@media (max-width:420px){
+  .push-label{ display:none; }
+  .push-btn{ padding:0; width:38px; min-width:38px; justify-content:center; }
+}
 
 /* ---------- segmented control (global category filter) ---------- */
 .segmented{

@@ -1,6 +1,7 @@
 /* ==========================================================================
    Unified Personal & Business Productivity Center
    Sprint 1 — shell, "My Day" dashboard, Master Add, localStorage engine.
+   Sprint 2 — PWA install shell, service worker, notifications engine.
 
    Architecture notes
    - Every entity carries category: 'personal' | 'business'  (PROJECT_PLAN §0.2)
@@ -115,7 +116,7 @@
       return {
         version: 1,
         owner: OWNER,
-        prefs: { filter: 'all' },
+        prefs: { filter: 'all', notify: { on: false, lead: 10 }, fired: {} },
         events: [], tasks: [], lists: [], notes: [], clients: [],
         seeded: false
       };
@@ -149,6 +150,12 @@
         });
       });
       if (['all', 'personal', 'business'].indexOf(d.prefs.filter) === -1) d.prefs.filter = 'all';
+
+      // reminder prefs may be absent in a store written before the PWA upgrade
+      if (!d.prefs.notify || typeof d.prefs.notify !== 'object') d.prefs.notify = { on: false, lead: 10 };
+      d.prefs.notify.on = !!d.prefs.notify.on;
+      if (typeof d.prefs.notify.lead !== 'number' || d.prefs.notify.lead < 0) d.prefs.notify.lead = 10;
+      if (!d.prefs.fired || typeof d.prefs.fired !== 'object') d.prefs.fired = {};
 
       this.data = d;
       if (!d.seeded) { this.seed(); }
@@ -693,6 +700,259 @@
   }
   function warn(msg) { toast(msg); return false; }
 
+  /* ==========================================================================
+     PWA — service worker registration
+     ========================================================================== */
+
+  function registerServiceWorker() {
+    if (!('serviceWorker' in navigator)) return;
+    if (window.location.protocol === 'file:') return;   // a worker needs http(s)
+
+    navigator.serviceWorker.register('sw.js').then(function (reg) {
+      reg.addEventListener('updatefound', function () {
+        var sw = reg.installing;
+        if (!sw) return;
+        sw.addEventListener('statechange', function () {
+          // a previous version was already controlling the page => real update
+          if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+            toast('גרסה חדשה מוכנה — רענן כדי לעדכן');
+          }
+        });
+      });
+    })['catch'](function () { /* offline install is a bonus, never a blocker */ });
+  }
+
+  /* ==========================================================================
+     Notifications engine
+     - permission toggle lives in the top bar
+     - reminders fire through the service worker registration so they survive
+       a backgrounded tab; a plain Notification is the desktop fallback
+     - the category filter is a VIEW filter: reminders always scan the full
+       store, otherwise hiding "עסקי" would silently mute business meetings
+     ========================================================================== */
+
+  var NOTIFY_ICON = 'icons/icon-192.png';
+  var NOTIFY_BADGE = 'icons/favicon-32.png';
+  var SCAN_MS = 30000;
+
+  var Notify = {
+    timer: null,
+
+    supported: function () {
+      return typeof window.Notification !== 'undefined';
+    },
+
+    permission: function () {
+      return this.supported() ? window.Notification.permission : 'unsupported';
+    },
+
+    armed: function () {
+      return this.supported() &&
+        this.permission() === 'granted' &&
+        Store.data.prefs.notify.on === true;
+    },
+
+    /** paint the top-bar toggle to match the real browser permission state */
+    paint: function () {
+      var btn = $('#pushBtn'), label = $('#pushLabel'), ico = $('#pushIco');
+      if (!btn) return;
+
+      if (!this.supported()) { btn.hidden = true; return; }
+      btn.hidden = false;
+      btn.classList.remove('is-on', 'is-blocked');
+
+      var p = this.permission();
+      if (p === 'denied') {
+        btn.classList.add('is-blocked');
+        ico.textContent = '🔕';
+        label.textContent = 'התראות חסומות';
+        btn.setAttribute('aria-pressed', 'false');
+      } else if (p === 'granted' && Store.data.prefs.notify.on) {
+        btn.classList.add('is-on');
+        ico.textContent = '🔔';
+        label.textContent = 'התראות פעילות';
+        btn.setAttribute('aria-pressed', 'true');
+      } else {
+        ico.textContent = '🔔';
+        label.textContent = 'הפעל התראות פוש';
+        btn.setAttribute('aria-pressed', 'false');
+      }
+    },
+
+    onToggle: function () {
+      var self = this;
+
+      if (!this.supported()) { toast('הדפדפן הזה לא תומך בהתראות'); return; }
+
+      var p = this.permission();
+
+      if (p === 'denied') {
+        toast('ההתראות חסומות — יש לאשר אותן בהגדרות האתר בדפדפן');
+        return;
+      }
+
+      if (p === 'granted') {                                  // simple on/off
+        Store.data.prefs.notify.on = !Store.data.prefs.notify.on;
+        Store.save();
+        self.paint();
+        toast(Store.data.prefs.notify.on ? 'התראות פוש הופעלו' : 'התראות פוש כובו');
+        if (Store.data.prefs.notify.on) self.tick();
+        return;
+      }
+
+      var req;
+      try { req = window.Notification.requestPermission(); } catch (e) { req = null; }
+
+      // Safari < 16 hands back a callback API instead of a promise
+      if (!req || typeof req.then !== 'function') {
+        try {
+          window.Notification.requestPermission(function (res) { self.afterRequest(res); });
+        } catch (e2) { toast('לא ניתן לבקש הרשאת התראות בדפדפן הזה'); }
+        return;
+      }
+      req.then(function (res) { self.afterRequest(res); })['catch'](function () { self.paint(); });
+    },
+
+    afterRequest: function (result) {
+      if (result === 'granted') {
+        Store.data.prefs.notify.on = true;
+        Store.save();
+        this.paint();
+        this.show('benja-welcome', 'ההתראות הופעלו 🔔',
+          'נשלח לך תזכורת ' + Store.data.prefs.notify.lead + ' דקות לפני כל פגישה ומשימה מתוזמנת.');
+        toast('התראות פוש הופעלו');
+        this.tick();
+      } else {
+        Store.data.prefs.notify.on = false;
+        Store.save();
+        this.paint();
+        toast(result === 'denied' ? 'ההתראות נחסמו בדפדפן' : 'לא אושרה הרשאת התראות');
+      }
+    },
+
+    /** one notification, service-worker first so it shows with the tab hidden */
+    show: function (tag, title, body) {
+      var opts = {
+        body: body,
+        icon: NOTIFY_ICON,
+        badge: NOTIFY_BADGE,
+        dir: 'rtl',
+        lang: 'he',
+        tag: tag,
+        vibrate: [110, 60, 110],
+        data: { url: './index.html' }
+      };
+
+      function fallback() {
+        try { new window.Notification(title, opts); } catch (e) { /* mobile blocks this ctor */ }
+      }
+
+      if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+        navigator.serviceWorker.ready
+          .then(function (reg) { return reg.showNotification(title, opts); })
+          ['catch'](fallback);
+      } else {
+        fallback();
+      }
+    },
+
+    /** everything starting inside the lead window that has not fired today */
+    due: function () {
+      var t = todayISO();
+      var now = new Date();
+      var mins = now.getHours() * 60 + now.getMinutes();
+      var lead = Store.data.prefs.notify.lead;
+      var out = [];
+
+      function when(gap) {
+        return gap <= 0 ? 'מתחיל עכשיו' : 'בעוד ' + gap + ' דק׳';
+      }
+
+      Store.data.events.forEach(function (e) {
+        if (e.date !== t || !e.start) return;
+        var gap = timeToMinutes(e.start) - mins;
+        if (gap < 0 || gap > lead) return;
+        out.push({
+          id: e.id,
+          title: 'פגישה ' + when(gap),
+          body: e.title + ' · ' + e.start + (e.location ? ' · ' + e.location : '')
+        });
+      });
+
+      Store.data.tasks.forEach(function (x) {
+        if (x.done || x.due !== t || !x.time) return;
+        var gap = timeToMinutes(x.time) - mins;
+        if (gap < 0 || gap > lead) return;
+        out.push({
+          id: x.id,
+          title: 'משימה ' + when(gap),
+          body: x.title + ' · ' + x.time
+        });
+      });
+
+      return out;
+    },
+
+    tick: function () {
+      if (!this.armed()) return;
+
+      var t = todayISO();
+      var fired = Store.data.prefs.fired;
+      var dirty = false;
+
+      // yesterday's marks are dead weight — a record may legitimately repeat
+      Object.keys(fired).forEach(function (k) {
+        if (k.slice(-10) !== t) { delete fired[k]; dirty = true; }
+      });
+
+      var self = this;
+      this.due().forEach(function (item) {
+        var key = item.id + '@' + t;
+        if (fired[key]) return;
+        fired[key] = 1;
+        dirty = true;
+        self.show(key, item.title, item.body);
+      });
+
+      if (dirty) Store.save();
+    },
+
+    /**
+     * Web-push subscription hook. Wire a VAPID public key here once a push
+     * server exists; the service worker already handles the delivered event.
+     */
+    subscribe: function (publicKey) {
+      if (!publicKey || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+        return Promise.resolve(null);
+      }
+      var raw = window.atob(publicKey.replace(/-/g, '+').replace(/_/g, '/'));
+      var bytes = new Uint8Array(raw.length);
+      for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+
+      return navigator.serviceWorker.ready.then(function (reg) {
+        return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: bytes });
+      });
+    },
+
+    init: function () {
+      this.paint();
+      var self = this;
+
+      var btn = $('#pushBtn');
+      if (btn) btn.addEventListener('click', function () { self.onToggle(); });
+
+      clearInterval(this.timer);
+      this.timer = setInterval(function () { self.tick(); }, SCAN_MS);
+
+      // a phone that wakes from sleep skipped every interval in between
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) { self.paint(); self.tick(); }
+      });
+
+      this.tick();
+    }
+  };
+
   /* ------------------------------------------------------------- delegation */
 
   function onClick(e) {
@@ -733,6 +993,8 @@
     });
     setFilter(Store.data.prefs.filter);
     setView('today');
+    registerServiceWorker();
+    Notify.init();
   }
 
   if (document.readyState === 'loading') {
@@ -742,6 +1004,9 @@
   }
 
   // exposed for healthcheck.js / future D1 migration tooling
-  window.APP = { Store: Store, isoDate: isoDate, plural: plural, normCat: normCat, STORE_KEY: STORE_KEY };
+  window.APP = {
+    Store: Store, isoDate: isoDate, plural: plural, normCat: normCat,
+    STORE_KEY: STORE_KEY, Notify: Notify
+  };
 
 })();

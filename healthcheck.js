@@ -39,7 +39,12 @@ function must(hay, needle, label) {
 
 /* -------------------------------------------------------------- 1. files */
 
-const REQUIRED = ['index.html', 'styles.css', 'app.js', 'PROJECT_PLAN.md'];
+const REQUIRED = [
+  'index.html', 'styles.css', 'app.js', 'PROJECT_PLAN.md',
+  'manifest.json', 'sw.js',
+  'icons/icon-192.png', 'icons/icon-512.png',
+  'icons/maskable-512.png', 'icons/apple-touch-icon-180.png', 'icons/favicon-32.png'
+];
 
 check('required files present', () => {
   const missing = REQUIRED.filter(f => !fs.existsSync(path.join(ROOT, f)));
@@ -342,6 +347,149 @@ check('PROJECT_PLAN documents all seven pillars', () => {
   const pillars = ['Calendar', 'Tasks', 'Lists', 'Notes', 'Clients', 'Next Actions', 'Reminders'];
   const missing = pillars.filter(p => plan.indexOf(p) === -1);
   return missing.length ? 'missing pillars: ' + missing.join(', ') : true;
+});
+
+/* ---------------------------------------------- 12. PWA: install shell */
+
+const manifestRaw = read('manifest.json');
+const sw = read('sw.js');
+
+/** real PNG dimensions straight out of the IHDR chunk */
+function pngSize(file) {
+  const buf = fs.readFileSync(path.join(ROOT, file));
+  const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  for (let i = 0; i < 8; i++) if (buf[i] !== sig[i]) throw new Error(file + ' is not a PNG');
+  return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20), bytes: buf.length };
+}
+
+check('manifest.json is valid JSON with the mandated identity', () => {
+  const m = JSON.parse(manifestRaw);
+  const want = {
+    name: 'יומן חכם — Benja',
+    short_name: 'יומן',
+    start_url: './index.html',
+    display: 'standalone',
+    background_color: '#12161f',
+    theme_color: '#e4c278'
+  };
+  const bad = Object.keys(want).filter(k => m[k] !== want[k]);
+  if (bad.length) return bad.map(k => k + '=' + JSON.stringify(m[k])).join('; ');
+  if (m.dir !== 'rtl' || m.lang !== 'he') return 'manifest is not declared RTL Hebrew';
+  return true;
+});
+
+check('manifest ships 192 / 512 / maskable icons that really exist', () => {
+  const icons = JSON.parse(manifestRaw).icons || [];
+  const bySize = {};
+  icons.forEach(i => { bySize[i.sizes + '|' + (i.purpose || 'any')] = i.src; });
+
+  ['192x192|any', '512x512|any', '512x512|maskable'].forEach(k => {
+    if (!bySize[k]) throw new Error('manifest has no ' + k + ' icon');
+  });
+
+  icons.forEach(i => {
+    if (!fs.existsSync(path.join(ROOT, i.src))) throw new Error('missing file ' + i.src);
+    const dim = pngSize(i.src);
+    const want = parseInt(i.sizes.split('x')[0], 10);
+    if (dim.w !== want || dim.h !== want) {
+      throw new Error(i.src + ' is ' + dim.w + 'x' + dim.h + ', declared ' + i.sizes);
+    }
+    if (dim.bytes < 200) throw new Error(i.src + ' is a stub, not an icon');
+  });
+  return true;
+});
+
+check('index.html links the manifest and the install/apple tags', () => {
+  if (!/<link[^>]+rel="manifest"[^>]+href="manifest\.json"/.test(html)) return 'manifest not linked';
+  const tags = [
+    'name="mobile-web-app-capable"',
+    'name="apple-mobile-web-app-capable"',
+    'name="apple-mobile-web-app-status-bar-style"',
+    'name="apple-mobile-web-app-title"',
+    'rel="apple-touch-icon"'
+  ];
+  const missing = tags.filter(t => html.indexOf(t) === -1);
+  return missing.length ? 'missing head tags: ' + missing.join(', ') : true;
+});
+
+/* ---------------------------------------------- 13. PWA: service worker */
+
+check('sw.js parses (no syntax errors)', () => {
+  new vm.Script(sw, { filename: 'sw.js' });
+  return true;
+});
+
+check('sw.js pre-caches the whole core shell with relative URLs', () => {
+  ['./index.html', './styles.css', './app.js', './manifest.json'].forEach(a => {
+    if (sw.indexOf("'" + a + "'") === -1) throw new Error('core asset not cached: ' + a);
+  });
+  if (/'\/index\.html'|"\/index\.html"/.test(sw)) return 'absolute path breaks GitHub Pages sub-paths';
+  if (!/caches\.open\(/.test(sw)) return 'no cache is ever opened';
+  return true;
+});
+
+check('sw.js implements install / activate / fetch and evicts stale caches', () => {
+  ['install', 'activate', 'fetch'].forEach(ev => {
+    if (sw.indexOf("addEventListener('" + ev + "'") === -1) throw new Error('no ' + ev + ' listener');
+  });
+  if (!/caches\.keys\(\)/.test(sw)) return 'old cache versions are never evicted';
+  if (!/skipWaiting|clients\.claim/.test(sw)) return 'update takes two reloads (no skipWaiting/claim)';
+  return true;
+});
+
+check('sw.js answers push events via self.registration.showNotification', () => {
+  if (sw.indexOf("addEventListener('push'") === -1) return 'no push listener';
+  if (sw.indexOf('self.registration.showNotification(') === -1) return 'push does not raise a notification';
+  if (sw.indexOf("addEventListener('notificationclick'") === -1) return 'tapping the notification does nothing';
+  return true;
+});
+
+check('sw.js never caches cross-origin or non-GET traffic', () => {
+  if (!/req\.method !== 'GET'/.test(sw)) return 'non-GET requests are not excluded';
+  if (!/url\.origin !== self\.location\.origin/.test(sw)) return 'cross-origin responses are cached';
+  return true;
+});
+
+/* ------------------------------------------ 14. PWA: notifications engine */
+
+check('app.js registers the service worker (and skips file://)', () => {
+  if (!/navigator\.serviceWorker\.register\('sw\.js'\)/.test(js)) return 'sw.js is never registered';
+  if (js.indexOf("protocol === 'file:'") === -1) return 'no file:// guard — register() would throw locally';
+  return true;
+});
+
+check('permission toggle is present, mandated copy, and wired', () => {
+  if (html.indexOf('id="pushBtn"') === -1) return 'no toggle button';
+  if (html.indexOf('🔔') === -1) return 'bell affordance missing';
+  if (html.indexOf('הפעל התראות פוש') === -1) return 'mandated CTA copy missing';
+  if (!/Notification\.requestPermission/.test(js)) return 'permission is never requested';
+  if (!/\$\('#pushBtn'\)/.test(js)) return 'toggle is not bound in app.js';
+  return true;
+});
+
+check('reminders fire through the service worker with a legacy fallback', () => {
+  if (!/reg\.showNotification\(/.test(js)) return 'no registration.showNotification() path';
+  if (!/new window\.Notification\(/.test(js)) return 'no desktop fallback';
+  if (!/setInterval\(/.test(js)) return 'nothing schedules the reminder scan';
+  if (js.indexOf('visibilitychange') === -1) return 'a woken phone never catches up on missed scans';
+  return true;
+});
+
+check('reminder scan ignores the category filter (business must not be muted)', () => {
+  const due = (js.match(/due: function[\s\S]*?\n    \},/) || [''])[0];
+  if (!due) return 'no Notify.due() selector';
+  if (/pick\('events'\)|pick\('tasks'\)/.test(due)) return 'reminders are gated by the view filter';
+  if (due.indexOf('Store.data.events') === -1 || due.indexOf('Store.data.tasks') === -1) {
+    return 'reminders do not scan events and tasks';
+  }
+  return true;
+});
+
+check('notification state is persisted and never double-fires', () => {
+  if (!/prefs\.notify/.test(js)) return 'toggle state is not persisted';
+  if (!/prefs\.fired/.test(js)) return 'no fired-ledger — a reminder would repeat every scan';
+  if (!/d\.prefs\.notify = \{ on: false, lead: 10 \}/.test(js)) return 'legacy stores are not migrated';
+  return true;
 });
 
 /* --------------------------------------------------------------- report */

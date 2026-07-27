@@ -4,7 +4,25 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#12161f">
+<meta name="description" content="מרכז הפרודוקטיביות האישי והעסקי — יומן, משימות, רשימות, פתקים ולקוחות במקום אחד.">
 <title>המרכז שלי — יומן, משימות ולקוחות</title>
+
+<!-- ---------- PWA ---------- -->
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="icons/icon-512.png">
+
+<!-- ---------- installable web app (Android / Chrome) ---------- -->
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="application-name" content="יומן">
+
+<!-- ---------- installable web app (iOS / Safari) ---------- -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="יומן">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon-180.png">
+
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -42,6 +60,10 @@
           <h1 id="viewTitle">היום שלי</h1>
           <p id="todayLabel" class="topbar-sub"></p>
         </div>
+        <button class="push-btn" id="pushBtn" type="button" aria-pressed="false">
+          <span class="push-ico" id="pushIco" aria-hidden="true">🔔</span>
+          <span class="push-label" id="pushLabel">הפעל התראות פוש</span>
+        </button>
         <span class="avatar avatar-sm topbar-avatar" aria-hidden="true">ב</span>
       </div>
 
