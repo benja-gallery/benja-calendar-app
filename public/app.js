@@ -234,7 +234,42 @@
    */
   var TAP_EDIT = ['events', 'tasks', 'lists', 'notes'];
 
+  /* --- Sprint 9: in-place completion and the היסטוריה archive log --- */
+
+  /**
+   * Sprint 8 filed a task the instant its 400ms gesture ended: it dimmed,
+   * re-sorted, and in "לביצוע היום" left the list altogether. The finger that
+   * aimed at the circle was then hovering over a different row.
+   *
+   * Completion is now purely a STATE, drawn where the task already stands. The
+   * task leaves its list only when the user presses the archive button below —
+   * one deliberate move, in batch, at a moment of their choosing.
+   */
+  var ARCHIVE_LABEL = 'העבר משימות שבוצעו להיסטוריה';
+
+  /** the completed-tasks log holds a filed task exactly as long as the bin does */
+  var ARCHIVE_DAYS = 10;
+
   /* ------------------------------------------------------------- utilities */
+
+  /**
+   * Write only when the value actually changed (Sprint 9).
+   *
+   * `el.innerHTML = same_string` is not a no-op: it tears down every child node
+   * and builds a fresh set, which restarts their animations, drops focus and
+   * costs a layout. Patch.settle() refreshes the derived surfaces on EVERY tap,
+   * and most taps do not move a single one of those numbers — so the comparison
+   * is what keeps the counters, the summary line and the attention strip still.
+   */
+  function setHTML(el, html) {
+    if (el && el.innerHTML !== html) el.innerHTML = html;
+    return el;
+  }
+
+  function setText(el, text) {
+    if (el && el.textContent !== text) el.textContent = text;
+    return el;
+  }
 
   function $(sel, root) { return (root || document).querySelector(sel); }
   function $$(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
@@ -586,6 +621,27 @@
     return task;
   }
 
+  /**
+   * A completed task that has not been filed into היסטוריה yet (Sprint 9).
+   *
+   * It is finished — it carries the strikethrough and the dim — but it is still
+   * a full member of every list it was in, in the slot it was in. This is the
+   * predicate that keeps it there: nothing in the app treats it as gone until
+   * archiveDone() moves it into the log.
+   */
+  function awaitingArchive(task) {
+    return !!task && normStatus(task.status) === 'done';
+  }
+
+  /**
+   * Only a CANCELLED task sinks to the bottom of a list. A completed one holds
+   * the rank it had while it was open, so ticking it cannot re-sort the list
+   * under the finger that ticked it.
+   */
+  function sinksToBottom(task) {
+    return isClosed(task && task.status) && !awaitingArchive(task);
+  }
+
   /** one-tap check-off; un-checking returns the task to where it came from */
   function toggleTaskDone(task) {
     if (!task) return task;
@@ -624,14 +680,21 @@
     return progressOf(items);
   }
 
-  /** the quick sub-tabs of the tasks view: היום · באיחור · ממתין · הושלם */
+  /**
+   * The quick sub-tabs of the tasks view: היום · באיחור · ממתין · הושלם.
+   *
+   * Sprint 9 — "open" is no longer the gate on היום / באיחור. A task ticked a
+   * moment ago is still due today and must still be listed under היום, struck
+   * through, in its own slot; only a cancelled task drops out of a dated tab.
+   * הושלם is where the ones waiting to be filed collect.
+   */
   function taskMatchesTab(task, tab, today) {
     if (!task) return false;
     var status = normStatus(task.status);
-    var open = !isClosed(status);
+    var onBoard = !isClosed(status) || awaitingArchive(task);
     var t = today || todayISO();
-    if (tab === 'today') return open && task.due === t;
-    if (tab === 'late') return open && !!task.due && task.due < t;
+    if (tab === 'today') return onBoard && task.due === t;
+    if (tab === 'late') return onBoard && !!task.due && task.due < t;
     if (tab === 'waiting') return status === 'waiting';
     if (tab === 'done') return status === 'done';
     return true;                                              // 'all'
@@ -640,7 +703,7 @@
   /** open first, then by due date, then by priority, then by time of day */
   function sortTasks(tasks) {
     return (Array.isArray(tasks) ? tasks.slice() : []).sort(function (a, b) {
-      var ca = isClosed(a.status) ? 1 : 0, cb = isClosed(b.status) ? 1 : 0;
+      var ca = sinksToBottom(a) ? 1 : 0, cb = sinksToBottom(b) ? 1 : 0;
       if (ca !== cb) return ca - cb;
       var da = a.due || '9999-99-99', db = b.due || '9999-99-99';
       if (da !== db) return da < db ? -1 : 1;
@@ -871,6 +934,8 @@
         events: [], tasks: [], lists: [], notes: [], clients: [],
         // סל מחזור (Sprint 8) — deleted records wait here for ten days
         trash: [],
+        // היסטוריה (Sprint 9) — completed tasks wait here for ten days
+        archive: [],
         sync: blankSync(),
         gcal: blankGCal(),
         seeded: false
@@ -890,6 +955,7 @@
               if (Array.isArray(parsed[k])) d[k] = parsed[k];
             });
             if (Array.isArray(parsed.trash)) d.trash = parsed.trash;
+            if (Array.isArray(parsed.archive)) d.archive = parsed.archive;
             if (parsed.prefs && typeof parsed.prefs === 'object') d.prefs = parsed.prefs;
             if (parsed.sync && typeof parsed.sync === 'object') d.sync = parsed.sync;
             if (parsed.gcal && typeof parsed.gcal === 'object') d.gcal = parsed.gcal;
@@ -945,12 +1011,16 @@
       // entry is dropped rather than allowed to crash a render
       d.trash = normTrash(d.trash);
 
+      // Sprint 9: and so is the completed-tasks log, in every pre-archive store
+      d.archive = normArchive(d.archive);
+
       this.data = d;
 
       // "Auto-purge items older than 10 days during app initialization" — this
       // is that initialization, and it runs before a single row is painted, so
       // an expired record is never offered for restore even for one frame.
-      if (purgeTrash()) { this.save(); }
+      // Both drawers are swept, and one save covers both.
+      if (purgeTrash() + purgeArchive()) { this.save(); }
 
       if (!d.seeded) { this.seed(); }
       return d;
@@ -1566,6 +1636,16 @@
             d.trash.splice(d.trash.indexOf(held), 1);
           }
 
+          // Sprint 9 — היסטוריה needs the identical guard for the identical
+          // reason: a task filed into the log is gone from its collection but
+          // not gone from the cloud until its tombstone lands, and a stale pull
+          // would put it back on the board while the log still held it.
+          var filed = t === 'tasks' ? archiveFind(row.id) : null;
+          if (filed) {
+            if (filed.archivedAt >= stamp) return;
+            d.archive.splice(d.archive.indexOf(filed), 1);
+          }
+
           if (!local) { arr.push(incoming); touched++; }
           else if ((local.updatedAt || 0) < stamp) { arr[arr.indexOf(local)] = incoming; touched++; }
 
@@ -1907,13 +1987,31 @@
     return pick('tasks').filter(function (x) { return !isClosed(x.status); });
   }
 
+  /** what the summary line counts as owed today — genuinely open work only */
   function tasksDueToday() {
     var t = todayISO();
     return openTasks().filter(function (x) { return x.due === t; });
   }
 
+  /**
+   * What today's board SHOWS, which is not the same thing (Sprint 9): a task
+   * ticked a minute ago is no longer owed, but it is still on the board, struck
+   * through and in place, until it is filed into היסטוריה.
+   */
+  function boardTasksToday() {
+    var t = todayISO();
+    return pick('tasks').filter(function (x) {
+      return x.due === t && (!isClosed(x.status) || awaitingArchive(x));
+    });
+  }
+
   function unscheduledToday() {
-    return tasksDueToday().filter(function (x) { return !hourOf(x.time) && hourOf(x.time) !== 0; });
+    return boardTasksToday().filter(function (x) { return !hourOf(x.time) && hourOf(x.time) !== 0; });
+  }
+
+  /** every task still awaiting a place in the log, in the order it is shown */
+  function doneUnfiled() {
+    return sortTasks(pick('tasks').filter(awaitingArchive));
   }
 
   function overdueTasks() {
@@ -1974,7 +2072,7 @@
     var tasks = tasksDueToday().length;
     var follow = pendingFollowUps().length;
 
-    $('#summaryGreeting').textContent = greetingWord() + ' ' + OWNER.short;
+    setText($('#summaryGreeting'), greetingWord() + ' ' + OWNER.short);
 
     var line;
     if (!meetings && !tasks && !follow) {
@@ -1985,15 +2083,16 @@
         plural(tasks, 'משימה אחת', 'משימות') + ' ו־' +
         plural(follow, 'מעקב אחד', 'מעקבים') + '.';
     }
-    $('#summaryLine').textContent = line;
+    setText($('#summaryLine'), line);
 
     var f = filterCat();
-    $('#summaryChips').innerHTML = [
+    setHTML($('#summaryChips'), [
       '<span class="chip">' + esc(relDay(todayISO())) + '</span>',
       '<span class="chip">תצוגה: <b>' + (f === 'all' ? 'הכל' : CAT_LABEL[f]) + '</b></span>',
       '<span class="chip">פתוחות: <b>' + openTasks().length + '</b></span>',
-      '<span class="chip">ממתין ללקוח: <b>' + waitingTasks().length + '</b></span>'
-    ].join('');
+      '<span class="chip">ממתין ללקוח: <b>' + waitingTasks().length + '</b></span>',
+      '<span class="chip">בוצעו וממתינות לתיוק: <b>' + doneUnfiled().length + '</b></span>'
+    ].join(''));
   }
 
   /* --------------------------------------------- render: 4. attention cards */
@@ -2004,7 +2103,7 @@
     var follow = pendingFollowUps().length;
     var noAction = clientsMissingAction().length;
 
-    $('#attentionCards').innerHTML =
+    setHTML($('#attentionCards'),
       attCard(late, 'משימות באיחור', late ? 'דורש טיפול מיידי' : 'הכול בזמן',
         late ? 'is-hot' : 'is-calm', 'data-tasktab="late"') +
       attCard(waiting, 'ממתין ללקוח', waiting ? 'הכדור אצל הלקוח' : 'אין המתנות פתוחות',
@@ -2014,7 +2113,7 @@
       // the Next-Action alert engine, surfaced on the dashboard (mandate §3)
       attCard(noAction, 'ללא פעולה הבאה',
         noAction ? 'לקוחות פעילים בלי צעד הבא' : 'לכל לקוח פעיל יש צעד הבא',
-        noAction ? 'is-hot' : 'is-calm', 'data-clientfilter="all"');
+        noAction ? 'is-hot' : 'is-calm', 'data-clientfilter="all"'));
   }
 
   function attCard(num, label, hint, cls, attrs) {
@@ -2027,12 +2126,6 @@
 
   /* ------------------------------------------------- render: 2. day timeline */
 
-  /**
-   * `quiet` is set by Patch.settle() when the container's membership has not
-   * changed: the record that changed was already repainted in place, so the
-   * markup is skipped and only the derived meta line is refreshed. Nothing the
-   * finger is touching gets destroyed.
-   */
   /**
    * The hour the timeline actually paints an event in: everything outside
    * 08:00–22:00 — an untimed event included — is clamped into the window
@@ -2099,9 +2192,9 @@
     }
 
     if (!quiet) $('#timeline').innerHTML = rows.join('');
-    $('#timelineMeta').textContent = events.length
+    setText($('#timelineMeta'), events.length
       ? plural(events.length, 'אירוע אחד', 'אירועים') + ' · ' + pad2(DAY_START) + ':00–' + pad2(DAY_END) + ':00'
-      : 'אין אירועים מתוזמנים';
+      : 'אין אירועים מתוזמנים');
   }
 
   function eventCard(e) {
@@ -2129,7 +2222,7 @@
         ? list.map(function (t) { return taskRow(t); }).join('')
         : emptyState('אין משימות פתוחות להיום', 'כל מה שתייעד להיום ללא שעה מסוימת יופיע כאן.');
     }
-    $('#todoMeta').textContent = list.length ? plural(list.length, 'משימה אחת', 'משימות') : '';
+    setText($('#todoMeta'), list.length ? plural(list.length, 'משימה אחת', 'משימות') : '');
   }
 
   /**
@@ -2159,7 +2252,8 @@
       (compact ? ' data-compact="1"' : '') + '>' +
       selBox('tasks', t.id) +
       '<button type="button" class="check-tap" data-toggle="' + t.id + '"' +
-      ' aria-pressed="' + (t.done ? 'true' : 'false') + '" aria-label="סימון כבוצע">' +
+      ' aria-pressed="' + (t.done ? 'true' : 'false') + '"' +
+      ' aria-label="' + (t.done ? 'ביטול סימון הביצוע' : 'סימון כבוצע') + '">' +
       '<span class="check">' + CHECK_MARK + '</span></button>' +
       '<div class="row-body">' +
       '<div class="row-title">' + esc(t.title) + '</div>' +
@@ -2227,9 +2321,14 @@
       .sort(function (a, b) { return timeToMinutes(a.start) - timeToMinutes(b.start); });
   }
 
-  function openTasksOn(iso) {
+  /**
+   * The tasks a calendar pane draws for one day. Sprint 9 — a task ticked from
+   * inside the day view or the agenda must stay in that pane too, so the board
+   * predicate is the same one "לביצוע היום" uses: on the day, not cancelled.
+   */
+  function boardTasksOn(iso) {
     return pick('tasks')
-      .filter(function (x) { return !x.done && x.due === iso; })
+      .filter(function (x) { return x.due === iso && (!isClosed(x.status) || awaitingArchive(x)); })
       .sort(function (a, b) { return timeToMinutes(a.time) - timeToMinutes(b.time); });
   }
 
@@ -2303,7 +2402,7 @@
       var ev = 0, tk = 0;
       this.rangeDays().forEach(function (iso) {
         ev += eventsOn(iso).length;
-        tk += openTasksOn(iso).length;
+        tk += boardTasksOn(iso).length;
       });
       if (!ev && !tk) return 'אין מה שמתוכנן בטווח הזה';
       return plural(ev, 'אירוע אחד', 'אירועים') + ' · ' + plural(tk, 'משימה אחת', 'משימות');
@@ -2325,7 +2424,7 @@
 
       var grid = cells.map(function (iso) {
         var d = parseISO(iso);
-        var marks = eventsOn(iso).concat(openTasksOn(iso));
+        var marks = eventsOn(iso).concat(boardTasksOn(iso));
         var shown = marks.slice(0, 4);
         var extra = marks.length - shown.length;
 
@@ -2450,7 +2549,7 @@
           Math.round((d.getHours() * 60 + d.getMinutes()) / 60 * HOUR_PX) + 'px"></div>';
       }
 
-      var tasks = openTasksOn(iso);
+      var tasks = boardTasksOn(iso);
 
       $('#calDay').innerHTML =
         '<div class="cal-day">' +
@@ -2477,7 +2576,7 @@
       var iso = this.anchor, groups = [];
 
       for (var i = 0; i < AGENDA_DAYS; i++) {
-        var evs = eventsOn(iso), tks = openTasksOn(iso);
+        var evs = eventsOn(iso), tks = boardTasksOn(iso);
         if (evs.length || tks.length) groups.push({ date: iso, events: evs, tasks: tks });
         iso = addDaysISO(iso, 1);
       }
@@ -2512,12 +2611,12 @@
      * answer null: "always rebuild me".
      */
     keys: function () {
-      if (this.view === 'day') return recKeys('tasks', openTasksOn(this.anchor));
+      if (this.view === 'day') return recKeys('tasks', boardTasksOn(this.anchor));
       if (this.view !== 'agenda') return null;
 
       var iso = this.anchor, out = [];
       for (var i = 0; i < AGENDA_DAYS; i++) {
-        out = out.concat(recKeys('events', eventsOn(iso)), recKeys('tasks', openTasksOn(iso)));
+        out = out.concat(recKeys('events', eventsOn(iso)), recKeys('tasks', boardTasksOn(iso)));
         iso = addDaysISO(iso, 1);
       }
       return out;
@@ -2544,7 +2643,7 @@
       else this.renderAgenda();
 
       $('#calRange').textContent = this.label();
-      $('#calendarMeta').textContent = this.meta();
+      setText($('#calendarMeta'), this.meta());
       $('#view-calendar').setAttribute('aria-label', 'יומן — ' + CAL_LABEL[this.view]);
     },
 
@@ -2632,9 +2731,9 @@
         : emptyState('אין משימות בתצוגה הזו', TASK_TAB_EMPTY[tab] || TASK_TAB_EMPTY.all);
     }
 
-    $('#tasksMeta').textContent = all.length
+    setText($('#tasksMeta'), all.length
       ? all.filter(function (t) { return !isClosed(t.status); }).length + ' פתוחות מתוך ' + all.length
-      : '';
+      : '');
   }
 
   /* ------------------------------------------------- smart checklist lists */
@@ -2662,9 +2761,9 @@
       var p = listProgress(l);
       items += p.total; done += p.done;
     });
-    $('#listsMeta').textContent = lists.length
+    setText($('#listsMeta'), lists.length
       ? plural(lists.length, 'רשימה אחת', 'רשימות') + ' · ' + done + '/' + items + ' הושלמו'
-      : '';
+      : '');
   }
 
   function listRow(l) {
@@ -2705,9 +2804,9 @@
     }
 
     var pinned = notes.filter(function (n) { return n.pinned; }).length;
-    $('#notesMeta').textContent = notes.length
+    setText($('#notesMeta'), notes.length
       ? plural(notes.length, 'פתק אחד', 'פתקים') + (pinned ? ' · ' + pinned + ' מוצמדים' : '')
-      : '';
+      : '');
   }
 
   function noteRow(n) {
@@ -2845,10 +2944,10 @@
     }
 
     var missing = all.filter(clientNeedsAction).length;
-    $('#clientsMeta').textContent = all.length
+    setText($('#clientsMeta'), all.length
       ? all.length + ' לקוחות · ' + pendingFollowUps().length + ' במעקב' +
       (missing ? ' · ' + missing + ' ללא פעולה הבאה' : '')
-      : '';
+      : '');
   }
 
   /* ==========================================================================
@@ -3186,7 +3285,7 @@
       '<div class="trash-meta">' +
       '<span class="badge">' + esc(TRASH_LABEL[entry.collection] || 'פריט') + '</span>' +
       '<span class="badge ' + (days <= 2 ? 'pr-high' : 'timeless') + '">' +
-      esc(trashCountdown(days)) + '</span>' +
+      esc(retentionCountdown(days)) + '</span>' +
       '</div></div>' +
       '<div class="trash-acts">' +
       '<button type="button" class="mini" data-trash="restore:' + entry.id + '">↺ שחזר</button>' +
@@ -3195,6 +3294,12 @@
       '</div></div>';
   }
 
+  /**
+   * The pill badge is cheap and always current. The LIST is only rewritten
+   * while the sheet is actually open (Sprint 9): rebuilding a dialog nobody can
+   * see cost a full innerHTML — and a re-run of every row's entrance animation
+   * — on every single tap in the app.
+   */
   function renderTrash() {
     var rows = trashList();
     var now = Date.now();
@@ -3208,11 +3313,86 @@
     if (btn) btn.classList.toggle('is-full', !!rows.length);
 
     var box = $('#trashList');
-    if (box) {
+    var sheet = $('#trashSheet');
+    if (box && (!sheet || !sheet.hidden)) {
       box.innerHTML = rows.length
         ? rows.map(function (e) { return trashRow(e, now); }).join('')
         : emptyState('סל המחזור ריק',
           'כל פריט שתמחק ימתין כאן ' + TRASH_DAYS + ' ימים לפני שיימחק לצמיתות.');
+    }
+    return rows.length;
+  }
+
+  /* ------------------------------------------- render: היסטוריה (Sprint 9) */
+
+  /**
+   * The prominent batch-archive control. It carries the count in its own label,
+   * so the promise ("3 will move") and the act are the same object, and it is
+   * absent — not merely disabled — when there is nothing finished to file.
+   */
+  function archiveBarHTML(n) {
+    return '<button type="button" class="btn btn-gold archive-btn" data-action="archive-done">' +
+      '<span class="archive-ico" aria-hidden="true">📥</span>' +
+      '<span class="archive-text">' + ARCHIVE_LABEL + '</span>' +
+      '<b class="archive-n">' + n + '</b></button>';
+  }
+
+  /**
+   * Painted into every place a finger finishes a task — My Day and the tasks
+   * view — off the same state, so the two can never disagree.
+   */
+  function renderArchiveBar() {
+    var n = doneUnfiled().length;
+    ['#archiveBarToday', '#archiveBarTasks'].forEach(function (sel) {
+      var box = $(sel);
+      if (!box) return;
+      box.hidden = !n;
+      // the markup only changes when the count does — a rewrite on every tap
+      // would restart the button's transition mid-press
+      var next = n ? archiveBarHTML(n) : '';
+      if (box.innerHTML !== next) box.innerHTML = next;
+    });
+    return n;
+  }
+
+  /** one filed task: what it was called, how long it has left, and the way back */
+  function archiveRow(entry, now) {
+    var days = archiveDaysLeft(entry, now);
+    var title = recTitle('tasks', entry.rec) || 'ללא כותרת';
+
+    return '<div class="trash-row arch-row" data-archid="' + entry.id + '">' +
+      '<div class="trash-body">' +
+      '<div class="trash-title">✓ ' + esc(title) + '</div>' +
+      '<div class="trash-meta">' +
+      '<span class="badge st-done">בוצע</span>' +
+      (entry.rec && entry.rec.category ? catTag(normCat(entry.rec.category)) : '') +
+      '<span class="badge ' + (days <= 2 ? 'pr-high' : 'timeless') + '">' +
+      esc(retentionCountdown(days)) + '</span>' +
+      '</div></div>' +
+      '<div class="trash-acts">' +
+      '<button type="button" class="mini" data-arch="restore:' + entry.id + '">↺ שחזר</button>' +
+      '<button type="button" class="mini is-danger" data-arch="purge:' + entry.id +
+      '">🗑 מחק לצמיתות</button>' +
+      '</div></div>';
+  }
+
+  function renderArchive() {
+    var rows = archiveList();
+    var now = Date.now();
+
+    var box = $('#archiveList');
+    if (box) {
+      box.innerHTML = rows.length
+        ? rows.map(function (e) { return archiveRow(e, now); }).join('')
+        : emptyState('ההיסטוריה ריקה',
+          'משימות שתסמן כבוצעו ותעביר לכאן ימתינו ' + ARCHIVE_DAYS +
+          ' ימים לפני שיימחקו לצמיתות.');
+    }
+    var meta = $('#archiveMeta');
+    if (meta) {
+      meta.textContent = rows.length
+        ? plural(rows.length, 'משימה אחת', 'משימות') + ' בהיסטוריה'
+        : '';
     }
     return rows.length;
   }
@@ -3232,9 +3412,12 @@
     renderClients();
     renderDrawer();
     renderTrash();
+    renderArchive();
+    renderArchiveBar();
     Sync.paint();
     $('#todayLabel').textContent = hebDate(todayISO());
     $('#railUserName').textContent = OWNER.name;
+    markEntering();
   }
 
   /* ==========================================================================
@@ -3260,6 +3443,39 @@
      Containers belonging to a view that is not on screen are skipped entirely
      — setView() runs a full render() on the way in.
      ========================================================================== */
+
+  /* --------------------------------------------------------------------------
+     Sprint 9 · the shake
+
+     `.row, .ev { animation: card-in }` used to be unconditional, and every
+     repaint is a DOM INSERTION: Patch.record() swaps a node's outerHTML, so a
+     status chip, a checklist tick, a selection tap — anything at all — re-ran
+     the 7px entrance slide on the card under the finger. A membership change
+     re-ran it on every card in the container at once. That was the shaking.
+
+     The animation now belongs to `.is-entering`, which is never in any markup
+     string and can therefore only be granted here, to a record key that was not
+     on screen the last time we looked. A card being *rewritten* is by definition
+     already on screen, so it holds perfectly still.
+
+     Cheap on purpose: one querySelectorAll over the cards already in the
+     document, no layout read, and it runs after the paint work, not during it.
+     -------------------------------------------------------------------------- */
+
+  /** the record keys that were on screen at the end of the last paint */
+  var SEEN = {};
+
+  function markEntering() {
+    var next = {};
+    $$('[data-rec]').forEach(function (node) {
+      var key = node.dataset ? node.dataset.rec : '';
+      if (!key) return;
+      next[key] = 1;
+      if (!SEEN[key] && node.classList) node.classList.add('is-entering');
+    });
+    SEEN = next;
+    return next;
+  }
 
   function recKeys(collection, rows) {
     return (rows || []).map(function (r) { return collection + ':' + r.id; });
@@ -3329,6 +3545,9 @@
     settle: function () {
       renderSummary();
       renderAttention();
+      // cheap, idempotent, and the count it carries is derived state like any
+      // other counter — a task ticked anywhere must offer to be filed
+      renderArchiveBar();
 
       SECTIONS.forEach(function (s) {
         if (UI.view !== s.view) return;          // off-screen: setView() will redraw it
@@ -3337,6 +3556,7 @@
 
       renderDrawer(sameKeys(domKeys('#drawerBody'), Drawer.keys()));
       Sync.paint();
+      markEntering();
     },
 
     /** the whole cycle for one changed record */
@@ -3443,26 +3663,37 @@
     });
   }
 
-  /** milliseconds left before the auto-purge takes this entry */
-  function trashLeftMs(entry, now) {
-    if (!entry) return 0;
-    return (entry.deletedAt + TRASH_DAYS * DAY_MS) - (typeof now === 'number' ? now : Date.now());
+  /* ---- the retention clock, shared by סל מחזור and היסטוריה (Sprint 9) ---- */
+
+  /** milliseconds left before an auto-purge takes an entry stamped at `stamp` */
+  function retentionLeftMs(stamp, days, now) {
+    if (typeof stamp !== 'number' || !(stamp > 0)) return 0;
+    return (stamp + days * DAY_MS) - (typeof now === 'number' ? now : Date.now());
   }
 
   /**
-   * The number the badge shows. Rounded UP, so the day of the deletion reads
-   * "בעוד 10 ימים" and the final day reads "בעוד יום אחד" — the count never
-   * claims more time than the entry actually has.
+   * The number a countdown badge shows. Rounded UP, so the day the entry
+   * arrived reads "בעוד 10 ימים" and the final day reads "בעוד יום אחד" — the
+   * count never claims more time than the entry actually has.
    */
-  function trashDaysLeft(entry, now) {
-    var left = trashLeftMs(entry, now);
+  function retentionDaysLeft(stamp, days, now) {
+    var left = retentionLeftMs(stamp, days, now);
     return left <= 0 ? 0 : Math.ceil(left / DAY_MS);
+  }
+
+  /** milliseconds left before the auto-purge takes this entry */
+  function trashLeftMs(entry, now) {
+    return entry ? retentionLeftMs(entry.deletedAt, TRASH_DAYS, now) : 0;
+  }
+
+  function trashDaysLeft(entry, now) {
+    return entry ? retentionDaysLeft(entry.deletedAt, TRASH_DAYS, now) : 0;
   }
 
   function trashExpired(entry, now) { return trashLeftMs(entry, now) <= 0; }
 
-  /** "יימחק לצמיתות בעוד 10 ימים" */
-  function trashCountdown(days) {
+  /** "יימחק לצמיתות בעוד 10 ימים" — one sentence, both drawers (Sprint 9) */
+  function retentionCountdown(days) {
     if (days <= 0) return 'יימחק לצמיתות היום';
     if (days === 1) return 'יימחק לצמיתות בעוד יום אחד';
     return 'יימחק לצמיתות בעוד ' + days + ' ימים';
@@ -3549,6 +3780,189 @@
     var entry = trashFind(id);
     if (!entry) return null;
     d.trash.splice(d.trash.indexOf(entry), 1);
+    Store.save();
+    return entry;
+  }
+
+  /* ==========================================================================
+     היסטוריה — the completed-tasks log (Sprint 9)
+
+     The bin is where a MISTAKE waits. This is where FINISHED WORK waits, and it
+     is a different thing, so it is a different log:
+
+       tick     →  the task is done and stays exactly where it is, struck
+                   through and dimmed. Nothing moves. Nothing is filed.
+       archive  →  the user presses "העבר משימות שבוצעו להיסטוריה" and every
+                   completed task on screen moves into the log at once, with
+                   the slot it came from
+       10 days  →  it can be restored into that exact slot, or destroyed early
+       after    →  purgeArchive() drops it on the next app start, for good
+
+     Deliberately the same shape and the same clock as the bin — one mental
+     model, two drawers — but never the same list: restoring from היסטוריה must
+     not read as undoing a deletion, and emptying the bin must not throw away a
+     month of finished work.
+
+     Every function here is pure store work, so healthcheck.js can drive a whole
+     tick → archive → count-down → restore → purge cycle head-lessly.
+     ========================================================================== */
+
+  /** whatever localStorage handed back, made safe to render */
+  function normArchive(rows) {
+    return (Array.isArray(rows) ? rows : []).filter(function (e) {
+      return e && typeof e === 'object' &&
+        e.rec && typeof e.rec === 'object' &&
+        typeof e.id === 'string' && e.id &&
+        e.collection === 'tasks';
+    }).map(function (e) {
+      return {
+        collection: 'tasks',
+        id: e.id,
+        rec: e.rec,
+        index: typeof e.index === 'number' && e.index >= 0 ? e.index : 0,
+        // a stamp-less entry is treated as filed right now rather than as
+        // infinitely old: losing finished work to a corrupt field is worse
+        // than holding it ten days too long
+        archivedAt: typeof e.archivedAt === 'number' && e.archivedAt > 0 ? e.archivedAt : Date.now()
+      };
+    });
+  }
+
+  function archiveLeftMs(entry, now) {
+    return entry ? retentionLeftMs(entry.archivedAt, ARCHIVE_DAYS, now) : 0;
+  }
+
+  function archiveDaysLeft(entry, now) {
+    return entry ? retentionDaysLeft(entry.archivedAt, ARCHIVE_DAYS, now) : 0;
+  }
+
+  function archiveExpired(entry, now) { return archiveLeftMs(entry, now) <= 0; }
+
+  function archiveRows() {
+    var d = Store.data;
+    return d && Array.isArray(d.archive) ? d.archive : [];
+  }
+
+  /** newest first — what was just filed is what is looked for */
+  function archiveList() {
+    return archiveRows().slice().sort(function (a, b) { return b.archivedAt - a.archivedAt; });
+  }
+
+  function archiveFind(id) {
+    return archiveRows().filter(function (e) { return e.id === id; })[0] || null;
+  }
+
+  function archiveCount() { return archiveRows().length; }
+
+  /** everything past its ten days leaves — returns how many went */
+  function purgeArchive(now) {
+    var d = Store.data;
+    if (!d || !Array.isArray(d.archive)) return 0;
+    var before = d.archive.length;
+    d.archive = d.archive.filter(function (e) { return !archiveExpired(e, now); });
+    return before - d.archive.length;
+  }
+
+  /**
+   * File ONE task. Caller owns the splice out of the live list and the save —
+   * this is the bookkeeping only, so archiving a whole batch costs one save.
+   */
+  function archivePut(rec, index, now) {
+    var d = Store.data;
+    if (!d || !rec) return null;
+    if (!Array.isArray(d.archive)) d.archive = [];
+
+    var entry = {
+      collection: 'tasks',
+      id: rec.id,
+      rec: rec,
+      index: typeof index === 'number' && index >= 0 ? index : 0,
+      archivedAt: typeof now === 'number' ? now : Date.now()
+    };
+    // one entry per record: filing, restoring and filing again must not leave
+    // two rows in the log racing each other to purge
+    for (var i = 0; i < d.archive.length; i++) {
+      if (d.archive[i].id === entry.id) { d.archive[i] = entry; return entry; }
+    }
+    d.archive.push(entry);
+    return entry;
+  }
+
+  /**
+   * The button. Every completed task the CURRENT VIEW is showing moves into the
+   * log in one move — the global category filter is respected, so what the
+   * count promises is exactly what leaves (§0.3).
+   *
+   * Records are spliced back to front so every recorded slot is still the slot
+   * the record actually came from by the time the next splice runs, and the
+   * whole batch arms ONE undo entry that puts all of them back.
+   */
+  function archiveDone(now) {
+    var rows = doneUnfiled();
+    if (!rows.length) return null;
+
+    var live = Store.data.tasks;
+    var slots = [];
+    rows.forEach(function (rec) {
+      var at = live.indexOf(rec);
+      if (at !== -1) slots.push({ id: rec.id, rec: rec, index: at });
+    });
+    if (!slots.length) return null;
+
+    slots.slice().sort(function (a, b) { return b.index - a.index; })
+      .forEach(function (s) { live.splice(s.index, 1); });
+    slots.forEach(function (s) { archivePut(s.rec, s.index, now); });
+    Store.save();
+
+    var entry = { count: slots.length, ids: slots.map(function (s) { return s.id; }) };
+
+    Undo.arm(
+      {
+        collection: 'archive', id: '', index: -1, count: slots.length,
+        label: slots.length === 1 ? 'המשימה' : slots.length + ' משימות'
+      },
+      function () {
+        // ascending, so each task lands back in its own slot rather than
+        // shifting the ones that follow it
+        slots.slice().sort(function (a, b) { return a.index - b.index; })
+          .forEach(function (s) { archiveRestore(s.id); });
+        Store.save();
+      }
+    );
+
+    return entry;
+  }
+
+  /** [שחזר] — back into the task list, in the slot it left, open for work again */
+  function archiveRestore(id) {
+    var d = Store.data;
+    var entry = archiveFind(id);
+    if (!entry) return null;
+
+    d.archive.splice(d.archive.indexOf(entry), 1);
+
+    var live = d.tasks;
+    // a record the cloud already pushed back is not restored twice
+    if (live && !Store.find('tasks', entry.id)) {
+      // the newer stamp is what makes the outbox REPLACE the tombstone it
+      // queued with an upsert — without it the restore would sync as a delete
+      touch(entry.rec);
+      live.splice(Math.min(entry.index, live.length), 0, entry.rec);
+    }
+    Store.save();
+    return entry;
+  }
+
+  /**
+   * [מחק לצמיתות] — the task left its collection when it was filed and its
+   * tombstone is already queued, so dropping the entry IS the permanent
+   * deletion. Nothing else in the app can reach it afterwards.
+   */
+  function archivePurge(id) {
+    var d = Store.data;
+    var entry = archiveFind(id);
+    if (!entry) return null;
+    d.archive.splice(d.archive.indexOf(entry), 1);
     Store.save();
     return entry;
   }
@@ -4107,10 +4521,12 @@
     // an entry that expired while the app was left open must not be offered
     // for restore just because the tab never reloaded
     if (purgeTrash()) Store.save();
-    renderTrash();
     $('#typeSheet').hidden = true;
     $('#formSheet').hidden = true;
+    // the sheet is unhidden FIRST: renderTrash() paints the list only while it
+    // is open (Sprint 9), so painting before this would open an empty bin
     openSheet('trashSheet');
+    renderTrash();
   }
 
   /**
@@ -4875,6 +5291,60 @@
     return TAP_EDIT.indexOf(String(key).split(':')[0]) === -1 ? '' : key;
   }
 
+  /**
+   * The archive button (Sprint 9). Every completed task on screen collapses
+   * together, then the whole batch moves into היסטוריה and arms one אחזר — the
+   * same choreography a batch deletion gets, because it is the same size of
+   * move. Nothing is asked first: the log holds everything for ten days and
+   * offers שחזר on every row, so this is not a destructive tap.
+   */
+  function runArchiveDone() {
+    var rows = doneUnfiled();
+    if (!rows.length) { toast('אין משימות שבוצעו להעברה'); return false; }
+
+    var keys = rows.map(function (t) { return 'tasks:' + t.id; });
+    Haptics.done();
+
+    leaveThen(keys, function () {
+      var filed = archiveDone();
+      render();
+      if (!filed) { toast('לא הועברה אף משימה'); return; }
+      toast(filed.count === 1
+        ? 'משימה אחת הועברה להיסטוריה'
+        : filed.count + ' משימות הועברו להיסטוריה',
+      UNDO_LABEL, UNDO_BATCH_MS);
+    });
+    return true;
+  }
+
+  /** [שחזר] / [מחק לצמיתות] inside היסטוריה */
+  function runArchiveAction(action, id) {
+    var entry = archiveFind(id);
+    if (!entry) { renderArchive(); toast('המשימה כבר לא בהיסטוריה'); return false; }
+
+    if (action === 'restore') {
+      var back = archiveRestore(id);
+      if (!back) { renderArchive(); return false; }
+      Haptics.done();
+      // the task re-enters the lists it left — the membership moved
+      render();
+      toast('המשימה חזרה לרשימה');
+      return true;
+    }
+
+    if (action !== 'purge') return false;
+
+    // the one deletion in the log with no net behind it — it asks like every
+    // other destructive tap, and this time the answer really is final
+    return !!confirmDelete(
+      'משימה · ' + (recTitle('tasks', entry.rec) || 'ללא כותרת') + ' — לצמיתות, ללא שחזור',
+      function () {
+        if (!archivePurge(id)) return;
+        renderArchive();
+        toast('המשימה נמחקה לצמיתות');
+      });
+  }
+
   /** [שחזר] / [מחק לצמיתות] inside the bin */
   function runTrashAction(action, id) {
     var entry = trashFind(id);
@@ -4915,7 +5385,7 @@
       '[data-tasktab],[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
       '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
       '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo],' +
-      '[data-edit],[data-batch],[data-confirmdel],[data-trash]') : null;
+      '[data-edit],[data-batch],[data-confirmdel],[data-trash],[data-arch]') : null;
 
     // Sprint 8 · universal tap-to-edit — a tap that hit no control at all, but
     // landed on a card, opens that card's own form pre-filled. The check circle,
@@ -4962,6 +5432,16 @@
     if (el.dataset.action === 'select-mode') { Select.toggleMode(); return; }
     if (el.dataset.action === 'close-confirm') { closeConfirm(); return; }
     if (el.dataset.action === 'trash') { openTrash(); return; }
+
+    /* ---------- היסטוריה (Sprint 9) ---------- */
+
+    if (el.dataset.action === 'archive-done') { runArchiveDone(); return; }
+
+    if (el.dataset.arch) {
+      var arp = el.dataset.arch.split(':');
+      runArchiveAction(arp[0], arp[1]);
+      return;
+    }
 
     if (el.dataset.action === 'master-add') { openTypeSheet(); return; }
     if (el.dataset.action === 'close-sheet') { closeSheets(); return; }
@@ -5042,12 +5522,18 @@
       var t = Store.find('tasks', el.dataset.toggle);
       if (t) {
         // Sprint 8 — the ✓ draws, the title strikes through and the dual pulse
-        // fires FIRST; only when the gesture has been seen does the record move
+        // fires FIRST. Sprint 9 — and then the task STAYS, right where it is:
+        // the commit writes the state and patches that one row in place, and
+        // every list it belongs to still counts it as a member, so no container
+        // is rebuilt and nothing moves under the finger. The archive button is
+        // what files it, when the user decides.
         Complete.run(t, function () {
           toggleTaskDone(t);
           Store.save();
           Patch.apply('tasks', t.id);
-          toast(t.done ? 'המשימה הושלמה ✓' : 'המשימה חזרה ל' + STATUS_LABEL[t.status]);
+          toast(t.done
+            ? 'בוצע ✓ — נשאר כאן עד להעברה להיסטוריה'
+            : 'המשימה חזרה ל' + STATUS_LABEL[t.status]);
         });
       }
       return;
@@ -5250,7 +5736,6 @@
       trashLeftMs: trashLeftMs,
       trashDaysLeft: trashDaysLeft,
       trashExpired: trashExpired,
-      trashCountdown: trashCountdown,
       trashList: trashList,
       trashFind: trashFind,
       trashCount: trashCount,
@@ -5258,7 +5743,39 @@
       trashRestore: trashRestore,
       trashPurge: trashPurge,
       purgeTrash: purgeTrash,
-      trashRow: trashRow
+      trashRow: trashRow,
+
+      // Sprint 9 — in-place completion, the היסטוריה log and the anti-shake
+      // layer. The whole log is pure store work, so healthcheck.js drives a
+      // full tick → archive → count-down → restore → purge cycle with no DOM,
+      // no timer and no clock of its own.
+      ARCHIVE_DAYS: ARCHIVE_DAYS,
+      ARCHIVE_LABEL: ARCHIVE_LABEL,
+      awaitingArchive: awaitingArchive,
+      sinksToBottom: sinksToBottom,
+      boardTasksToday: boardTasksToday,
+      boardTasksOn: boardTasksOn,
+      doneUnfiled: doneUnfiled,
+      retentionLeftMs: retentionLeftMs,
+      retentionDaysLeft: retentionDaysLeft,
+      retentionCountdown: retentionCountdown,
+      normArchive: normArchive,
+      archiveLeftMs: archiveLeftMs,
+      archiveDaysLeft: archiveDaysLeft,
+      archiveExpired: archiveExpired,
+      archiveList: archiveList,
+      archiveFind: archiveFind,
+      archiveCount: archiveCount,
+      archivePut: archivePut,
+      archiveDone: archiveDone,
+      archiveRestore: archiveRestore,
+      archivePurge: archivePurge,
+      purgeArchive: purgeArchive,
+      archiveRow: archiveRow,
+      archiveBarHTML: archiveBarHTML,
+      markEntering: markEntering,
+      setHTML: setHTML,
+      setText: setText
     },
 
     // cloud sync engine — schema, serialisers, outbox and merge, all pure

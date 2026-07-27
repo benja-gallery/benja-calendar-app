@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v11';  // Sprint 8 — checkmark gesture, recycle bin, tap-to-edit
+var CACHE_VERSION = 'v12';  // Sprint 9 — in-place strikethrough, היסטוריה, no shake
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */

@@ -417,7 +417,8 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   text-align:start;
   transition:transform .16s, border-color .16s;
 }
-.att:hover{ transform:translateY(-2px); }
+/* the lift lives in the hover-capable block below — on a touch screen :hover
+   sticks after a tap, and a card left 2px out of place is a layout shift */
 .att-num{ font-size:26px; font-weight:800; line-height:1.1; }
 .att-label{ font-size:12.5px; color:var(--muted); font-weight:600; }
 .att-hint{ font-size:11.5px; color:var(--faint); }
@@ -586,10 +587,24 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   }
 }
 
+/* --------------------------------------------------------------------------
+   Sprint 9 — the entrance is opt-in, and that is the whole shake fix.
+
+   This rule used to read `.row, .ev, .trash-row { animation: card-in }` with no
+   gate at all. Every repaint in this app is a DOM INSERTION — Patch.record()
+   replaces a node's outerHTML — so a status chip, a checklist tick, a selection
+   tap, anything, re-ran the 7px slide on the card under the finger, and a
+   membership change re-ran it on every card in the container at once. That was
+   the shaking, and it was one missing selector.
+
+   `.is-entering` is granted only by markEntering(), only to a record that was
+   not on screen at the end of the previous paint. A card being rewritten is by
+   definition already on screen, so it now holds perfectly still.
+   -------------------------------------------------------------------------- */
 @media (prefers-reduced-motion: no-preference){
   /* transform only, deliberately: an opacity keyframe with a fill would
      out-rank `opacity:var(--dim-done)` and un-dim every finished card */
-  .row, .ev, .trash-row{ animation:card-in .22s cubic-bezier(.2,.8,.25,1); }
+  .row.is-entering, .ev.is-entering{ animation:card-in .22s cubic-bezier(.2,.8,.25,1); }
 }
 @keyframes card-in{ from{ transform:translateY(7px); } to{ transform:none; } }
 
@@ -1205,7 +1220,7 @@ body.is-selecting .fab{ opacity:0; pointer-events:none; }
   font-size:14.5px; font-weight:700; text-align:start;
   transition:border-color .18s, transform .16s, background .18s;
 }
-.type-btn:hover{ border-color:var(--gold-edge); transform:translateY(-2px); }
+.type-btn:hover{ border-color:var(--gold-edge); }
 .type-btn:first-child{ grid-column:1 / -1; }
 .type-ico{
   width:34px; height:34px; flex:0 0 34px;
@@ -1345,7 +1360,7 @@ body.is-selecting .fab{ opacity:0; pointer-events:none; }
   overflow:hidden;
   transition:border-color .18s, transform .16s;
 }
-.cl-card:hover{ transform:translateY(-2px); border-color:var(--gold-edge); }
+.cl-card:hover{ border-color:var(--gold-edge); }
 
 /* the stage is carried by the card rail too, never by the badge alone */
 .cst-row-lead{        border-inline-start-color:var(--gold); }
@@ -1509,6 +1524,61 @@ body.is-selecting .fab{ opacity:0; pointer-events:none; }
 .dr-log.dr-contact .dr-log-ico{ background:var(--business-soft); color:var(--business); }
 .dr-log.dr-created .dr-log-ico{ background:var(--personal-soft); color:var(--personal); }
 .dr-log.dr-link    .dr-log-ico{ background:var(--waiting-soft);  color:var(--waiting); }
+
+/* ==========================================================================
+   היסטוריה — the archive bar and the completed-tasks log   (Sprint 9)
+
+   The bar is the one control that moves a finished task off the board, so it is
+   the most prominent thing in its block: a full-width gold button carrying its
+   own count. It is absent, not disabled, when there is nothing to file — a
+   button that cannot do anything is noise.
+   ========================================================================== */
+
+.archive-bar{ margin-top:10px; }
+.archive-bar[hidden]{ display:none; }
+
+.archive-btn{
+  display:flex; align-items:center; justify-content:center; gap:9px;
+  width:100%;
+  min-height:var(--tap);
+  font-size:14.5px;
+}
+.archive-ico{ font-size:16px; line-height:1; }
+.archive-text{ min-width:0; }
+/* the count rides inside the label, so the promise and the act are one object */
+.archive-n{
+  display:inline-grid; place-items:center;
+  min-width:24px; height:24px; padding:0 7px;
+  border-radius:999px;
+  background:var(--surface); color:var(--gold);
+  font-size:12.5px; font-weight:800;
+  font-variant-numeric:tabular-nums;
+}
+
+/* the log is a card on a page, not a list inside a sheet, so it owns the inset
+   its rows need — .trash-row carries its own panel background */
+#archiveList{ padding:10px; }
+#archiveList .empty{ padding:20px 12px; }
+
+/* a filed task reads as an achievement, not as something that was thrown away */
+.arch-row{ border-inline-start:3px solid var(--personal); }
+.arch-row .trash-title{ color:var(--muted); }
+
+/* ==========================================================================
+   Hover lifts — fine pointers only   (Sprint 9)
+
+   `:hover` on a touch screen is sticky: it latches on tap and stays until the
+   finger lands somewhere else, so a hover TRANSFORM leaves the card 2px out of
+   place long after the tap. Every lift in the app therefore lives here, behind
+   a real pointer. Placed before the reduced-motion block below on purpose, so
+   that block still wins on a mouse-driven machine that asks for stillness.
+   ========================================================================== */
+
+@media (hover:hover) and (pointer:fine){
+  .att:hover,
+  .type-btn:hover,
+  .cl-card:hover{ transform:translateY(-2px); }
+}
 
 /* ==========================================================================
    Tactile touch states, focus rings & hit expanders   (Sprint 7)

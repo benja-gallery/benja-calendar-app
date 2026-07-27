@@ -1,8 +1,10 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Sprint 8 shipped (§7.4h) — the 400ms completion gesture, the 10-day סל מחזור,
-> universal tap-to-edit and card enter/exit animation, v0.8.0. Waves 1–3 before it (§7.4g) —
-> breakage fixes, delete confirmation, universal edit, multi-select & batch actions.
+> **Status:** Sprint 9 shipped (§7.4i) — in-place strikethrough completion, the manual
+> `העבר משימות שבוצעו להיסטוריה` batch archive with a 10-day היסטוריה log, and the end of the
+> UI shake (the entrance animation is now opt-in via `.is-entering`), v0.9.0. Sprint 8 before
+> it (§7.4h) — the 400ms completion gesture, the 10-day סל מחזור, universal tap-to-edit.
+> Waves 1–3 (§7.4g) — breakage fixes, delete confirmation, universal edit, batch actions.
 > **Repository:** `C:\calendar-app` (fresh, independent git repo — no relationship to `benja-gallery`)
 > **Created:** 2026-07-27 · **Spec injected:** 2026-07-27 (Sprint 1)
 
@@ -977,6 +979,123 @@ replacement, a permanent purge that cannot be undone, the start-up auto-purge (o
 exactly at the boundary, one with a day left), `normTrash()` against five malformed rows, the
 batch path through the bin, the `Sync.merge()` bin guard in both directions, the `tapEditKey`
 gate and its position in the delegate, and the collapse/entrance animation contracts.
+
+### 7.4i Sprint 9 — in-place completion, היסטוריה & the end of the shake (shipped)
+
+Three field reports, one theme: **the app moved things the finger was still aiming at.**
+
+**1 · The shake was one missing selector**
+
+```css
+.row, .ev, .trash-row{ animation:card-in .22s … }   /* before */
+.row.is-entering, .ev.is-entering{ animation:card-in .22s … }   /* after */
+```
+
+Every repaint in this app is a **DOM insertion** — `Patch.record()` replaces a node's
+`outerHTML` — so that ungated rule re-ran the 7px entrance slide on the card *under the
+finger*, on every status chip, every checklist tick, every selection tap. A membership change
+re-ran it on **every card in the container at once**. That was the shaking, and Sprint 7's
+patch engine could not help: the engine was doing exactly what it promised, and the CSS was
+undoing it.
+
+`markEntering()` now grants **`.is-entering`** to a `[data-rec]` node only when that record
+key was *not* on screen at the end of the previous paint (`SEEN`). A card being rewritten is
+by definition already on screen, so it holds perfectly still; a genuinely arriving card still
+rises, and its neighbours no longer rise with it. The class exists nowhere in any markup
+string — `healthcheck.js` counts its occurrences in comment-stripped source and fails the
+build at more than one, because a builder that emitted it would silently restore the bug.
+
+Two smaller sources of movement went with it:
+
+| Source | Why it moved | Fix |
+|---|---|---|
+| `.att:hover`, `.type-btn:hover`, `.cl-card:hover` each lifted `translateY(-2px)` | `:hover` **latches** on a touch screen: it stays until the finger lands elsewhere, leaving the card 2px out of place long after the tap | the lifts moved into `@media (hover:hover) and (pointer:fine)`, placed *before* the reduced-motion block so that block still wins on a mouse |
+| `renderSummary()` / `renderAttention()` / `renderTrash()` rewrote `innerHTML` on **every tap** through `Patch.settle()` | `el.innerHTML = same_string` is not a no-op — it tears down every child and builds a fresh set, restarting animations and dropping focus | **`setHTML()` / `setText()`** write only on a real change, and the recycle-bin **list** is painted only while its sheet is actually open |
+
+**2 · Completion is a state, not a move (`awaitingArchive`)**
+
+Sprint 8 filed a task the instant its 400ms gesture ended: it dimmed, **re-sorted**, and in
+"לביצוע היום" left the list altogether. The mandate is explicit — tapping the circle must draw
+the line, dim the row *slightly*, and **keep it in place**.
+
+The 400ms gesture (`Complete.run()`, the drawn ✓, the sweeping strikethrough, `HAPTIC_CHECK`)
+is unchanged. What changed is everything downstream of it:
+
+- **`awaitingArchive(task)`** — done, and not yet filed. Such a task is still a full member of
+  every list it was in. `taskMatchesTab()` no longer gates היום / באיחור on *open*; a ticked
+  task stays listed under the tab it was already under. `boardTasksToday()` is the new source
+  for "לביצוע היום", and `openTasksOn` became **`boardTasksOn`** so a task ticked from inside
+  the day view or the agenda stays in that pane too. `tasksDueToday()` is untouched — the
+  summary line still counts only what is genuinely *owed*.
+- **`sinksToBottom(task)`** — only a **cancelled** task drops to the end of a sort. A completed
+  one keeps the exact rank it held while open (same due date, same priority), so ticking cannot
+  re-sort the list under the finger that ticked it.
+- The commit is therefore `toggleTaskDone` → `Store.save()` → `Patch.apply()` and nothing else:
+  membership is provably unchanged, `sameKeys()` answers "quiet", **no container is rewritten**.
+  The toggle branch calls no `render()` and no `leaveThen()`, and the healthcheck fails the
+  build if either reappears.
+
+**3 · היסטוריה — the manual batch archive**
+
+```
+tick     →  done, struck through, dimmed, IN PLACE. Nothing is filed.
+archive  →  "העבר משימות שבוצעו להיסטוריה" — every completed task on screen
+            moves at once, with the slot it came from, and arms one אחזר
+10 days  →  שחזר (back into that exact slot) or מחק לצמיתות (archivePurge())
+after    →  purgeArchive() drops it on the next app start, for good
+```
+
+- The button is a full-width gold CTA carrying **its own count**, so the promise ("3 will
+  move") and the act are one object. It is **absent, not disabled**, when there is nothing to
+  file. It is painted into both places a finger finishes a task — My Day and the tasks view —
+  by one `renderArchiveBar()` reading one piece of state, so the two can never disagree.
+- `archiveDone()` respects the **global category filter** (§0.3): what the count promises is
+  exactly what leaves. Records are spliced back-to-front so every recorded slot stays valid,
+  and the whole batch arms **one** undo that restores them front-to-back.
+- **Deliberately not סל מחזור.** Restoring work you finished must not read as undoing a
+  deletion, and emptying the bin must not throw away a month of finished work. `Store.data.archive`
+  is its own persisted array with its own drawer, and the healthcheck asserts a deletion never
+  reaches the log and a filing never reaches the bin.
+- The two drawers share **one clock** — `retentionLeftMs()` / `retentionDaysLeft()` /
+  `retentionCountdown()` — so `יימחק לצמיתות בעוד N ימים` counts down identically in both,
+  rounded **up**, turning `pr-high` in the last 48 hours.
+- `Sync.merge()` gained the archive twin of the Sprint 8 bin guard, for the identical reason: a
+  filed task is gone from its collection but not from the cloud until its tombstone lands, and
+  a stale pull would walk it back onto the board while the log still offered to restore it. The
+  log wins while `archivedAt >= stamp` and **steps aside** when a genuinely newer server copy
+  proves the task is alive again.
+- `normArchive()` drops malformed entries on load and stamps a stamp-less one with `Date.now()`.
+  Auto-purge runs **inside `Store.load()`**, before a row is painted.
+
+**4 · Delete confirmation & universal edit (verified, not rebuilt)**
+
+Both were already shipped (§7.4g גל 2, §7.4h) and both were re-verified rather than rewritten:
+every destructive tap in the app — including `מחק לצמיתות` in the **new** log — goes through
+`confirmDelete()` and the mandated `האם אתה בטוח שברצונך למחוק?` / `אישור מחיקה` / `ביטול`, and
+`tapEditKey()` still opens the pre-filled typed form for event, task, list and note. A finished
+task keeps its full tap target, so a completed row is still editable in place.
+
+**5 · Dead code**
+
+Audited rather than assumed: a pass over every top-level declaration and every CSS class found
+**no unreachable function and no unused selector** — the `st-*` / `cst-*` / `tag-*` families are
+built by string concatenation and all live. What was actually removed was *redundant work*: the
+per-tap `innerHTML` rewrites above, the closed-dialog repaint, and one orphaned doc-comment
+that had drifted off `renderTimeline()` onto `timelineHour()`.
+
+**Shipped shell** — `sw.js` is bumped to `v12`.
+
+**Verification** — `healthcheck.js` §25 adds 17 checks: the in-place contract driven against a
+real seeded store (the record's slot, the board membership and the tasks-list membership all
+unmoved after a tick), the delegate proven free of `render()` / `leaveThen()`, the strikethrough
+and `--dim-done` read off the CSS, the archive button's label / count / wiring / absence,
+the filtered count adding up across `אישי` + `עסקי`, a full tick → file → count-down → restore →
+purge cycle including the outbox tombstone replacement, the batch undo restoring front-to-back
+through a live task between two filed ones, the ten-day countdown across seven points,
+`normArchive()` against five malformed rows, the start-up auto-purge, the `Sync.merge()` archive
+guard in both directions, the two drawers proven separate, `markEntering()` executed against a
+stub DOM in four staged paints, `setHTML` / `setText` counted for real writes, and a CSS parse
+that fails the build on any ungated hover transform.
 
 ### 7.4 General layout
 

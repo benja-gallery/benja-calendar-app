@@ -582,9 +582,9 @@ check('day view spans the full 24h and draws a current-time line', () => {
 
 check('calendar reads pass through the global category filter', () => {
   const eventsOn = (js.match(/function eventsOn[\s\S]*?\n  \}/) || [''])[0];
-  const tasksOn = (js.match(/function openTasksOn[\s\S]*?\n  \}/) || [''])[0];
+  const tasksOn = (js.match(/function boardTasksOn[\s\S]*?\n  \}/) || [''])[0];
   if (eventsOn.indexOf("pick('events')") === -1) return 'eventsOn() bypasses the filter';
-  if (tasksOn.indexOf("pick('tasks')") === -1) return 'openTasksOn() bypasses the filter';
+  if (tasksOn.indexOf("pick('tasks')") === -1) return 'boardTasksOn() bypasses the filter';
   return true;
 });
 
@@ -600,7 +600,9 @@ check('selected calendar view persists to localStorage', () => {
 /**
  * Run app.js in a bare sandbox — init() never fires, only window.APP is set.
  * `over.navigator` swaps in a device stub, which is how the Sprint 7 haptics
- * checks exercise a phone with a vibration motor and one without.
+ * checks exercise a phone with a vibration motor and one without; `over.document`
+ * swaps in a DOM stub, which is how the Sprint 9 checks drive markEntering()
+ * against real nodes and watch which of them are granted the entrance.
  */
 function loadApp(over) {
   const noop = () => {};
@@ -609,13 +611,13 @@ function loadApp(over) {
     setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop,
     navigator: (over && over.navigator) || {},
     location: { protocol: 'file:' },
-    document: {
+    document: Object.assign({
       readyState: 'loading',                 // keeps init() parked on DOMContentLoaded
       addEventListener: noop,
       querySelector: () => null,
       querySelectorAll: () => [],
       body: { style: {} }
-    }
+    }, (over && over.document) || {})
   };
   sandbox.window = sandbox;
   sandbox.self = sandbox;
@@ -957,24 +959,46 @@ check('task sub-tabs select exactly the right rows', () => {
   ];
   const ids = tab => rows.filter(r => T.taskMatchesTab(r, tab, today)).map(r => r.id).join('');
 
-  if (ids('today') !== 'a') return 'היום selected [' + ids('today') + '], expected [a]';
+  // Sprint 9 — a task ticked a moment ago is STILL due today and still belongs
+  // to היום: it stays listed, struck through, until it is filed into היסטוריה.
+  // 'd' is that task. This is the contract that keeps the row under the finger.
+  if (ids('today') !== 'ad') return 'היום selected [' + ids('today') + '], expected [ad]';
   if (ids('late') !== 'bc') return 'באיחור selected [' + ids('late') + '], expected [bc]';
   if (ids('waiting') !== 'c') return 'ממתין selected [' + ids('waiting') + '], expected [c]';
   if (ids('done') !== 'd') return 'הושלם selected [' + ids('done') + '], expected [d]';
   if (ids('all') !== 'abcdef') return 'הכל dropped rows: [' + ids('all') + ']';
-  // a cancelled task is neither open nor complete — it must not surface in a work tab
+  // ...but a CANCELLED task really is off the board, in every dated tab
   if (ids('late').indexOf('e') !== -1) return 'a cancelled task leaked into באיחור';
+  if (ids('today').indexOf('e') !== -1) return 'a cancelled task leaked into היום';
   return true;
 });
 
-check('task ordering puts open work first, then due date, then priority', () => {
+check('a completed task holds its rank, and only a cancelled one sinks', () => {
+  // Sprint 9 — 'done' used to sort to the bottom, which meant ticking a task
+  // re-sorted the list under the finger that ticked it. It now keeps the exact
+  // rank it had while open (same due date, same priority), and only a cancelled
+  // task drops to the end.
   const order = T.sortTasks([
-    { id: 'done', status: 'done', due: '2026-01-01', priority: 'high' },
+    { id: 'done', status: 'done', due: '2026-07-27', priority: 'high' },
     { id: 'low', status: 'todo', due: '2026-07-27', priority: 'low' },
     { id: 'high', status: 'todo', due: '2026-07-27', priority: 'high' },
+    { id: 'dropped', status: 'cancelled', due: '2026-01-01', priority: 'high' },
     { id: 'soon', status: 'waiting', due: '2026-07-01', priority: 'low' }
   ]).map(t => t.id).join(',');
-  return order === 'soon,high,low,done' ? true : 'order is ' + order;
+  // done and high share due+priority, so they are peers; cancelled is last
+  if (order !== 'soon,done,high,low,dropped') return 'order is ' + order;
+
+  // ...and ticking a task must not change where it sits, which is the whole point
+  const open = [
+    { id: 'x', status: 'todo', due: '2026-07-27', priority: 'medium' },
+    { id: 'y', status: 'todo', due: '2026-07-27', priority: 'medium' },
+    { id: 'z', status: 'todo', due: '2026-07-28', priority: 'high' }
+  ];
+  const before = T.sortTasks(open).map(t => t.id).join(',');
+  open[1].status = 'done';
+  const after = T.sortTasks(open).map(t => t.id).join(',');
+  if (before !== after) return 'ticking a task re-sorted the list: ' + before + ' => ' + after;
+  return true;
 });
 
 check('notes: pinned float to the top, newest first inside each band', () => {
@@ -2768,7 +2792,9 @@ const CONTROLS = [
   // Waves 2–3: universal editing, the multi-select gate and the batch bar
   'row-edit', 'select-btn', 'batch-btn',
   // Sprint 8: the recycle bin pill
-  'trash-btn'
+  'trash-btn',
+  // Sprint 9: the batch-archive button
+  'archive-btn'
 ];
 
 /** chips that stay visually small and clear the floor with a hit expander */
@@ -3694,11 +3720,11 @@ check('the countdown never claims more time than an entry actually has', () => {
   if (!U.trashExpired(at(DAY * 10), now)) return 'an entry at exactly ten days was not expired';
 
   // and the sentence the mandate asks for, in all three of its shapes
-  if (U.trashCountdown(10).indexOf('יימחק לצמיתות בעוד 10 ימים') === -1) {
+  if (U.retentionCountdown(10).indexOf('יימחק לצמיתות בעוד 10 ימים') === -1) {
     return 'the countdown does not read "יימחק לצמיתות בעוד 10 ימים"';
   }
-  if (U.trashCountdown(1).indexOf('יום אחד') === -1) return 'the last day is not declined in Hebrew';
-  if (U.trashCountdown(0).indexOf('היום') === -1) return 'the final day says nothing';
+  if (U.retentionCountdown(1).indexOf('יום אחד') === -1) return 'the last day is not declined in Hebrew';
+  if (U.retentionCountdown(0).indexOf('היום') === -1) return 'the final day says nothing';
   return true;
 });
 
@@ -3949,10 +3975,560 @@ check('a card collapses and fades out instead of blinking away', () => {
   return true;
 });
 
-check('the service worker cache version was bumped for Sprint 8', () => {
+/* ========================================================================== */
+/* ====== 25. Sprint 9 — in-place completion, היסטוריה & the shake ========== */
+/* ========================================================================== */
+
+/* ---- 25a. the tick keeps the task exactly where it is ---- */
+
+check('ticking a task does not move it, hide it, or re-sort its list', () => {
+  const APP = loadApp(), U = APP.ui, T = APP.tasks, Store = APP.Store;
+  Store.load();
+
+  // an untimed task due today: it lives in "לביצוע היום" AND in the tasks list
+  const victim = Store.data.tasks.filter(t => t.due === APP.isoDate(new Date()) && !t.time)[0];
+  if (!victim) return 'the seeded store has no untimed task due today';
+
+  const boardBefore = U.recKeys('tasks', U.boardTasksToday());
+  const shownBefore = U.recKeys('tasks', U.shownTasks());
+  const slotBefore = Store.data.tasks.indexOf(victim);
+  if (boardBefore.indexOf('tasks:' + victim.id) === -1) return 'the task was not on the board to begin with';
+
+  T.toggleTaskDone(victim);
+  if (T.normStatus(victim.status) !== 'done') return 'the tick did not complete the task';
+
+  const boardAfter = U.recKeys('tasks', U.boardTasksToday());
+  const shownAfter = U.recKeys('tasks', U.shownTasks());
+
+  // the three things the mandate forbids: leaving the list, moving inside it,
+  // and forcing the container that holds it to be rebuilt
+  if (boardAfter.indexOf('tasks:' + victim.id) === -1) return 'the completed task left today\'s board';
+  if (!U.sameKeys(boardBefore, boardAfter)) {
+    return 'the board membership moved: ' + boardBefore.join(',') + ' => ' + boardAfter.join(',');
+  }
+  if (!U.sameKeys(shownBefore, shownAfter)) {
+    return 'the tasks list membership moved: ' + shownBefore.join(',') + ' => ' + shownAfter.join(',');
+  }
+  if (Store.data.tasks.indexOf(victim) !== slotBefore) return 'the record moved inside the store';
+
+  // sameKeys(before, after) === true is exactly what makes Patch.settle() pass
+  // `quiet` to the renderer, so no innerHTML is written and nothing flickers
+  return true;
+});
+
+check('the check circle commits in place — no render(), no leaveThen()', () => {
+  const branch = (js.match(/if \(el\.dataset\.toggle\) \{[\s\S]*?\n    \}/) || [''])[0];
+  if (!branch) return 'no toggle branch in the delegate';
+  if (branch.indexOf('Complete.run(') === -1) return 'the 400ms gesture was dropped';
+  if (branch.indexOf('Patch.apply(') === -1) return 'the tick no longer patches the row in place';
+  // a full render() or a collapse would be exactly the "moves / hides" the
+  // mandate forbids
+  if (/\brender\(\)/.test(branch)) return 'the tick still triggers a full repaint';
+  if (branch.indexOf('leaveThen(') !== -1) return 'the tick still collapses the card out of its list';
+  // filing is a separate, deliberate act — the tick must never reach the log
+  if (/archive(Done|Put)\(/.test(branch)) return 'the tick files the task instead of leaving it in place';
+  return true;
+});
+
+check('a completed task is drawn struck through and dimmed, in place', () => {
+  const rules = cssRules(css);
+  // the sweep (animated) hands off to the real text-decoration (settled)
+  const done = rules.filter(r => r.sel === '.row.is-done .row-title')[0];
+  if (!done || !/text-decoration:\s*line-through/.test(done.body)) {
+    return 'a finished title carries no line-through';
+  }
+  const dim = rules.filter(r => r.sel.indexOf('.row.is-done') !== -1 && /opacity:\s*var\(--dim-done\)/.test(r.body))[0];
+  if (!dim) return 'a finished card is not dimmed';
+  // "dim it SLIGHTLY" — a card the user can still read and still tap
+  const val = (css.match(/--dim-done:\s*\.?(\d*\.?\d+)/) || [])[1];
+  if (!val || parseFloat('0' + (val.startsWith('.') ? val : '.' + val)) < 0.4) {
+    return '--dim-done is ' + val + ' — a finished card is faded past legibility';
+  }
+  // and the row must still be a live target: universal edit reaches it
+  const leaving = rules.filter(r => r.sel.indexOf('.row.is-leaving') !== -1)[0];
+  if (leaving && /pointer-events:\s*none/.test(done.body)) return 'a finished card stops taking taps';
+  return true;
+});
+
+/* ---- 25b. the manual archive button ---- */
+
+check('the archive button is present, mandated-labelled and carries its count', () => {
+  const U = loadApp().ui;
+  if (U.ARCHIVE_LABEL !== 'העבר משימות שבוצעו להיסטוריה') {
+    return 'the button is labelled "' + U.ARCHIVE_LABEL + '", not the mandated sentence';
+  }
+  if (U.ARCHIVE_DAYS !== 10) return 'the log holds work for ' + U.ARCHIVE_DAYS + ' days, not 10';
+
+  const bar = U.archiveBarHTML(3);
+  if (bar.indexOf(U.ARCHIVE_LABEL) === -1) return 'the button does not carry its label';
+  if (bar.indexOf('>3<') === -1) return 'the button does not carry the count it promises to move';
+  if (bar.indexOf('data-action="archive-done"') === -1) return 'the button is not wired to the action';
+  if (bar.indexOf('btn-gold') === -1) return 'the primary action does not read as primary';
+
+  // it is painted everywhere a finger finishes a task, off one piece of state
+  ['id="archiveBarToday"', 'id="archiveBarTasks"'].forEach(id => {
+    if (html.indexOf(id) === -1) throw new Error('no archive bar at ' + id);
+  });
+  const paint = bodyOf(js, 'function renderArchiveBar(');
+  if (!paint) return 'no renderArchiveBar()';
+  if (paint.indexOf('#archiveBarToday') === -1 || paint.indexOf('#archiveBarTasks') === -1) {
+    return 'the two bars are not painted from the same state';
+  }
+  if (paint.indexOf('doneUnfiled()') === -1) return 'the count is not derived from the completed tasks';
+  if (paint.indexOf('box.hidden = !n') === -1) return 'the button stays on screen with nothing to do';
+  if (js.indexOf("if (el.dataset.action === 'archive-done')") === -1) {
+    return 'the archive action is not in the click delegate';
+  }
+  return true;
+});
+
+check('the pending count respects the global category filter', () => {
+  const APP = loadApp(), U = APP.ui, T = APP.tasks, Store = APP.Store;
+  Store.load();
+  Store.data.tasks.forEach(t => T.setTaskStatus(t, 'done'));
+
+  const all = U.doneUnfiled().length;
+  if (!all) return 'nothing was completed';
+
+  Store.data.prefs.filter = 'business';
+  const business = U.doneUnfiled().length;
+  Store.data.prefs.filter = 'personal';
+  const personal = U.doneUnfiled().length;
+  Store.data.prefs.filter = 'all';
+
+  if (business + personal !== all) {
+    return 'the filtered counts (' + business + '+' + personal + ') do not add up to ' + all;
+  }
+  if (business === all) return 'the count ignores the filter — it would move rows off screen';
+  return true;
+});
+
+/* ---- 25c. the archive move, executed ---- */
+
+check('the archive button files every completed task, with the slot it left', () => {
+  const APP = loadApp(), U = APP.ui, T = APP.tasks, Store = APP.Store;
+  Store.load();
+
+  const ids = Store.data.tasks.map(t => t.id);
+  if (ids.length < 3) return 'the seeded store is too small';
+
+  // tick the middle one only — the log must take exactly that, and nothing else
+  const victim = Store.data.tasks[1];
+  T.toggleTaskDone(victim);
+  Store.save();
+
+  const filed = U.archiveDone();
+  if (!filed) return 'the archive refused a completed task';
+  if (filed.count !== 1) return 'the archive moved ' + filed.count + ' tasks, not the 1 that was ticked';
+
+  if (Store.find('tasks', victim.id)) return 'the filed task never left its collection';
+  if (Store.data.tasks.length !== ids.length - 1) return 'the archive took a task it was not given';
+
+  const entry = U.archiveFind(victim.id);
+  if (!entry) return 'the filed task is not in the log';
+  if (entry.collection !== 'tasks') return 'the log forgot what it is holding';
+  if (entry.index !== 1) return 'the log recorded slot ' + entry.index + ', not 1';
+  if (U.archiveDaysLeft(entry) !== 10) return 'a fresh entry does not start at ten days';
+
+  // it is a distinct drawer: the bin must not have been touched
+  if (U.trashCount()) return 'archiving put ' + U.trashCount() + ' rows in the recycle bin';
+
+  // ...and the cloud already knows — the task leaving its collection is what
+  // queues the tombstone D1 writes into deleted_at
+  const op = Store.data.sync.queue.filter(o => o.id === victim.id && o.action === 'delete')[0];
+  if (!op) return 'the filing never reached the outbox as a tombstone';
+
+  // nothing left to file, and the button says so rather than acting
+  if (U.archiveDone()) return 'a second press filed something that was not there';
+  return true;
+});
+
+check('the archive log counts down over exactly ten days', () => {
+  const U = loadApp().ui;
+  const DAY = U.DAY_MS;
+  const now = 1800000000000;                 // a fixed clock — no wall time in a test
+  const at = d => ({ collection: 'tasks', id: 't', rec: {}, index: 0, archivedAt: now - d });
+
+  const cases = [
+    [0, 10, 'the moment it was filed'],
+    [DAY * 0.5, 10, 'half a day in'],
+    [DAY * 1, 9, 'one full day in'],
+    [DAY * 9, 1, 'the last day'],
+    [DAY * 9.99, 1, 'the last hour'],
+    [DAY * 10, 0, 'exactly ten days'],
+    [DAY * 12, 0, 'long past due']
+  ];
+  for (const [age, want, why] of cases) {
+    const got = U.archiveDaysLeft(at(age), now);
+    if (got !== want) return why + ': ' + got + ' days left, expected ' + want;
+  }
+  if (U.archiveExpired(at(DAY * 9.99), now)) return 'an entry with hours left was called expired';
+  if (!U.archiveExpired(at(DAY * 10), now)) return 'an entry at exactly ten days was not expired';
+
+  // both drawers read the same clock, so one sentence can serve both
+  if (U.retentionDaysLeft(now - DAY * 3, 10, now) !== 7) return 'the shared retention clock is wrong';
+  if (U.retentionCountdown(10).indexOf('יימחק לצמיתות בעוד 10 ימים') === -1) {
+    return 'the countdown sentence changed';
+  }
+  return true;
+});
+
+check('שחזר brings a filed task back into the exact slot it left', () => {
+  const APP = loadApp(), U = APP.ui, T = APP.tasks, Store = APP.Store, S = APP.sync;
+  Store.load();
+
+  const ids = Store.data.tasks.map(t => t.id);
+  const victim = Store.data.tasks[1];
+
+  // drain the outbox first, so the ops this test reads are its own
+  const batch = Store.data.sync.queue.slice();
+  S.Sync.settle(batch, { applied: batch.map(o => o.opId), rejected: [], changes: {}, cursor: '' });
+
+  T.toggleTaskDone(victim);
+  U.archiveDone();
+  U.Undo.commit();
+
+  const back = U.archiveRestore(victim.id);
+  if (!back) return 'the log refused to restore a live entry';
+  if (Store.data.tasks.map(t => t.id).join(',') !== ids.join(',')) {
+    return 'the restored task came back in the wrong slot';
+  }
+  if (U.archiveFind(victim.id)) return 'the entry stayed in the log after being restored';
+
+  // the restore must REPLACE the queued tombstone, or it would sync as a delete
+  const ops = Store.data.sync.queue.filter(o => o.id === victim.id);
+  if (ops.length !== 1) return 'the outbox holds ' + ops.length + ' ops for one task';
+  if (ops[0].action !== 'upsert') return 'the restored task would still sync as a deletion';
+
+  if (U.archiveRestore(victim.id)) return 'a second restore invented an entry';
+  return true;
+});
+
+check('one אחזר puts a whole archived batch back, front to back', () => {
+  const APP = loadApp(), U = APP.ui, T = APP.tasks, Store = APP.Store;
+  Store.load();
+
+  const ids = Store.data.tasks.map(t => t.id);
+  if (ids.length < 3) return 'the seeded store is too small';
+
+  // tick the first and the last, leaving a live task between them: restoring
+  // ascending is what puts each one back in its own slot instead of shifting
+  // the ones that follow it
+  T.toggleTaskDone(Store.data.tasks[0]);
+  T.toggleTaskDone(Store.data.tasks[ids.length - 1]);
+  const filed = U.archiveDone();
+  if (!filed || filed.count !== 2) return 'the batch filed ' + (filed && filed.count) + ' of 2';
+  if (U.archiveCount() !== 2) return 'the log holds ' + U.archiveCount() + ' of 2 tasks';
+  if (!U.Undo.has()) return 'the batch armed no undo';
+
+  U.Undo.fire();
+  if (U.archiveCount()) return 'the undo left entries behind in the log';
+  if (Store.data.tasks.map(t => t.id).join(',') !== ids.join(',')) {
+    return 'the batch came back out of order: ' + Store.data.tasks.map(t => t.id).join(',');
+  }
+  return true;
+});
+
+check('מחק לצמיתות in the log is final, and asks before it destroys', () => {
+  const APP = loadApp(), U = APP.ui, T = APP.tasks, Store = APP.Store;
+  Store.load();
+
+  const victim = Store.data.tasks[0];
+  T.toggleTaskDone(victim);
+  U.archiveDone();
+  if (!U.archiveFind(victim.id)) return 'the task never reached the log';
+
+  const gone = U.archivePurge(victim.id);
+  if (!gone) return 'the purge refused a live entry';
+  if (U.archiveFind(victim.id)) return 'the entry survived its own permanent deletion';
+  if (Store.find('tasks', victim.id)) return 'the task came back from a permanent deletion';
+  if (U.archiveRestore(victim.id)) return 'a purged task is still restorable';
+  if (U.archivePurge(victim.id)) return 'a second purge invented an entry';
+
+  // ...and it goes through the one door every destructive tap goes through
+  const door = bodyOf(js, 'function runArchiveAction(');
+  if (!door) return 'no runArchiveAction()';
+  if (door.indexOf('confirmDelete(') === -1) return 'מחק לצמיתות destroys without asking';
+  if (door.indexOf('archivePurge(') === -1) return 'the confirmed purge does not reach the log';
+  if (door.indexOf('archiveRestore(') === -1) return 'the log offers no way back';
+  if (js.indexOf('if (el.dataset.arch) {') === -1) return 'the log actions are not in the click delegate';
+  return true;
+});
+
+check('the log empties itself at start-up, before a single row is painted', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+  const DAY = U.DAY_MS;
+
+  const load = bodyOf(js, 'load: function ()');
+  if (!load || load.indexOf('purgeArchive()') === -1) return 'nothing purges the log at start-up';
+  if (load.indexOf('normArchive(') === -1) return 'a corrupt log would reach a render';
+
+  Store.data.archive = U.normArchive([
+    { collection: 'tasks', id: 'old', rec: { id: 'old', title: 'ישן' }, index: 0, archivedAt: Date.now() - DAY * 11 },
+    { collection: 'tasks', id: 'edge', rec: { id: 'edge', title: 'בדיוק' }, index: 0, archivedAt: Date.now() - DAY * 10 },
+    { collection: 'tasks', id: 'fresh', rec: { id: 'fresh', title: 'טרי' }, index: 0, archivedAt: Date.now() - DAY * 9 }
+  ]);
+  if (Store.data.archive.length !== 3) return 'normArchive dropped a valid entry';
+
+  const went = U.purgeArchive();
+  if (went !== 2) return 'the purge took ' + went + ' entries, not the 2 that were due';
+  if (U.archiveCount() !== 1) return 'the log holds ' + U.archiveCount() + ' entries after the purge';
+  if (!U.archiveFind('fresh')) return 'the purge took an entry that still had a day left';
+
+  // a log full of garbage is dropped rather than rendered
+  const clean = U.normArchive([
+    null, 'nope', { collection: 'tasks' }, { id: 'x', collection: 'notes', rec: {} },
+    { id: 'y', collection: 'tasks', rec: { id: 'y' } }                    // no stamp
+  ]);
+  if (clean.length !== 1) return 'normArchive kept ' + clean.length + ' of 5 malformed rows';
+  if (!(clean[0].archivedAt > 0)) return 'a stamp-less entry was not given one';
+  return true;
+});
+
+check('a stale cloud row cannot resurrect a task sitting in the log', () => {
+  const APP = loadApp(), U = APP.ui, T = APP.tasks, Store = APP.Store, S = APP.sync;
+  Store.load();
+
+  const victim = Store.data.tasks[0];
+  const row = S.toRow('tasks', victim);
+
+  T.toggleTaskDone(victim);
+  U.archiveDone();
+  U.Undo.commit();
+
+  // the server has not seen the tombstone yet and pushes the task back
+  row.updated_at = S.toISOStamp(Date.now() - 60000);
+  S.Sync.merge({ tasks: [row] });
+  if (Store.find('tasks', victim.id)) return 'a stale server copy walked back onto the board';
+  if (!U.archiveFind(victim.id)) return 'the log lost the entry it was holding';
+
+  // ...but a genuinely newer server copy means the task is alive again, and the
+  // log must step aside rather than keep offering to destroy it
+  row.updated_at = S.toISOStamp(Date.now() + 60000);
+  S.Sync.merge({ tasks: [row] });
+  if (!Store.find('tasks', victim.id)) return 'a newer server copy was blocked by the log';
+  if (U.archiveFind(victim.id)) return 'the task is live AND still purgeable from the log';
+  return true;
+});
+
+check('the log renders a countdown, a way back and a way out on every row', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+  const DAY = U.DAY_MS, now = Date.now();
+
+  Store.data.archive = U.normArchive([
+    { collection: 'tasks', id: 'a', rec: { id: 'a', title: 'ישן יותר', category: 'business' }, index: 0, archivedAt: now - DAY * 4 },
+    { collection: 'tasks', id: 'b', rec: { id: 'b', title: 'בוצע עכשיו', category: 'personal' }, index: 0, archivedAt: now }
+  ]);
+
+  const list = U.archiveList();
+  if (list[0].id !== 'b') return 'the log does not put the newest filing on top';
+
+  const row = U.archiveRow(list[0], now);
+  if (row.indexOf('בוצע עכשיו') === -1) return 'the row does not name the task';
+  if (row.indexOf('יימחק לצמיתות בעוד 10 ימים') === -1) return 'the row shows no countdown';
+  if (row.indexOf('data-arch="restore:b"') === -1) return 'the row offers no שחזר';
+  if (row.indexOf('data-arch="purge:b"') === -1) return 'the row offers no מחק לצמיתות';
+  if (row.indexOf('אישי') === -1) return 'the row drops the category (§0.2)';
+
+  // an entry in its last 48 hours reads as urgent, not as one more grey chip
+  const urgent = U.archiveRow(U.normArchive([
+    { collection: 'tasks', id: 'c', rec: { id: 'c', title: 'כמעט' }, index: 0, archivedAt: now - DAY * 9 }
+  ])[0], now);
+  if (urgent.indexOf('pr-high') === -1) return 'an entry about to be purged looks like any other';
+
+  if (html.indexOf('id="archiveList"') === -1) return 'no היסטוריה surface in the document';
+  if (html.indexOf('id="archiveMeta"') === -1) return 'the log carries no meta line';
+  if (js.indexOf("$('#archiveList')") === -1) return 'the log container is never painted';
+  return true;
+});
+
+check('היסטוריה and סל מחזור are two drawers, never one list', () => {
+  const APP = loadApp(), U = APP.ui, T = APP.tasks, Store = APP.Store;
+  Store.load();
+
+  // deleting reaches the bin only; archiving reaches the log only
+  U.softDelete('tasks', Store.data.tasks[0].id);
+  U.Undo.commit();
+  if (U.archiveCount()) return 'a deletion landed in the completed-tasks log';
+
+  const next = Store.data.tasks[0];
+  T.toggleTaskDone(next);
+  U.archiveDone();
+  U.Undo.commit();
+  if (U.trashCount() !== 1) return 'archiving changed what the recycle bin holds';
+  if (U.archiveCount() !== 1) return 'the filing did not reach the log';
+
+  // and they are separate persisted arrays, so emptying one cannot empty the other
+  if (Store.blank().archive === undefined) return 'the blank store has no archive';
+  if (!Array.isArray(Store.data.archive) || !Array.isArray(Store.data.trash)) {
+    return 'the two drawers are not two arrays';
+  }
+  if (js.indexOf('if (Array.isArray(parsed.archive)) d.archive = parsed.archive;') === -1) {
+    return 'the log is not hydrated from localStorage — it would not survive a reload';
+  }
+  return true;
+});
+
+/* ---- 25d. the shake: the entrance is opt-in, and repaints are quiet ---- */
+
+check('the entrance animation is gated, so a repaint cannot re-run it', () => {
+  const rules = cssRules(css);
+  const entering = rules.filter(r => /animation:\s*card-in/.test(r.body));
+  if (!entering.length) return 'nothing runs the entrance animation any more';
+  const ungated = entering.filter(r => r.sel.indexOf('.is-entering') === -1);
+  if (ungated.length) {
+    return 'card-in still runs unconditionally on: ' + ungated.map(r => r.sel).join(' | ');
+  }
+  // The class must be unreachable from markup, or the gate is decoration. Only
+  // markEntering() may grant it, so with comments stripped there must be
+  // exactly one mention of it in the whole file — that one classList.add.
+  const code = js.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const grants = (code.match(/is-entering/g) || []).length;
+  if (!grants) return 'nothing ever grants the entrance';
+  if (grants > 1) return 'is-entering is written in ' + grants + ' places — a markup builder emits it too';
+  if (code.indexOf("classList.add('is-entering')") === -1) {
+    return 'the entrance is not granted by markEntering()';
+  }
+  return true;
+});
+
+check('markEntering only animates a record that was not already on screen', () => {
+  // a stub DOM: three cards, and a querySelectorAll that reports whichever set
+  // the test has staged. This executes the real gate, classList and all.
+  const node = key => ({
+    dataset: { rec: key },
+    cls: [],
+    classList: { add(c) { this.owner.cls.push(c); } }
+  });
+  const make = key => { const n = node(key); n.classList.owner = n; return n; };
+
+  let staged = [];
+  const APP = loadApp({ document: { querySelectorAll: () => staged } });
+  const U = APP.ui;
+
+  // first paint: everything on screen is new and every card rises
+  staged = ['tasks:1', 'tasks:2'].map(make);
+  U.markEntering();
+  if (staged.some(n => n.cls.indexOf('is-entering') === -1)) return 'a first paint did not animate';
+
+  // second paint: the SAME records, rebuilt in place — this is the repaint that
+  // used to shake, and not one of them may move
+  staged = ['tasks:1', 'tasks:2'].map(make);
+  U.markEntering();
+  if (staged.some(n => n.cls.length)) return 'a repaint of the same records re-ran the entrance';
+
+  // a genuinely new record arriving beside them animates, the neighbours do not
+  staged = ['tasks:1', 'tasks:2', 'tasks:3'].map(make);
+  U.markEntering();
+  if (staged[2].cls.indexOf('is-entering') === -1) return 'a genuinely new card did not animate';
+  if (staged[0].cls.length || staged[1].cls.length) return 'an arriving card dragged its neighbours with it';
+
+  // a record that left and came back is new again
+  staged = ['tasks:3'].map(make);
+  U.markEntering();
+  staged = ['tasks:1', 'tasks:3'].map(make);
+  U.markEntering();
+  if (staged[0].cls.indexOf('is-entering') === -1) return 'a returning card did not animate';
+  return true;
+});
+
+check('the derived surfaces are only rewritten when they actually changed', () => {
+  const U = loadApp().ui;
+
+  // setHTML / setText are the guard: an identical assignment tears down and
+  // rebuilds every child node, restarting animations and dropping focus
+  let writes = 0;
+  const el = { _h: '', get innerHTML() { return this._h; }, set innerHTML(v) { writes++; this._h = v; } };
+  U.setHTML(el, '<b>1</b>');
+  U.setHTML(el, '<b>1</b>');
+  U.setHTML(el, '<b>2</b>');
+  if (writes !== 2) return 'setHTML wrote ' + writes + ' times for 2 distinct values';
+
+  let texts = 0;
+  const tx = { _t: '', get textContent() { return this._t; }, set textContent(v) { texts++; this._t = v; } };
+  U.setText(tx, 'a'); U.setText(tx, 'a'); U.setText(tx, 'b');
+  if (texts !== 2) return 'setText wrote ' + texts + ' times for 2 distinct values';
+
+  // ...and the surfaces Patch.settle() touches on EVERY tap actually use them
+  const settle = bodyOf(js, 'settle: function ()');
+  if (!settle) return 'no Patch.settle()';
+  ['renderSummary()', 'renderAttention()', 'renderArchiveBar()', 'markEntering()'].forEach(fn => {
+    if (settle.indexOf(fn) === -1) throw new Error('settle() no longer calls ' + fn);
+  });
+  const att = bodyOf(js, 'function renderAttention(');
+  if (att.indexOf('setHTML(') === -1) return 'the attention strip is rebuilt on every tap';
+  const sum = bodyOf(js, 'function renderSummary(');
+  if (sum.indexOf('setHTML(') === -1 || sum.indexOf('setText(') === -1) {
+    return 'the summary is rebuilt on every tap';
+  }
+  const bar = bodyOf(js, 'function renderArchiveBar(');
+  if (bar.indexOf('box.innerHTML !== next') === -1) return 'the archive bar is rebuilt on every tap';
+  return true;
+});
+
+check('a closed dialog is not repainted behind the user\'s back', () => {
+  const door = bodyOf(js, 'function renderTrash(');
+  if (!door) return 'no renderTrash()';
+  // the badge is cheap and must stay current; the LIST is a dialog nobody can
+  // see, and rebuilding it cost a full innerHTML on every tap in the app
+  if (door.indexOf("$('#trashCount')") === -1) return 'the bin badge is no longer refreshed';
+  if (door.indexOf("$('#trashSheet')") === -1) return 'the bin list is rebuilt while the sheet is closed';
+  if (!/sheet\.hidden/.test(door)) return 'the paint is not gated on the sheet being open';
+  return true;
+});
+
+check('every element app.js paints actually exists in the document', () => {
+  // a renderer that dereferences $('#typo') throws on the spot and takes the
+  // whole paint with it — and no static check above would have noticed
+  const ids = new Set();
+  const re = /\$\('#([A-Za-z][\w-]*)'\)/g;
+  let m;
+  while ((m = re.exec(js))) ids.add(m[1]);
+  if (ids.size < 40) return 'only ' + ids.size + ' ids found — the scan is not seeing app.js';
+
+  const missing = [...ids].filter(id => html.indexOf('id="' + id + '"') === -1);
+  if (missing.length) return 'app.js paints ids the document does not ship: ' + missing.join(', ');
+
+  // and the Sprint 9 surfaces specifically. The two bars are selected through a
+  // variable — one renderer, two targets — so look for the selector literal
+  // rather than the $('#id') form.
+  ['archiveBarToday', 'archiveBarTasks', 'archiveList', 'archiveMeta'].forEach(id => {
+    if (html.indexOf('id="' + id + '"') === -1) throw new Error('the document ships no #' + id);
+    if (js.indexOf("'#" + id + "'") === -1) throw new Error('nothing paints #' + id);
+  });
+  return true;
+});
+
+check('no hover lift survives outside a fine pointer', () => {
+  const gate = '@media (hover:hover) and (pointer:fine)';
+  if (css.indexOf(gate) === -1) return 'no hover-capable media query';
+
+  // strip the gated block, then no :hover rule left may move anything: on a
+  // touch screen :hover latches after a tap and leaves the card out of place
+  const clean = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  const at = clean.indexOf(gate);
+  const before = clean.slice(0, at);
+  const after = clean.slice(clean.indexOf('}', clean.indexOf('}', at) + 1) + 1);
+  const offenders = [];
+  const re = /([^{}@]+)\{([^{}]*)\}/g;
+  let m;
+  while ((m = re.exec(before + after))) {
+    if (m[1].indexOf(':hover') !== -1 && /transform:\s*(?!none)/.test(m[2])) {
+      offenders.push(m[1].trim().replace(/\s+/g, ' '));
+    }
+  }
+  if (offenders.length) return 'ungated hover transform on: ' + offenders.join(' | ');
+  return true;
+});
+
+/* ---- 25e. the shipped shell ---- */
+
+check('the service worker cache version was bumped for Sprint 9', () => {
   const m = read('sw.js').match(/CACHE_VERSION\s*=\s*'v(\d+)'/);
   if (!m) return 'no CACHE_VERSION';
-  if (parseInt(m[1], 10) < 11) return 'the cache is still v' + m[1] + ' — returning phones keep the old shell';
+  if (parseInt(m[1], 10) < 12) return 'the cache is still v' + m[1] + ' — returning phones keep the old shell';
   return true;
 });
 
@@ -3960,6 +4536,16 @@ check('PROJECT_PLAN documents Sprint 8', () => {
   const required = [
     'Sprint 8', 'סל מחזור', 'Complete.plan', 'stroke-dashoffset', 'HAPTIC_CHECK',
     'trashRestore', 'purgeTrash', 'tapEditKey', 'אישור מחיקה', 'v11'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+check('PROJECT_PLAN documents Sprint 9', () => {
+  const required = [
+    'Sprint 9', 'היסטוריה', 'is-entering', 'markEntering', 'archiveDone',
+    'awaitingArchive', 'purgeArchive', 'boardTasksOn', 'setHTML', 'v12',
+    'העבר משימות שבוצעו להיסטוריה'
   ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;

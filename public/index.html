@@ -137,6 +137,10 @@
           <span class="block-meta" id="todoMeta"></span>
         </div>
         <div class="todo card" id="todoToday"></div>
+        <!-- Sprint 9 — ticking a task leaves it in place, struck through; THIS
+             is what files it. Painted by renderArchiveBar(), absent while there
+             is nothing finished to move. -->
+        <div class="archive-bar" id="archiveBarToday" hidden></div>
       </section>
 
       <div class="scroll-tail"></div>
@@ -192,6 +196,7 @@
           <span class="block-meta" id="tasksMeta"></span>
         </div>
         <div class="card" id="tasksList"></div>
+        <div class="archive-bar" id="archiveBarTasks" hidden></div>
       </div>
 
       <div class="block">
@@ -208,6 +213,22 @@
           <span class="block-meta" id="notesMeta"></span>
         </div>
         <div class="card" id="notesList"></div>
+      </div>
+
+      <!-- ---- היסטוריה — the completed-tasks log (Sprint 9) ----
+           Where finished work waits out its ten days. Deliberately NOT סל
+           מחזור: restoring something you completed must not read as undoing a
+           deletion, and emptying the bin must not throw away a month of it. -->
+      <div class="block">
+        <div class="block-head">
+          <h2>✓ בוצעו — היסטוריה</h2>
+          <span class="block-meta" id="archiveMeta"></span>
+        </div>
+        <p class="trash-hint">
+          כל משימה שתעביר לכאן ממתינה 10 ימים. אפשר לשחזר אותה לרשימה שממנה הגיעה,
+          או למחוק אותה לצמיתות כבר עכשיו. אחרי 10 ימים היא נמחקת אוטומטית.
+        </p>
+        <div class="card trash-list" id="archiveList"></div>
       </div>
 
       <div class="scroll-tail"></div>
