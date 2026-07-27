@@ -1,5 +1,5 @@
 /* ==========================================================================
-   sw.js — service worker for "יומן חכם — Benja"
+   sw.js — service worker for "מה הלו"ז — Benja"
 
    Responsibilities
    1. Pre-cache the core shell so the app opens instantly and works offline.
@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v6';   // Sprint 6 — Google Calendar two-way sync, public/ build dir
+var CACHE_VERSION = 'v7';   // Sprint 7 — app renamed to מה הלו"ז, branding refresh
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */

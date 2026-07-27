@@ -390,8 +390,8 @@ function pngSize(file) {
 check('manifest.json is valid JSON with the mandated identity', () => {
   const m = JSON.parse(manifestRaw);
   const want = {
-    name: 'יומן חכם — Benja',
-    short_name: 'יומן',
+    name: 'מה הלו"ז — Benja',
+    short_name: 'מה הלו"ז',
     start_url: './index.html',
     display: 'standalone',
     background_color: '#12161f',
