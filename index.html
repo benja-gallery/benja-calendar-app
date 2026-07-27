@@ -111,13 +111,33 @@
 
     <!-- ---------- VIEW: CALENDAR ---------- -->
     <section class="view" id="view-calendar" aria-label="יומן">
-      <div class="block">
-        <div class="block-head">
-          <h2>הימים הקרובים</h2>
+
+      <!-- view switcher: day / week / month / agenda -->
+      <div class="segmented cal-views" role="tablist" aria-label="בחירת תצוגת יומן">
+        <button class="seg"           role="tab" aria-selected="false" data-calview="day"    type="button">יום</button>
+        <button class="seg"           role="tab" aria-selected="false" data-calview="week"   type="button">שבוע</button>
+        <button class="seg is-active" role="tab" aria-selected="true"  data-calview="month"  type="button">חודש</button>
+        <button class="seg"           role="tab" aria-selected="false" data-calview="agenda" type="button">סדר יום</button>
+      </div>
+
+      <!-- period navigation — RTL: "הבא" sits on the left, "הקודם" on the right -->
+      <div class="cal-nav">
+        <button class="cal-arrow" data-calnav="prev" type="button" aria-label="התקופה הקודמת">›</button>
+        <div class="cal-range">
+          <b id="calRange"></b>
           <span class="block-meta" id="calendarMeta"></span>
         </div>
-        <div id="calendarList"></div>
+        <button class="cal-arrow" data-calnav="next"  type="button" aria-label="התקופה הבאה">‹</button>
+        <button class="cal-today" data-calnav="today" type="button">היום</button>
       </div>
+
+      <div class="cal-stage" id="calStage">
+        <div class="cal-pane" id="calMonth"  hidden></div>
+        <div class="cal-pane" id="calWeek"   hidden></div>
+        <div class="cal-pane" id="calDay"    hidden></div>
+        <div class="cal-pane" id="calAgenda" hidden></div>
+      </div>
+
       <div class="scroll-tail"></div>
     </section>
 

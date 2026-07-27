@@ -492,6 +492,199 @@ check('notification state is persisted and never double-fires', () => {
   return true;
 });
 
+/* ============================ 15. calendar engine (Sprint 2) ============== */
+
+/* ---- 15a. structure: four views, navigation, contextual creation ---- */
+
+check('calendar exposes all four views as selectable tabs', () => {
+  ['day', 'week', 'month', 'agenda'].forEach(v => {
+    if (html.indexOf('data-calview="' + v + '"') === -1) throw new Error('no tab for ' + v);
+  });
+  const labels = ['יום', 'שבוע', 'חודש', 'סדר יום'];
+  const missing = labels.filter(l => html.indexOf('>' + l + '<') === -1);
+  if (missing.length) return 'missing tab labels: ' + missing.join(', ');
+  if (!/CAL_VIEWS = \['day', 'week', 'month', 'agenda'\]/.test(js)) return 'CAL_VIEWS vocabulary changed';
+  return true;
+});
+
+check('every calendar pane exists in the DOM and has a renderer', () => {
+  ['calMonth', 'calWeek', 'calDay', 'calAgenda'].forEach(id => {
+    if (html.indexOf('id="' + id + '"') === -1) throw new Error('no #' + id + ' pane');
+    if (js.indexOf("$('#" + id + "')") === -1) throw new Error('#' + id + ' is never painted');
+  });
+  ['renderMonth', 'renderWeek', 'renderDay', 'renderAgenda'].forEach(fn => {
+    if (js.indexOf(fn + ':') === -1) throw new Error('no Cal.' + fn + '()');
+  });
+  return true;
+});
+
+check('navigation engine: prev / next / today / swipe', () => {
+  ['prev', 'next', 'today'].forEach(n => {
+    if (html.indexOf('data-calnav="' + n + '"') === -1) throw new Error('no ' + n + ' control');
+  });
+  if (html.indexOf('>היום</button>') === -1) return 'quick-jump "היום" copy missing';
+  if (js.indexOf("'touchstart'") === -1 || js.indexOf("'touchend'") === -1) return 'no swipe navigation';
+  if (!/touch-action:\s*pan-y/.test(css)) return 'swipe fights native vertical scrolling';
+  if (!/step: function \(dir\)/.test(js)) return 'no period stepper';
+  return true;
+});
+
+check('tapping a day cell or time slot pre-fills Master Add', () => {
+  if (!/data-calslot="/.test(js)) return 'cells carry no slot payload';
+  if (js.indexOf('[data-calslot]') === -1) return 'slot taps are not delegated';
+  if (!/function applyPrefill/.test(js)) return 'no prefill applier';
+  if (js.indexOf('openTypeSheet({ date: slot[0], start: slot[1]') === -1) {
+    return 'a tapped slot does not open Master Add with its date/time';
+  }
+  return true;
+});
+
+check('category dots carry both category colours from tokens', () => {
+  if (!/\.dot-business\{\s*background:var\(--business\)/.test(css)) return 'no business dot colour';
+  if (!/\.dot-personal\{\s*background:var\(--personal\)/.test(css)) return 'no personal dot colour';
+  if (js.indexOf("'<span class=\"dot dot-' + r.category") === -1) return 'month cells render no category dots';
+  if (!/legend: function/.test(js)) return 'dots are unlabelled (colour as sole carrier)';
+  return true;
+});
+
+check('day view spans the full 24h and draws a current-time line', () => {
+  if (!/for \(var h = 0; h < 24; h\+\+\)/.test(js)) return 'day grid is not 00:00–23:59';
+  if (js.indexOf('dv-now') === -1) return 'no current-time indicator';
+  if (js.indexOf("iso === todayISO()") === -1) return 'now-line is drawn on days that are not today';
+  if (!/HOUR_PX = 56/.test(js) || !/--hour-h:\s*56px/.test(css)) return 'row height drifted between JS and CSS';
+  return true;
+});
+
+check('calendar reads pass through the global category filter', () => {
+  const eventsOn = (js.match(/function eventsOn[\s\S]*?\n  \}/) || [''])[0];
+  const tasksOn = (js.match(/function openTasksOn[\s\S]*?\n  \}/) || [''])[0];
+  if (eventsOn.indexOf("pick('events')") === -1) return 'eventsOn() bypasses the filter';
+  if (tasksOn.indexOf("pick('tasks')") === -1) return 'openTasksOn() bypasses the filter';
+  return true;
+});
+
+check('selected calendar view persists to localStorage', () => {
+  if (!/calView: 'month'/.test(js)) return 'no calView default in the blank store';
+  if (!/CAL_VIEWS\.indexOf\(d\.prefs\.calView\) === -1/.test(js)) return 'calView is not normalised on load';
+  if (!/prefs\.calView = v;\s*\n\s*Store\.save\(\);/.test(js)) return 'view choice is never saved';
+  return true;
+});
+
+/* ---- 15b. date math, executed for real ---- */
+
+/** run app.js in a bare sandbox — init() never fires, only window.APP is set */
+function loadApp() {
+  const noop = () => {};
+  const sandbox = {
+    console, Math, JSON, Date, Promise, RegExp, Error, isNaN, parseInt, parseFloat,
+    setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop,
+    navigator: {},
+    location: { protocol: 'file:' },
+    document: {
+      readyState: 'loading',                 // keeps init() parked on DOMContentLoaded
+      addEventListener: noop,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      body: { style: {} }
+    }
+  };
+  sandbox.window = sandbox;
+  sandbox.self = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(js, sandbox, { filename: 'app.js' });
+  return sandbox.APP;
+}
+
+let D = null;
+
+check('app.js exports its date engine without touching the DOM', () => {
+  const APP = loadApp();
+  if (!APP) return 'window.APP was never set';
+  if (!APP.Cal) return 'no APP.Cal';
+  D = APP.dates;
+  if (!D) return 'no APP.dates export';
+  ['addMonthsISO', 'startOfWeekISO', 'weekDays', 'monthMatrix',
+    'agendaRange', 'minutesOf', 'shiftTime', 'layoutBlocks'].forEach(k => {
+      if (typeof D[k] !== 'function') throw new Error('APP.dates.' + k + ' is missing');
+    });
+  return true;
+});
+
+check('date math: month stepping clamps into short months', () => {
+  if (D.addMonthsISO('2026-01-31', 1) !== '2026-02-28') return 'Jan 31 +1m = ' + D.addMonthsISO('2026-01-31', 1);
+  if (D.addMonthsISO('2024-01-31', 1) !== '2024-02-29') return 'leap February broken';
+  if (D.addMonthsISO('2026-03-31', -1) !== '2026-02-28') return 'backward clamp broken';
+  if (D.addMonthsISO('2026-12-15', 1) !== '2027-01-15') return 'forward year rollover broken';
+  if (D.addMonthsISO('2026-01-15', -1) !== '2025-12-15') return 'backward year rollover broken';
+  if (D.addMonthsISO('2026-07-27', 0) !== '2026-07-27') return 'zero step is not identity';
+  return true;
+});
+
+check('date math: weeks run Sunday → Saturday (he-IL)', () => {
+  if (D.startOfWeekISO('2026-07-27') !== '2026-07-26') return 'Monday resolves to the wrong week start';
+  if (D.startOfWeekISO('2026-07-26') !== '2026-07-26') return 'a Sunday must be its own week start';
+  if (D.startOfWeekISO('2026-08-01') !== '2026-07-26') return 'Saturday leaks into the next week';
+  const w = D.weekDays('2026-07-29');
+  if (w.length !== 7) return 'week has ' + w.length + ' days';
+  if (w[0] !== '2026-07-26' || w[6] !== '2026-08-01') return 'week spans ' + w[0] + '→' + w[6];
+  return true;
+});
+
+check('date math: month matrix is whole weeks with no phantom row', () => {
+  const jul = D.monthMatrix('2026-07-15');
+  if (jul.length % 7 !== 0) return 'not whole weeks: ' + jul.length;
+  if (jul.indexOf('2026-07-01') === -1 || jul.indexOf('2026-07-31') === -1) return 'month days missing';
+  if (D.startOfWeekISO(jul[0]) !== jul[0]) return 'grid does not start on a week boundary';
+  // February 2026 starts on a Sunday and has 28 days => exactly 4 rows, no filler week
+  const feb = D.monthMatrix('2026-02-10');
+  if (feb.length !== 28) return 'Feb 2026 grid is ' + feb.length + ' cells, expected 28';
+  if (feb[0] !== '2026-02-01' || feb[27] !== '2026-02-28') return 'Feb grid spans ' + feb[0] + '→' + feb[27];
+  // a month starting mid-week still covers its last day
+  const may = D.monthMatrix('2026-05-01');
+  if (may.indexOf('2026-05-31') === -1) return 'last day of May fell outside the grid';
+  return true;
+});
+
+check('date math: day stepping crosses months and years', () => {
+  if (D.addDaysISO('2026-07-31', 1) !== '2026-08-01') return 'month rollover broken';
+  if (D.addDaysISO('2026-01-01', -1) !== '2025-12-31') return 'year rollover broken';
+  if (D.addDaysISO('2024-02-28', 1) !== '2024-02-29') return 'leap day skipped';
+  const r = D.agendaRange('2026-07-27', 30);
+  if (r.from !== '2026-07-27' || r.to !== '2026-08-25') return 'agenda window is ' + r.from + '→' + r.to;
+  return true;
+});
+
+check('time math: minutes parse safely and shift correctly', () => {
+  if (D.minutesOf('09:30') !== 570) return '09:30 => ' + D.minutesOf('09:30');
+  if (D.minutesOf('00:00') !== 0) return 'midnight is not 0';
+  if (D.minutesOf('23:59') !== 1439) return 'end of day is wrong';
+  if (D.minutesOf('') !== null || D.minutesOf('לא') !== null || D.minutesOf(undefined) !== null) {
+    return 'garbage time is not rejected';
+  }
+  if (D.shiftTime('09:00', 60) !== '10:00') return '+1h broken';
+  if (D.shiftTime('23:30', 60) !== '00:30') return 'midnight wrap broken';
+  if (D.shiftTime('', 60) !== '') return 'shifting a missing time must stay empty';
+  return true;
+});
+
+check('day view: overlapping events share lanes instead of hiding', () => {
+  const out = D.layoutBlocks([
+    { s: 540, e: 600 },   // 09:00–10:00
+    { s: 570, e: 630 },   // 09:30–10:30  overlaps the first
+    { s: 720, e: 780 }    // 12:00–13:00  separate cluster
+  ]);
+  if (out.length !== 3) return 'lost a block: ' + out.length;
+  const overlap = out.filter(b => b.s < 700);
+  if (overlap.some(b => b.lanes !== 2)) return 'overlapping pair is not split into 2 lanes';
+  if (overlap[0].lane === overlap[1].lane) return 'overlapping events share a lane';
+  const alone = out.filter(b => b.s === 720)[0];
+  if (alone.lanes !== 1 || alone.lane !== 0) return 'a lone event was needlessly narrowed';
+  // back-to-back is not an overlap
+  const touching = D.layoutBlocks([{ s: 540, e: 600 }, { s: 600, e: 660 }]);
+  if (touching.some(b => b.lanes !== 1)) return 'touching events were treated as overlapping';
+  return true;
+});
+
 /* --------------------------------------------------------------- report */
 
 report();

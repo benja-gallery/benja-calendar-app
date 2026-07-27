@@ -35,6 +35,14 @@
   var HE_DAYS = ['ראשון', 'שני', 'שלישי', 'רביעי', 'חמישי', 'שישי', 'שבת'];
   var HE_MONTHS = ['ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני',
     'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר'];
+  var DOW_SHORT = ['א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ש'];
+
+  /* --- calendar engine (Sprint 2) --- */
+  var CAL_VIEWS = ['day', 'week', 'month', 'agenda'];
+  var CAL_LABEL = { day: 'תצוגת יום', week: 'תצוגת שבוע', month: 'תצוגת חודש', agenda: 'סדר יום' };
+  var HOUR_PX = 56;      // day-view hour row height — mirrors --hour-h in styles.css
+  var AGENDA_DAYS = 30;  // rolling agenda window
+  var SWIPE_MIN = 55;    // px before a horizontal drag counts as navigation
 
   /* ------------------------------------------------------------- utilities */
 
@@ -75,10 +83,112 @@
     return isoDate(d);
   }
 
+  /* --- calendar date math — all local, never UTC (PROJECT_PLAN §3) --- */
+
+  function startOfMonthISO(iso) {
+    var d = parseISO(iso) || new Date();
+    return isoDate(new Date(d.getFullYear(), d.getMonth(), 1));
+  }
+
+  function daysInMonth(year, month) {
+    return new Date(year, month + 1, 0).getDate();     // day 0 of next month
+  }
+
+  /** Month stepping clamps into short months: 31/01 +1m => 28/02 (29 on a leap year). */
+  function addMonthsISO(iso, n) {
+    var d = parseISO(iso) || new Date();
+    var y = d.getFullYear(), m = d.getMonth() + n;
+    var target = new Date(y, m, 1);
+    var day = Math.min(d.getDate(), daysInMonth(target.getFullYear(), target.getMonth()));
+    return isoDate(new Date(target.getFullYear(), target.getMonth(), day));
+  }
+
+  /** he-IL weeks start on Sunday (PROJECT_PLAN §3.5). */
+  function startOfWeekISO(iso) {
+    var d = parseISO(iso) || new Date();
+    return addDaysISO(isoDate(d), -d.getDay());
+  }
+
+  function weekDays(iso) {
+    var start = startOfWeekISO(iso), out = [];
+    for (var i = 0; i < 7; i++) out.push(addDaysISO(start, i));
+    return out;
+  }
+
+  /** Whole Sunday→Saturday weeks covering the anchor's month, and nothing more. */
+  function monthMatrix(iso) {
+    var first = startOfMonthISO(iso);
+    var d = parseISO(first);
+    var last = isoDate(new Date(d.getFullYear(), d.getMonth(), daysInMonth(d.getFullYear(), d.getMonth())));
+    var cursor = startOfWeekISO(first);
+    var out = [];
+    while (cursor <= last || out.length % 7 !== 0) {
+      out.push(cursor);
+      cursor = addDaysISO(cursor, 1);
+    }
+    return out;
+  }
+
+  function agendaRange(iso, days) {
+    return { from: iso, to: addDaysISO(iso, (days || AGENDA_DAYS) - 1) };
+  }
+
+  /** minutes since midnight, or null when there is no usable time */
+  function minutesOf(time) {
+    if (!time || !/^\d{1,2}:\d{2}$/.test(time)) return null;
+    var p = time.split(':');
+    var m = parseInt(p[0], 10) * 60 + parseInt(p[1], 10);
+    return (m >= 0 && m <= 1440) ? m : null;
+  }
+
+  function shiftTime(time, mins) {
+    var m = minutesOf(time);
+    if (m === null) return '';
+    m = (m + mins) % 1440;
+    if (m < 0) m += 1440;
+    return pad2(Math.floor(m / 60)) + ':' + pad2(m % 60);
+  }
+
+  /**
+   * Side-by-side placement for overlapping day-view blocks.
+   * Items overlapping in time form a cluster; each gets the first free lane and
+   * every member of the cluster is widened to 1/lanes so nothing is hidden.
+   */
+  function layoutBlocks(items) {
+    var sorted = items.slice().sort(function (a, b) { return (a.s - b.s) || (a.e - b.e); });
+    var out = [], cluster = [], clusterEnd = -1;
+
+    function flush() {
+      if (!cluster.length) return;
+      var lanes = [];
+      cluster.forEach(function (item) {
+        var i = 0;
+        for (; i < lanes.length; i++) { if (lanes[i] <= item.s) break; }
+        lanes[i] = item.e;
+        item.lane = i;
+      });
+      cluster.forEach(function (item) { item.lanes = lanes.length; out.push(item); });
+      cluster = [];
+    }
+
+    sorted.forEach(function (item) {
+      if (cluster.length && item.s >= clusterEnd) flush();
+      cluster.push(item);
+      clusterEnd = cluster.length === 1 ? item.e : Math.max(clusterEnd, item.e);
+    });
+    flush();
+    return out;
+  }
+
   function hebDate(iso) {
     var d = parseISO(iso);
     if (!d) return '';
     return 'יום ' + HE_DAYS[d.getDay()] + ', ' + d.getDate() + ' ב' + HE_MONTHS[d.getMonth()];
+  }
+
+  function fmtDayMon(iso) {
+    var d = parseISO(iso);
+    return d ? d.getDate() + ' ב' + HE_MONTHS[d.getMonth()] : '';
   }
 
   function relDay(iso) {
@@ -116,7 +226,7 @@
       return {
         version: 1,
         owner: OWNER,
-        prefs: { filter: 'all', notify: { on: false, lead: 10 }, fired: {} },
+        prefs: { filter: 'all', calView: 'month', notify: { on: false, lead: 10 }, fired: {} },
         events: [], tasks: [], lists: [], notes: [], clients: [],
         seeded: false
       };
@@ -150,6 +260,9 @@
         });
       });
       if (['all', 'personal', 'business'].indexOf(d.prefs.filter) === -1) d.prefs.filter = 'all';
+
+      // the selected calendar view survives a reload; anything unknown falls back
+      if (CAL_VIEWS.indexOf(d.prefs.calView) === -1) d.prefs.calView = 'month';
 
       // reminder prefs may be absent in a store written before the PWA upgrade
       if (!d.prefs.notify || typeof d.prefs.notify !== 'object') d.prefs.notify = { on: false, lead: 10 };
@@ -412,41 +525,361 @@
       '</div>';
   }
 
-  /* ------------------------------------------------------- render: calendar */
+  /* ==========================================================================
+     render: calendar engine — day / week / month / agenda
 
-  function renderCalendar() {
-    var t = todayISO();
-    var upcoming = pick('events')
-      .filter(function (e) { return e.date >= t; })
-      .sort(function (a, b) {
-        return a.date === b.date
-          ? timeToMinutes(a.start) - timeToMinutes(b.start)
-          : (a.date < b.date ? -1 : 1);
+     One anchor date drives all four views. Every read still goes through
+     pick(), so the global category filter (§0.3) holds inside the calendar
+     exactly as it does everywhere else.
+     ========================================================================== */
+
+  function eventsOn(iso) {
+    return pick('events')
+      .filter(function (e) { return e.date === iso; })
+      .sort(function (a, b) { return timeToMinutes(a.start) - timeToMinutes(b.start); });
+  }
+
+  function openTasksOn(iso) {
+    return pick('tasks')
+      .filter(function (x) { return !x.done && x.due === iso; })
+      .sort(function (a, b) { return timeToMinutes(a.time) - timeToMinutes(b.time); });
+  }
+
+  /** "2026-07-27|09:00" — the payload a tapped cell hands to Master Add */
+  function slotAttr(iso, time) {
+    return ' data-calslot="' + iso + '|' + (time || '') + '"';
+  }
+
+  var Cal = {
+    view: 'month',
+    anchor: todayISO(),
+    tickTimer: null,
+
+    /* ---------------------------------------------------------- navigation */
+
+    setView: function (v) {
+      if (CAL_VIEWS.indexOf(v) === -1) return;
+      this.view = v;
+      Store.data.prefs.calView = v;
+      Store.save();
+      this.render();
+    },
+
+    step: function (dir) {
+      if (this.view === 'month') this.anchor = addMonthsISO(this.anchor, dir);
+      else if (this.view === 'week') this.anchor = addDaysISO(this.anchor, 7 * dir);
+      else if (this.view === 'agenda') this.anchor = addDaysISO(this.anchor, AGENDA_DAYS * dir);
+      else this.anchor = addDaysISO(this.anchor, dir);
+      this.render();
+    },
+
+    nav: function (what) {
+      if (what === 'today') {
+        this.anchor = todayISO();
+        this.render();
+        return;
+      }
+      this.step(what === 'next' ? 1 : -1);
+    },
+
+    /* ------------------------------------------------------------- labels */
+
+    label: function () {
+      var d = parseISO(this.anchor) || new Date();
+      if (this.view === 'day') return relDay(this.anchor);
+      if (this.view === 'month') return HE_MONTHS[d.getMonth()] + ' ' + d.getFullYear();
+      if (this.view === 'week') {
+        var w = weekDays(this.anchor);
+        return fmtDayMon(w[0]) + ' – ' + fmtDayMon(w[6]) + ' ' + (parseISO(w[6]) || d).getFullYear();
+      }
+      var r = agendaRange(this.anchor, AGENDA_DAYS);
+      return fmtDayMon(r.from) + ' – ' + fmtDayMon(r.to);
+    },
+
+    /** the days the active view actually shows — drives the counters */
+    rangeDays: function () {
+      if (this.view === 'day') return [this.anchor];
+      if (this.view === 'week') return weekDays(this.anchor);
+      if (this.view === 'month') {
+        var m = (parseISO(this.anchor) || new Date()).getMonth();
+        return monthMatrix(this.anchor).filter(function (iso) {
+          return parseISO(iso).getMonth() === m;
+        });
+      }
+      var out = [], iso = this.anchor;
+      for (var i = 0; i < AGENDA_DAYS; i++) { out.push(iso); iso = addDaysISO(iso, 1); }
+      return out;
+    },
+
+    meta: function () {
+      var ev = 0, tk = 0;
+      this.rangeDays().forEach(function (iso) {
+        ev += eventsOn(iso).length;
+        tk += openTasksOn(iso).length;
+      });
+      if (!ev && !tk) return 'אין מה שמתוכנן בטווח הזה';
+      return plural(ev, 'אירוע אחד', 'אירועים') + ' · ' + plural(tk, 'משימה אחת', 'משימות');
+    },
+
+    /** colour is never the sole carrier — the dots always ship a text key */
+    legend: function () {
+      return '<div class="cal-legend">' + catTag('business') + catTag('personal') + '</div>';
+    },
+
+    /* -------------------------------------------------------- month view */
+
+    renderMonth: function () {
+      var cells = monthMatrix(this.anchor);
+      var month = (parseISO(this.anchor) || new Date()).getMonth();
+      var t = todayISO();
+
+      var head = DOW_SHORT.map(function (d) { return '<span>' + d + '</span>'; }).join('');
+
+      var grid = cells.map(function (iso) {
+        var d = parseISO(iso);
+        var marks = eventsOn(iso).concat(openTasksOn(iso));
+        var shown = marks.slice(0, 4);
+        var extra = marks.length - shown.length;
+
+        return '<button type="button" class="cal-cell' +
+          (d.getMonth() !== month ? ' is-out' : '') +
+          (iso === t ? ' is-today' : '') + '"' + slotAttr(iso) +
+          ' aria-label="' + esc(hebDate(iso) + ' · ' + marks.length + ' פריטים') + '">' +
+          '<span class="cal-num">' + d.getDate() + '</span>' +
+          '<span class="cal-dots">' + shown.map(function (r) {
+            return '<span class="dot dot-' + r.category + '"></span>';
+          }).join('') + '</span>' +
+          (extra > 0 ? '<span class="cal-more">+' + extra + '</span>' : '') +
+          '</button>';
+      }).join('');
+
+      $('#calMonth').innerHTML =
+        '<div class="cal-month">' +
+        '<div class="cal-dow">' + head + '</div>' +
+        '<div class="cal-grid">' + grid + '</div>' +
+        '</div>' + this.legend();
+    },
+
+    /* --------------------------------------------------------- week view */
+
+    renderWeek: function () {
+      var days = weekDays(this.anchor);
+      var t = todayISO();
+      var byDay = days.map(function (iso) { return eventsOn(iso); });
+
+      // widen the hour window rather than hide an event outside 08:00–22:00
+      var lo = DAY_START, hi = DAY_END;
+      byDay.forEach(function (list) {
+        list.forEach(function (e) {
+          var m = minutesOf(e.start);
+          if (m === null) return;
+          var h = Math.floor(m / 60);
+          if (h < lo) lo = h;
+          if (h > hi) hi = h;
+        });
       });
 
-    if (!upcoming.length) {
-      $('#calendarList').innerHTML =
-        '<div class="card">' + emptyState('היומן פנוי', 'הוסף אירוע או פגישה בעזרת כפתור ההוספה.') + '</div>';
-      $('#calendarMeta').textContent = '';
-      return;
+      var head = '<span></span>' + days.map(function (iso) {
+        var d = parseISO(iso);
+        return '<span class="' + (iso === t ? 'is-today' : '') + '">' +
+          DOW_SHORT[d.getDay()] + '<br>' + d.getDate() + '</span>';
+      }).join('');
+
+      function cell(iso, time, list) {
+        return '<button type="button" class="wk-cell' + (iso === t ? ' is-today' : '') + '"' +
+          slotAttr(iso, time) +
+          ' aria-label="' + esc(hebDate(iso) + (time ? ' ' + time : '')) + '">' +
+          list.slice(0, 2).map(function (e) {
+            return '<span class="wk-chip wk-' + e.category + '">' + esc(e.title) + '</span>';
+          }).join('') +
+          (list.length > 2 ? '<span class="cal-more">+' + (list.length - 2) + '</span>' : '') +
+          '</button>';
+      }
+
+      // all-day strip: events carrying a date but no time still need a home
+      var allday = '<span class="wk-hour">כל היום</span>' + days.map(function (iso, i) {
+        return cell(iso, '', byDay[i].filter(function (e) { return minutesOf(e.start) === null; }));
+      }).join('');
+
+      var rows = [];
+      for (var h = lo; h <= hi; h++) {
+        var hour = h;
+        rows.push('<span class="wk-hour">' + pad2(hour) + '</span>');
+        days.forEach(function (iso, i) {
+          rows.push(cell(iso, pad2(hour) + ':00', byDay[i].filter(function (e) {
+            var m = minutesOf(e.start);
+            return m !== null && Math.floor(m / 60) === hour;
+          })));
+        });
+      }
+
+      $('#calWeek').innerHTML =
+        '<div class="cal-week">' +
+        '<div class="wk-head">' + head + '</div>' +
+        '<div class="wk-body wk-allday">' + allday + '</div>' +
+        '<div class="wk-body">' + rows.join('') + '</div>' +
+        '</div>' + this.legend();
+    },
+
+    /* ------------------------------- day view — full 00:00–23:59 timeline */
+
+    renderDay: function () {
+      var iso = this.anchor;
+      var timed = [], untimed = [];
+
+      eventsOn(iso).forEach(function (e) {
+        var s = minutesOf(e.start);
+        if (s === null) { untimed.push(e); return; }
+        var en = minutesOf(e.end);
+        if (en === null || en <= s) en = Math.min(s + 60, 1440);   // default 1h block
+        timed.push({ s: s, e: en, ev: e });
+      });
+
+      var blocks = layoutBlocks(timed).map(function (b) {
+        var w = 100 / b.lanes;
+        return '<div class="dv-block dv-' + b.ev.category + '" style="' +
+          'top:' + Math.round(b.s / 60 * HOUR_PX) + 'px;' +
+          'height:' + Math.max(26, Math.round((b.e - b.s) / 60 * HOUR_PX) - 3) + 'px;' +
+          'inset-inline-start:' + (b.lane * w) + '%;' +
+          'inline-size:calc(' + w + '% - 5px)">' +
+          '<b>' + esc(b.ev.title) + '</b>' +
+          '<span>' + esc(b.ev.start + (b.ev.end ? '–' + b.ev.end : '') +
+            (b.ev.location ? ' · ' + b.ev.location : '')) + '</span>' +
+          '</div>';
+      }).join('');
+
+      var hours = [], slots = [];
+      for (var h = 0; h < 24; h++) {
+        hours.push('<span class="dv-hour">' + pad2(h) + ':00</span>');
+        slots.push('<button type="button" class="dv-slot"' + slotAttr(iso, pad2(h) + ':00') +
+          ' aria-label="' + esc('הוספה ב־' + pad2(h) + ':00') + '"></button>');
+      }
+
+      var now = '';
+      if (iso === todayISO()) {
+        var d = new Date();
+        now = '<div class="dv-now" role="presentation" style="top:' +
+          Math.round((d.getHours() * 60 + d.getMinutes()) / 60 * HOUR_PX) + 'px"></div>';
+      }
+
+      var tasks = openTasksOn(iso);
+
+      $('#calDay').innerHTML =
+        '<div class="cal-day">' +
+        (untimed.length
+          ? '<div class="dv-untimed">' + untimed.map(function (e) {
+            return '<span class="wk-chip wk-' + e.category + '">' + esc(e.title) + '</span>';
+          }).join('') + '</div>'
+          : '') +
+        '<div class="dv-grid">' +
+        '<div class="dv-hours">' + hours.join('') + '</div>' +
+        '<div class="dv-canvas">' + slots.join('') + blocks + now + '</div>' +
+        '</div></div>' +
+        (tasks.length
+          ? '<div class="day-group" style="margin-top:14px">' +
+          '<div class="day-head"><span>משימות ליום הזה</span>' +
+          '<span class="day-count">' + plural(tasks.length, 'משימה אחת', 'משימות') + '</span></div>' +
+          '<div class="card">' + tasks.map(taskRow).join('') + '</div></div>'
+          : '');
+    },
+
+    /* ------------------------------------------------------- agenda view */
+
+    renderAgenda: function () {
+      var iso = this.anchor, groups = [];
+
+      for (var i = 0; i < AGENDA_DAYS; i++) {
+        var evs = eventsOn(iso), tks = openTasksOn(iso);
+        if (evs.length || tks.length) groups.push({ date: iso, events: evs, tasks: tks });
+        iso = addDaysISO(iso, 1);
+      }
+
+      if (!groups.length) {
+        $('#calAgenda').innerHTML = '<div class="card">' +
+          emptyState('אין מה שמתוכנן בטווח הזה',
+            'הכול פנוי מ־' + fmtDayMon(this.anchor) + ' ל־' + AGENDA_DAYS + ' הימים הבאים.') +
+          '</div>';
+        return;
+      }
+
+      $('#calAgenda').innerHTML = groups.map(function (g) {
+        var count = g.events.length + g.tasks.length;
+        return '<div class="day-group">' +
+          '<div class="day-head"><span>' + esc(relDay(g.date)) + '</span>' +
+          '<span class="day-count">' + plural(count, 'פריט אחד', 'פריטים') + '</span></div>' +
+          '<div class="card" style="padding:6px 8px">' +
+          g.events.map(eventCard).join('') +
+          g.tasks.map(taskRow).join('') +
+          '</div></div>';
+      }).join('');
+    },
+
+    /* ------------------------------------------------------------- paint */
+
+    render: function () {
+      var self = this;
+
+      $$('[data-calview]').forEach(function (b) {
+        var on = b.dataset.calview === self.view;
+        b.classList.toggle('is-active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+
+      $('#calMonth').hidden = this.view !== 'month';
+      $('#calWeek').hidden = this.view !== 'week';
+      $('#calDay').hidden = this.view !== 'day';
+      $('#calAgenda').hidden = this.view !== 'agenda';
+
+      if (this.view === 'month') this.renderMonth();
+      else if (this.view === 'week') this.renderWeek();
+      else if (this.view === 'day') this.renderDay();
+      else this.renderAgenda();
+
+      $('#calRange').textContent = this.label();
+      $('#calendarMeta').textContent = this.meta();
+      $('#view-calendar').setAttribute('aria-label', 'יומן — ' + CAL_LABEL[this.view]);
+    },
+
+    /* --------------------------------------------------- touch navigation */
+
+    bindSwipe: function () {
+      var stage = $('#calStage');
+      if (!stage) return;
+      var self = this, x0 = 0, y0 = 0, live = false;
+
+      stage.addEventListener('touchstart', function (e) {
+        live = e.touches.length === 1;
+        if (!live) return;
+        x0 = e.touches[0].clientX;
+        y0 = e.touches[0].clientY;
+      }, { passive: true });
+
+      stage.addEventListener('touchend', function (e) {
+        if (!live) return;
+        live = false;
+        var dx = e.changedTouches[0].clientX - x0;
+        var dy = e.changedTouches[0].clientY - y0;
+        if (Math.abs(dx) < SWIPE_MIN || Math.abs(dx) < Math.abs(dy) * 1.5) return;
+        // RTL: "הבא" sits on the left, so dragging leftwards moves forward in time
+        self.step(dx < 0 ? 1 : -1);
+      }, { passive: true });
+    },
+
+    init: function () {
+      this.view = Store.data.prefs.calView;
+      this.anchor = todayISO();
+      this.bindSwipe();
+
+      // the now-line has to keep moving while the day view is on screen
+      var self = this;
+      clearInterval(this.tickTimer);
+      this.tickTimer = setInterval(function () {
+        if (UI.view === 'calendar' && self.view === 'day') self.render();
+      }, 60000);
     }
+  };
 
-    var groups = {}, order = [];
-    upcoming.forEach(function (e) {
-      if (!groups[e.date]) { groups[e.date] = []; order.push(e.date); }
-      groups[e.date].push(e);
-    });
-
-    $('#calendarList').innerHTML = order.map(function (date) {
-      return '<div class="day-group">' +
-        '<div class="day-head"><span>' + esc(relDay(date)) + '</span>' +
-        '<span class="day-count">' + plural(groups[date].length, 'אירוע אחד', 'אירועים') + '</span></div>' +
-        '<div class="card" style="padding:8px 10px">' + groups[date].map(eventCard).join('') + '</div>' +
-        '</div>';
-    }).join('');
-
-    $('#calendarMeta').textContent = plural(upcoming.length, 'אירוע אחד', 'אירועים');
-  }
+  function renderCalendar() { Cal.render(); }
 
   /* ---------------------------------------------- render: tasks / lists / notes */
 
@@ -561,11 +994,32 @@
     $('#typeSheet').hidden = true;
     $('#formSheet').hidden = true;
     document.body.style.overflow = '';
+    PREFILL = null;
   }
 
-  function openTypeSheet() {
+  /** date/time handed over by a tapped calendar cell, consumed by the next form */
+  var PREFILL = null;
+
+  function openTypeSheet(prefill) {
+    PREFILL = prefill || null;
     $('#formSheet').hidden = true;
     openSheet('typeSheet');
+  }
+
+  /** contextual creation: the tapped slot decides the date and the start time */
+  function applyPrefill() {
+    if (!PREFILL) return;
+    var fields = $('#formFields');
+    if (!fields) return;
+
+    function set(name, value) {
+      var el = fields.querySelector('[name="' + name + '"]');
+      if (el && value) el.value = value;
+    }
+
+    ['date', 'due', 'followUpAt'].forEach(function (n) { set(n, PREFILL.date); });
+    ['start', 'time'].forEach(function (n) { set(n, PREFILL.start); });
+    if (PREFILL.start) set('end', shiftTime(PREFILL.start, 60));
   }
 
   var FIELDS = {
@@ -622,6 +1076,7 @@
     $('#formSheetTitle').textContent = TYPE_LABEL[type];
     $('#formFields').innerHTML = FIELDS[type]();
     setFormCat(UI.formCat);
+    applyPrefill();
 
     $('#typeSheet').hidden = true;
     openSheet('formSheet');
@@ -956,7 +1411,9 @@
   /* ------------------------------------------------------------- delegation */
 
   function onClick(e) {
-    var el = e.target.closest ? e.target.closest('[data-nav],[data-action],[data-type],[data-filter],[data-cat],[data-toggle],[data-del]') : null;
+    var el = e.target.closest ? e.target.closest(
+      '[data-nav],[data-action],[data-type],[data-filter],[data-cat],[data-toggle],[data-del],' +
+      '[data-calview],[data-calnav],[data-calslot]') : null;
     if (!el) return;
 
     if (el.dataset.action === 'master-add') { openTypeSheet(); return; }
@@ -964,6 +1421,16 @@
     if (el.dataset.type) { openForm(el.dataset.type); return; }
     if (el.dataset.filter) { setFilter(el.dataset.filter); return; }
     if (el.dataset.cat) { setFormCat(el.dataset.cat); return; }
+
+    if (el.dataset.calview) { Cal.setView(el.dataset.calview); return; }
+    if (el.dataset.calnav) { Cal.nav(el.dataset.calnav); return; }
+
+    if (el.dataset.calslot) {
+      var slot = el.dataset.calslot.split('|');
+      openTypeSheet({ date: slot[0], start: slot[1] || '' });
+      return;
+    }
+
     if (el.dataset.nav) { setView(el.dataset.nav); return; }
 
     if (el.dataset.toggle) {
@@ -985,6 +1452,7 @@
 
   function init() {
     Store.load();
+    Cal.init();
     document.addEventListener('click', onClick);
     $('#entityForm').addEventListener('submit', submitForm);
     $('#backdrop').addEventListener('click', closeSheets);
@@ -1006,7 +1474,24 @@
   // exposed for healthcheck.js / future D1 migration tooling
   window.APP = {
     Store: Store, isoDate: isoDate, plural: plural, normCat: normCat,
-    STORE_KEY: STORE_KEY, Notify: Notify
+    STORE_KEY: STORE_KEY, Notify: Notify, Cal: Cal,
+
+    // pure date math — no DOM, no store; the healthcheck exercises it directly
+    dates: {
+      isoDate: isoDate,
+      parseISO: parseISO,
+      addDaysISO: addDaysISO,
+      addMonthsISO: addMonthsISO,
+      startOfMonthISO: startOfMonthISO,
+      startOfWeekISO: startOfWeekISO,
+      weekDays: weekDays,
+      monthMatrix: monthMatrix,
+      agendaRange: agendaRange,
+      daysInMonth: daysInMonth,
+      minutesOf: minutesOf,
+      shiftTime: shiftTime,
+      layoutBlocks: layoutBlocks
+    }
   };
 
 })();

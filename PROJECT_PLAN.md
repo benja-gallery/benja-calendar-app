@@ -345,6 +345,34 @@ five and live in `styles.css` under `:root`. **No colour literal is written outs
    type chooser: `אירוע / פגישה · משימה · רשימה · פתק · לקוח חדש`, then a typed form sheet.
    The form always exposes the category selector (§0.2).
 
+### 7.4a Calendar Engine (shipped — Sprint 2)
+
+Four selectable views over a **single anchor date**, inside the `יומן` section. The view
+switcher, the period navigation (`‹ › היום`) and the range label sit above the stage; the
+active pane is the only one rendered.
+
+| View | Hebrew | What it draws |
+|---|---|---|
+| Day | תצוגת יום | Full **00:00–23:59** hourly canvas, events positioned by real minute offsets, overlapping events split into lanes, live current-time line, untimed strip on top, that day's open tasks below |
+| Week | תצוגת שבוע | Sunday→Saturday grid, 34px hour gutter + 7 fluid columns so it holds at 320px; the hour window widens past 08:00–22:00 rather than hide an event; all-day strip on top |
+| Month | תצוגת חודש | Whole-week grid (no phantom filler row), category colour dots per day (≤4, then `+N`), today highlighted, out-of-month days dimmed |
+| Agenda | סדר יום | Rolling 30-day chronological list, grouped by date, events and open tasks together |
+
+- **Navigation:** prev/next step by the active period (day / 7 days / calendar month / 30 days),
+  `היום` re-anchors to today, and a horizontal swipe on the stage steps the period.
+  RTL: `הבא` sits on the left, so a leftward drag moves forward in time. `touch-action: pan-y`
+  keeps vertical scrolling native.
+- **Contextual creation:** every day cell and time slot carries `data-calslot="YYYY-MM-DD|HH:MM"`;
+  tapping it opens the Master Add bottom-sheet with the date pre-filled, the start time pre-filled
+  and the end time defaulted to +1h.
+- **Category filter:** the calendar reads through the same `pick()` gate as every other view, so
+  `הכל / אישי / עסקי` applies inside all four panes and to their counters (§0.3).
+- **Persistence:** the selected view is stored in `prefs.calView` and normalised on load; every
+  pane reads live from the `localStorage` store, so a create/complete/delete repaints immediately.
+- **Date math:** month stepping clamps into short months (31/01 → 28/02, 29/02 on a leap year),
+  weeks start Sunday for `he-IL`, and all dates are computed in local time — never `toISOString()`.
+  `healthcheck.js` executes these helpers directly out of `window.APP.dates`.
+
 ### 7.4 General layout
 
 **Layout direction:** RTL by default (`dir="rtl"`), with LTR fallback driven by locale.
