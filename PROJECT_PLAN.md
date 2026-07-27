@@ -1,6 +1,6 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Sprint 4 shipped — client CRM, client drawer, Next-Action engine, v0.4
+> **Status:** Sprint 5 shipped — Cloudflare D1, Worker sync API, offline outbox, v0.5
 > **Repository:** `C:\calendar-app` (fresh, independent git repo — no relationship to `benja-gallery`)
 > **Created:** 2026-07-27 · **Spec injected:** 2026-07-27 (Sprint 1)
 
@@ -497,6 +497,92 @@ side panel above it. Six tabs over one record:
 contact write through `Store.save()` to `localStorage` and repaint immediately, drawer
 included. `healthcheck.js` executes the whole CRM out of `window.APP.clients`.
 
+### 7.4d Cloudflare D1, the Worker sync API & the offline outbox (shipped — Sprint 5)
+
+The store stops being a single-device store. `localStorage` remains the surface the
+UI reads and writes; **Cloudflare D1** becomes the durable copy behind it, reached
+through a **Cloudflare Worker** at `/api/*`, and reconciled by an outbox that survives
+being offline, being closed, and being wrong.
+
+**D1 schema** — `migrations/0001_sprint5_init.sql`, one table per pillar
+
+| Table | Mandated columns (in order) |
+|---|---|
+| `events` | `id · title · category · start_time · end_time · location · client_id · category_type · updated_at` |
+| `tasks` | `id · title · category · status · priority · due_date · next_action · subtasks_json · client_id · updated_at` |
+| `lists` | `id · title · category · items_json · client_id · updated_at` |
+| `notes` | `id · title · body · category · is_pinned · client_id · updated_at` |
+| `clients` | `id · name · phone · email · status · next_action · initial_interest · updated_at` |
+| `history_logs` | `id · client_id · action_text · created_at` |
+
+- Each table then carries the columns the sync engine needs to round-trip a local
+  record without loss: `owner_id`, `created_at`, `deleted_at` (the tombstone), and the
+  few local fields with no mandated column (`notes`, `due_time`, `list_date`, `budget`,
+  `general_notes`, `client_notes_json`, `history_json`).
+- `category` is `TEXT NOT NULL` on every entity table — §0.2 has no third state and no
+  null, and the Worker folds an unknown value back to `personal` before it reaches SQL.
+- `history_logs` is projected out of `clients.history_json` on every client write, so
+  the timeline is queryable on its own without unpacking JSON.
+- `sync_ops(op_id PRIMARY KEY)` is the idempotency ledger: a replayed op is a no-op.
+- Every timestamp crossing the wire is an **ISO-8601 UTC instant**, so last-write-wins
+  can compare them as text — lexical order equals chronological order.
+
+**Worker API** — `functions/api/`, `{ ok:true, data }` / `{ ok:false, error }` (§6)
+
+| Route | Verbs |
+|---|---|
+| `/api/sync` | `POST` — batch outbox replay **and** delta pull in one round-trip |
+| `/api/events` `/api/tasks` `/api/lists` `/api/notes` `/api/clients` | `GET ?since=` · `POST` upsert · `DELETE ?id=` tombstone |
+
+- The five collection routes are one implementation (`_collection.js`) parameterised by
+  table name; the table is resolved through `SCHEMA` in `_shared.js` and is **never**
+  taken from the request, so no route can be aimed at an arbitrary table.
+- Every statement is parameterised. The upsert carries a
+  `WHERE excluded.updated_at >= <table>.updated_at` guard, so a stale replay cannot
+  overwrite a newer edit even when ops arrive out of order.
+- `sanitize()` drops undeclared keys, coerces each value to its column type, forces the
+  category vocabulary and refuses objects, oversized text and non-ISO stamps. A single
+  bad row is rejected **by name** and the rest of the batch still lands.
+
+**The offline outbox (client)**
+
+1. Every tap writes `localStorage` first. The network is never between a tap and a repaint.
+2. `Store.save()` diffs the whole store against a per-record **shadow** of what the server
+   has, and drops the difference into a persisted **outbox**. No mutation path has to
+   opt in — a change cannot escape the diff — and the queue is part of the store, so it
+   survives a reload.
+3. One op per record: a second edit before a push replaces the first rather than appending.
+4. A record that vanished locally but is known to the shadow becomes a **tombstone** op.
+5. `POST /api/sync` replays the outbox and pulls everything newer than the cursor, on
+   launch, on reconnect (`online`), on tab focus, on a 30s heartbeat, and 1.2s after a
+   local write. A failed push changes nothing — the queue is untouched.
+6. **Conflict resolution is last-write-wins on `updated_at`**, applied on both ends. After
+   a merge the shadow is set to the *server's* stamp, never the local one, so a local
+   record that is genuinely newer still differs from the shadow and gets re-offered.
+7. An op the server *refuses* is dropped and its shadow forgotten — retrying a payload the
+   server will never take would wedge the queue and freeze the badge on 🟡 forever.
+
+**Cloud status indicator** — a badge in the app header, three honest states, colour never
+the sole carrier (the glyph and the Hebrew label say the same thing the tint does):
+
+| State | Badge | Meaning |
+|---|---|---|
+| `synced` | 🟢 **מסונכרן לענן** | outbox empty, the last round-trip succeeded |
+| `pending` | 🟡 **ממתין לסנכרון** | mutations are queued, or the cloud has not answered yet |
+| `offline` | 🔴 **אופליין** | no network, or no cloud configured — the app still works, locally |
+
+Tapping the badge forces a flush. `sw.js` (now `v5`) explicitly **excludes `/api/*`** from
+its caches: a cached delta would hand the client stale rows and silently stall the outbox.
+
+**Deployment** — `wrangler.toml` binds D1 as `DB` and points at `migrations/`.
+Until `database_id` is filled in, `/api/*` answers `500 no_binding`, the badge sits on
+🔴 and the app is entirely usable on its local store.
+
+**Verification** — `healthcheck.js` §19 executes the engine head-lessly: it cross-checks
+the column list across all three artefacts (SQL ↔ Worker ↔ client), round-trips every
+pillar through `toRow`/`fromRow`, drives the outbox through edit / re-edit / delete /
+apply / reject cycles, and asserts the last-write-wins and tombstone outcomes directly.
+
 ### 7.4 General layout
 
 **Layout direction:** RTL by default (`dir="rtl"`), with LTR fallback driven by locale.
@@ -544,6 +630,14 @@ only the day-column order mirrors.
    elsewhere" notice with an undo affordance.
 4. Deletions are tombstones (`deleted_at`), never hard deletes, so sync can propagate them.
 5. Hydration from IndexedDB must render a usable calendar before any network call resolves.
+
+> **As shipped (Sprint 5, §7.4d):** the durable local store is `localStorage`, not
+> IndexedDB — §0.4 fixed that choice for V1 and the outbox lives inside the same
+> versioned key, so a queued mutation survives a reload for free. Every other rule
+> above holds exactly as written: local write first, outbox enqueue, optimistic
+> repaint, then the network; `op_id` idempotency; last-write-wins on `updated_at`;
+> tombstones rather than hard deletes. IndexedDB remains the migration target when
+> the store outgrows the `localStorage` quota.
 
 ### 8.1 PWA Delivery Layer (shipped — Sprint 2)
 
@@ -623,6 +717,7 @@ C:\calendar-app\
 ├── app.js
 ├── manifest.json        ← PWA install descriptor
 ├── sw.js                ← service worker: offline cache + push
+├── wrangler.toml        ← Pages + D1 binding (Sprint 5)
 ├── icons/               ← generated PNGs (do not hand-edit)
 ├── tools/gen-icons.js   ← regenerates icons/ from the brand tokens
 ├── healthcheck.js       ← repo-local verification suite (§10)

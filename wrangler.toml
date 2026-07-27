@@ -1,0 +1,24 @@
+# ===========================================================================
+# wrangler.toml — Cloudflare Pages + D1 (Sprint 5)
+#
+# The app ships flat at the repo root (PROJECT_PLAN §11), so the whole
+# directory is the Pages output and functions/api/* becomes /api/*.
+#
+# First-time setup
+#   wrangler d1 create benja-calendar          # copy the id below
+#   wrangler d1 migrations apply benja-calendar --remote
+#   wrangler pages deploy .
+#
+# Until database_id is filled in, /api/* answers 500 no_binding and the client
+# stays on its local store — the app is fully usable either way (§8).
+# ===========================================================================
+
+name = "benja-calendar-app"
+compatibility_date = "2026-07-27"
+pages_build_output_dir = "."
+
+[[d1_databases]]
+binding = "DB"
+database_name = "benja-calendar"
+database_id = ""            # ← set from `wrangler d1 create benja-calendar`
+migrations_dir = "migrations"

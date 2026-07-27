@@ -298,12 +298,18 @@ check('no credential check runs in client JS (§0.4)', () => {
   return true;
 });
 
-check('dates are computed in local time, never via toISOString', () => {
+check('calendar dates are computed in local time — UTC only crosses the wire', () => {
   // scan code only — a comment mentioning the anti-pattern is not the anti-pattern
   const code = js.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/[^\n]*/g, '$1');
-  if (/\.toISOString\s*\(/.test(code)) return 'toISOString() leaks UTC into calendar dates';
   if (!/function isoDate/.test(js)) return 'no isoDate() helper';
-  return true;
+
+  // Sprint 5 gives toISOString() exactly one legal home: toISOStamp(), which
+  // builds the ISO-8601 UTC instant the sync wire format mandates for
+  // updated_at. Anywhere else it would leak UTC into a calendar date.
+  const sanctioned = (code.match(/function toISOStamp\s*\([\s\S]*?\n  \}/) || [''])[0];
+  if (sanctioned.indexOf('.toISOString(') === -1) return 'toISOStamp() no longer emits an ISO instant';
+  const leaks = code.replace(sanctioned, '').match(/\.toISOString\s*\(/g) || [];
+  return leaks.length ? leaks.length + ' toISOString() call(s) outside toISOStamp()' : true;
 });
 
 /* ----------------------------------------- 10. DOM wiring cross-reference */
@@ -1288,7 +1294,7 @@ check('service worker cache version was bumped for this sprint', () => {
   const m = sw.match(/CACHE_VERSION = '(v\d+)'/);
   if (!m) return 'no CACHE_VERSION';
   const n = parseInt(m[1].slice(1), 10);
-  return n >= 4 ? true : 'CACHE_VERSION is ' + m[1] + ', expected v4 or later';
+  return n >= 5 ? true : 'CACHE_VERSION is ' + m[1] + ', expected v5 or later';
 });
 
 check('PROJECT_PLAN documents the Sprint 3 engine', () => {
@@ -1305,6 +1311,595 @@ check('PROJECT_PLAN documents the Sprint 4 client CRM', () => {
     'Client CRM', 'תיק לקוח', 'Next Action',
     'אין פעולה הבאה מוגדרת', 'וואטסאפ'
   ].concat(CLIENT_STAGES);
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ====== 19. D1 schema · Worker sync API · offline queue (Sprint 5) ======= */
+
+/* ---- 19a. artefacts exist and parse ---- */
+
+const WORKER_ROUTES = ['sync', 'events', 'tasks', 'lists', 'notes', 'clients'];
+const WORKER_FILES = ['_shared', '_collection'].concat(WORKER_ROUTES)
+  .map(n => 'functions/api/' + n + '.js');
+const MIGRATION = 'migrations/0001_sprint5_init.sql';
+
+check('Sprint 5 artefacts are present (worker routes, migration, wrangler)', () => {
+  const wanted = WORKER_FILES.concat([MIGRATION, 'wrangler.toml']);
+  const missing = wanted.filter(f => !fs.existsSync(path.join(ROOT, f)));
+  return missing.length ? 'missing: ' + missing.join(', ') : true;
+});
+
+/**
+ * The Worker files are ES modules; vm.Script only compiles scripts. Rewriting
+ * import/export into plain statements keeps this a real syntax check without
+ * needing --experimental-vm-modules.
+ */
+function stripModule(src) {
+  return src
+    .replace(/^\s*import\s[\s\S]*?from\s+'[^']*';?\s*$/gm, '')
+    .replace(/^export\s+(async\s+)?function\b/gm, '$1function')
+    .replace(/^export\s+(const|let|var)\b/gm, '$1')
+    .replace(/^export\s+/gm, '');
+}
+
+check('every Worker route parses (no syntax errors)', () => {
+  WORKER_FILES.forEach(f => {
+    new vm.Script(stripModule(read(f)), { filename: f });
+  });
+  return true;
+});
+
+check('the six mandated /api routes each export the CRUD handlers', () => {
+  WORKER_ROUTES.forEach(r => {
+    const src = read('functions/api/' + r + '.js');
+    if (src.indexOf('export const onRequestPost') === -1) {
+      throw new Error('/api/' + r + ' has no POST handler');
+    }
+    if (src.indexOf('export const onRequestOptions') === -1) {
+      throw new Error('/api/' + r + ' answers no CORS preflight');
+    }
+    if (r !== 'sync' && src.indexOf('export const onRequestGet') === -1) {
+      throw new Error('/api/' + r + ' has no GET handler');
+    }
+  });
+  return true;
+});
+
+/* ---- 19b. D1 schema ---- */
+
+const sql = read(MIGRATION);
+
+/** column names of one CREATE TABLE, in declaration order */
+function sqlColumns(table) {
+  const m = sql.match(new RegExp('CREATE TABLE IF NOT EXISTS ' + table + '\\s*\\(([\\s\\S]*?)\\n\\);'));
+  if (!m) throw new Error('no CREATE TABLE for ' + table);
+  return m[1].split('\n')
+    .map(l => l.replace(/--.*$/, '').trim())
+    .filter(Boolean)
+    .map(l => l.split(/\s+/)[0].replace(/[(),]/g, ''))
+    .filter(c => c && !/^(PRIMARY|FOREIGN|UNIQUE|CHECK|CONSTRAINT)$/i.test(c));
+}
+
+/** exactly the columns the Sprint 5 mandate names, in the order it names them */
+const MANDATED = {
+  events: ['id', 'title', 'category', 'start_time', 'end_time', 'location',
+    'client_id', 'category_type', 'updated_at'],
+  tasks: ['id', 'title', 'category', 'status', 'priority', 'due_date',
+    'next_action', 'subtasks_json', 'client_id', 'updated_at'],
+  lists: ['id', 'title', 'category', 'items_json', 'client_id', 'updated_at'],
+  notes: ['id', 'title', 'body', 'category', 'is_pinned', 'client_id', 'updated_at'],
+  clients: ['id', 'name', 'phone', 'email', 'status', 'next_action',
+    'initial_interest', 'updated_at'],
+  history_logs: ['id', 'client_id', 'action_text', 'created_at']
+};
+
+check('D1 migration declares all six mandated tables', () => {
+  const missing = Object.keys(MANDATED).filter(t =>
+    sql.indexOf('CREATE TABLE IF NOT EXISTS ' + t + ' ') === -1 &&
+    sql.indexOf('CREATE TABLE IF NOT EXISTS ' + t + '(') === -1);
+  return missing.length ? 'missing tables: ' + missing.join(', ') : true;
+});
+
+check('every mandated column exists, in the mandated order', () => {
+  Object.keys(MANDATED).forEach(t => {
+    const actual = sqlColumns(t);
+    const want = MANDATED[t];
+    const head = actual.slice(0, want.length);
+    if (head.join(',') !== want.join(',')) {
+      throw new Error(t + ' leads with [' + head.join(', ') + '], expected [' + want.join(', ') + ']');
+    }
+  });
+  return true;
+});
+
+check('category is non-nullable on every entity table (§0.2)', () => {
+  ['events', 'tasks', 'lists', 'notes', 'clients'].forEach(t => {
+    const block = sql.match(new RegExp('CREATE TABLE IF NOT EXISTS ' + t + '[\\s\\S]*?\\n\\);'))[0];
+    if (!/category\s+TEXT\s+NOT NULL/.test(block)) {
+      throw new Error(t + '.category is nullable');
+    }
+  });
+  return true;
+});
+
+check('sync is durable: tombstones, an idempotency ledger and updated_at indexes', () => {
+  ['events', 'tasks', 'lists', 'notes', 'clients'].forEach(t => {
+    const block = sql.match(new RegExp('CREATE TABLE IF NOT EXISTS ' + t + '[\\s\\S]*?\\n\\);'))[0];
+    if (block.indexOf('deleted_at') === -1) throw new Error(t + ' has no tombstone column');
+    if (sql.indexOf('idx_' + t + '_updated') === -1) throw new Error(t + ' has no updated_at index');
+  });
+  if (sql.indexOf('CREATE TABLE IF NOT EXISTS sync_ops') === -1) return 'no sync_ops idempotency ledger';
+  if (!/op_id\s+TEXT PRIMARY KEY/.test(sql)) return 'sync_ops.op_id is not the idempotency key';
+  return true;
+});
+
+check('wrangler.toml binds D1 and points at the migrations directory', () => {
+  const toml = read('wrangler.toml');
+  if (!/\[\[d1_databases\]\]/.test(toml)) return 'no D1 binding block';
+  if (!/binding\s*=\s*"DB"/.test(toml)) return 'binding is not named DB (functions/api expect env.DB)';
+  if (!/migrations_dir\s*=\s*"migrations"/.test(toml)) return 'migrations_dir is not wired';
+  return true;
+});
+
+/* ---- 19c. schema serialisation: SQL ↔ Worker ↔ client all agree ---- */
+
+/** execute _shared.js for real — it has no imports, so stripping is enough */
+function loadShared() {
+  const src = stripModule(read('functions/api/_shared.js'));
+  const sandbox = { console, Response: function () {} };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    src + '\n;globalThis.__api = { SCHEMA, TABLES, CATEGORIES, MAX_TEXT, sanitize, isISO, nowISO, rowsOf };',
+    sandbox, { filename: '_shared.js' });
+  return sandbox.__api;
+}
+
+let W = null, SY = null;
+
+check('the Worker schema module executes and exports its column map', () => {
+  W = loadShared();
+  if (!W || !W.SCHEMA) return '_shared.js exports no SCHEMA';
+  if (typeof W.sanitize !== 'function') return '_shared.js exports no sanitize()';
+  if (W.TABLES.join(',') !== 'events,tasks,lists,notes,clients') {
+    return 'TABLES is ' + W.TABLES.join(',');
+  }
+  return true;
+});
+
+check('app.js exports its sync engine without touching the DOM', () => {
+  const APP = loadApp();
+  if (!APP) return 'window.APP was never set';
+  SY = APP.sync;
+  if (!SY) return 'no APP.sync export';
+  ['toRow', 'fromRow', 'validRow', 'validOp', 'normSync', 'blankSync'].forEach(k => {
+    if (typeof SY[k] !== 'function') throw new Error('APP.sync.' + k + ' is missing');
+  });
+  if (!SY.Sync || typeof SY.Sync.capture !== 'function') return 'no APP.sync.Sync engine';
+  return true;
+});
+
+check('schema serialisation: SQL, Worker and client declare identical columns', () => {
+  const drift = [];
+  SY.TABLES.forEach(t => {
+    const fromSql = sqlColumns(t).join(',');
+    const fromWorker = W.SCHEMA[t].columns.join(',');
+    const fromClient = SY.SCHEMA[t].join(',');
+    if (fromSql !== fromWorker) drift.push(t + ': SQL[' + fromSql + '] != worker[' + fromWorker + ']');
+    if (fromSql !== fromClient) drift.push(t + ': SQL[' + fromSql + '] != client[' + fromClient + ']');
+  });
+  return drift.length ? drift.join(' | ') : true;
+});
+
+/* ---- 19d. serialisation round-trip, executed for real ---- */
+
+const SAMPLES = {
+  events: {
+    type: 'event', id: 'ev_1', title: 'פגישת היכרות', category: 'business',
+    date: '2026-07-27', start: '10:00', end: '11:30', location: 'זום',
+    notes: 'להביא תיק עבודות', clientId: 'cl_1',
+    ownerId: 'ben-perez', createdAt: 1750000000000, updatedAt: 1760000000000
+  },
+  tasks: {
+    type: 'task', id: 'ta_1', title: 'להכין הצעת מחיר', category: 'business',
+    due: '2026-07-29', time: '09:15', status: 'waiting', priority: 'high',
+    nextAction: 'לאסוף מידות', subtasks: [{ id: 'st_1', title: 'למדוד', done: true }],
+    notes: '', clientId: 'cl_1',
+    ownerId: 'ben-perez', createdAt: 1750000000000, updatedAt: 1760000000000
+  },
+  lists: {
+    type: 'list', id: 'li_1', title: 'ציוד לסטודיו', category: 'business',
+    items: [{ id: 'li_a', title: 'מדללים', done: false }], date: '2026-08-01',
+    clientId: '', ownerId: 'ben-perez', createdAt: 1750000000000, updatedAt: 1760000000000
+  },
+  notes: {
+    type: 'note', id: 'no_1', title: 'רעיון לקמפיין', body: 'סדרת פורטרטים',
+    category: 'personal', pinned: true, clientId: '',
+    ownerId: 'ben-perez', createdAt: 1750000000000, updatedAt: 1760000000000
+  },
+  clients: {
+    type: 'client', id: 'cl_1', name: 'דנה כהן', category: 'business',
+    phone: '050-1234567', email: 'dana@example.com', status: 'quoted',
+    interest: 'פורטרט שמן', budget: '8,000 ₪', nextAction: 'לחזור ביום שלישי',
+    nextActionAt: '2026-07-29', followUpAt: '2026-07-28', lastContactAt: '2026-07-26',
+    notes: 'ראתה את הסדרה', clientNotes: [{ id: 'cn_1', body: 'מעדיפה גדול', at: 1755000000000 }],
+    history: [{ id: 'hs_1', at: 1755000000000, kind: 'status', text: 'התיק נפתח' }],
+    ownerId: 'ben-perez', createdAt: 1750000000000, updatedAt: 1760000000000
+  }
+};
+
+check('toRow() emits exactly the columns its table declares', () => {
+  SY.TABLES.forEach(t => {
+    const row = SY.toRow(t, SAMPLES[t]);
+    if (!row) throw new Error('toRow(' + t + ') returned nothing');
+    const emitted = Object.keys(row).sort().join(',');
+    const declared = SY.SCHEMA[t].slice().sort().join(',');
+    if (emitted !== declared) {
+      throw new Error(t + ' emits [' + emitted + '] but declares [' + declared + ']');
+    }
+  });
+  return true;
+});
+
+check('serialisation round-trips every pillar without losing a field', () => {
+  const drift = [];
+  SY.TABLES.forEach(t => {
+    const before = SAMPLES[t];
+    const after = SY.fromRow(t, SY.toRow(t, before));
+    if (!after) throw new Error('fromRow(' + t + ') returned nothing');
+    Object.keys(before).forEach(k => {
+      const a = JSON.stringify(before[k]);
+      const b = JSON.stringify(after[k]);
+      if (a !== b) drift.push(t + '.' + k + ': ' + a + ' -> ' + b);
+    });
+  });
+  return drift.length ? drift.join(' | ') : true;
+});
+
+check('timestamps cross the wire as ISO-8601 and come back as epoch ms', () => {
+  const iso = SY.toISOStamp(1760000000000);
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(iso)) return 'not an ISO instant: ' + iso;
+  if (SY.fromISOStamp(iso) !== 1760000000000) return 'ISO round-trip lost precision';
+  if (SY.fromISOStamp('not a date') !== 0) return 'garbage timestamp is not rejected';
+  // lexical order must equal chronological order — last-write-wins compares text
+  if (!(SY.toISOStamp(1750000000000) < SY.toISOStamp(1760000000000))) {
+    return 'ISO strings do not sort chronologically';
+  }
+  // an untimed event keeps a bare date; a timed one carries the minute
+  if (SY.joinStamp('2026-07-27', '') !== '2026-07-27') return 'all-day event gained a time';
+  if (SY.joinStamp('2026-07-27', '10:00') !== '2026-07-27T10:00') return 'timed event lost its time';
+  if (SY.splitStamp('2026-07-27T10:00').time !== '10:00') return 'time did not survive the split';
+  if (SY.splitStamp('2026-07-27').time !== '') return 'a bare date grew a phantom time';
+  return true;
+});
+
+/* ---- 19e. payload validation, both ends ---- */
+
+check('client refuses to queue a malformed row', () => {
+  const good = SY.toRow('tasks', SAMPLES.tasks);
+  if (!SY.validRow('tasks', good)) return 'a well-formed row was rejected';
+
+  const unknown = Object.assign({}, good, { drop_table: 'x' });
+  if (SY.validRow('tasks', unknown)) return 'an undeclared column was accepted';
+
+  const noId = Object.assign({}, good); delete noId.id;
+  if (SY.validRow('tasks', noId)) return 'a row without an id was accepted';
+
+  const badStamp = Object.assign({}, good, { updated_at: '27/07/2026' });
+  if (SY.validRow('tasks', badStamp)) return 'a non-ISO updated_at was accepted';
+
+  if (SY.validRow('nope', good)) return 'an unknown table was accepted';
+  return true;
+});
+
+check('client refuses to queue a malformed op', () => {
+  const row = SY.toRow('notes', SAMPLES.notes);
+  const ok = { opId: 'op_1', table: 'notes', id: 'no_1', action: 'upsert', row: row };
+  if (!SY.validOp(ok)) return 'a well-formed op was rejected';
+
+  if (SY.validOp(Object.assign({}, ok, { table: 'secrets' }))) return 'unknown table accepted';
+  if (SY.validOp(Object.assign({}, ok, { action: 'truncate' }))) return 'unknown action accepted';
+  if (SY.validOp(Object.assign({}, ok, { opId: '' }))) return 'op without an opId accepted';
+  if (SY.validOp(Object.assign({}, ok, { row: null }))) return 'upsert without a row accepted';
+  if (SY.validOp(null)) return 'null accepted as an op';
+
+  // a delete carries no row, and that is legal
+  if (!SY.validOp({ opId: 'op_2', table: 'notes', id: 'no_1', action: 'delete', row: null })) {
+    return 'a well-formed delete was rejected';
+  }
+  return true;
+});
+
+check('a corrupt outbox on disk is dropped, never replayed', () => {
+  const row = SY.toRow('lists', SAMPLES.lists);
+  const restored = SY.normSync({
+    endpoint: 'api',
+    cursor: 'garbage',
+    queue: [
+      { opId: 'op_ok', table: 'lists', id: 'li_1', action: 'upsert', row: row },
+      { opId: 'op_bad', table: 'lists', id: 'li_1', action: 'nuke', row: row },
+      'not-an-op',
+      { opId: 'op_bad2', table: 'ghosts', id: 'x', action: 'upsert', row: row }
+    ],
+    shadow: { lists: { li_1: 17, li_2: 'not a number' } }
+  });
+  if (restored.queue.length !== 1) return 'kept ' + restored.queue.length + ' ops, expected 1';
+  if (restored.queue[0].opId !== 'op_ok') return 'the wrong op survived';
+  if (restored.cursor !== '') return 'a non-ISO cursor survived';
+  if (restored.shadow.lists.li_1 !== 17) return 'a valid shadow stamp was lost';
+  if ('li_2' in restored.shadow.lists) return 'a non-numeric shadow stamp survived';
+  return true;
+});
+
+check('Worker sanitize() drops unknown keys and forces the category vocabulary', () => {
+  const clean = W.sanitize('notes', {
+    id: 'no_1', title: 'x', body: 'y', category: 'צהוב', is_pinned: 'yes',
+    client_id: null, updated_at: '2026-07-27T09:00:00.000Z',
+    drop_table: 'students', __proto__unused: 1
+  });
+  if (!clean.ok) return 'a valid row was rejected: ' + clean.error;
+  if ('drop_table' in clean.row) return 'an undeclared column reached SQL';
+  if (clean.row.category !== 'personal') return 'an illegal category was not folded back';
+  if (clean.row.is_pinned !== 1) return 'is_pinned was not coerced to an integer';
+  if (clean.row.owner_id !== 'ben-perez') return 'owner_id was not defaulted';
+  if (clean.row.created_at !== clean.row.updated_at) return 'created_at was not defaulted';
+
+  const cols = Object.keys(clean.row).sort().join(',');
+  if (cols !== W.SCHEMA.notes.columns.slice().sort().join(',')) {
+    return 'sanitised row is not the declared column set';
+  }
+  return true;
+});
+
+check('Worker sanitize() rejects payloads it cannot store', () => {
+  const base = { id: 'ta_1', updated_at: '2026-07-27T09:00:00.000Z' };
+  const cases = [
+    ['unknown table', () => W.sanitize('ghosts', base)],
+    ['missing id', () => W.sanitize('tasks', { updated_at: base.updated_at })],
+    ['non-ISO updated_at', () => W.sanitize('tasks', { id: 'ta_1', updated_at: '27/07/2026' })],
+    ['nested object', () => W.sanitize('tasks', Object.assign({}, base, { title: { $ne: 1 } }))],
+    ['oversized text', () => W.sanitize('tasks', Object.assign({}, base, { notes: 'x'.repeat(W.MAX_TEXT + 1) }))],
+    ['array instead of row', () => W.sanitize('tasks', [base])]
+  ];
+  const leaked = cases.filter(([, fn]) => fn().ok).map(([name]) => name);
+  return leaked.length ? 'accepted: ' + leaked.join(', ') : true;
+});
+
+check('Worker builds no SQL from client input', () => {
+  ['functions/api/_shared.js', 'functions/api/_collection.js', 'functions/api/sync.js'].forEach(f => {
+    const src = read(f);
+    const statements = src.match(/prepare\(([\s\S]*?)\)\s*\n?\s*\./g) || [];
+    statements.forEach(s => {
+      if (s.indexOf('${') !== -1) throw new Error(f + ' interpolates into SQL');
+    });
+    if (/prepare\(\s*`/.test(src)) throw new Error(f + ' builds SQL from a template literal');
+  });
+  const shared = read('functions/api/_shared.js');
+  if (shared.indexOf('.bind(') === -1) return 'no parameterised binding anywhere';
+  // the only names spliced into SQL are table names resolved through SCHEMA
+  if (!/SCHEMA\[table\]/.test(shared)) return 'table names are not validated against SCHEMA';
+  return true;
+});
+
+/* ---- 19f. offline sync queue operations, executed ---- */
+
+check('every local mutation lands in the outbox without a call site opting in', () => {
+  const APP = loadApp();
+  const Store = APP.Store, S = APP.sync, Sync = S.Sync;
+  Store.load();                                    // seeds, then saves -> captures
+
+  const c = Store.data.sync;
+  const records = S.TABLES.reduce((n, t) => n + Store.data[t].length, 0);
+  if (!records) return 'the seeded store is empty — nothing to diff';
+  if (c.queue.length !== records) {
+    return 'queued ' + c.queue.length + ' ops for ' + records + ' records';
+  }
+  if (c.queue.some(op => !S.validOp(op))) return 'the outbox holds a malformed op';
+  if (c.queue.some(op => op.action !== 'upsert')) return 'a fresh store queued a non-upsert';
+  return true;
+});
+
+check('the outbox holds one op per record — a re-edit replaces, never appends', () => {
+  const APP = loadApp();
+  const Store = APP.Store, S = APP.sync, Sync = S.Sync;
+  Store.load();
+  const c = Store.data.sync;
+
+  // drain: pretend the server applied everything
+  const batch = c.queue.slice();
+  Sync.settle(batch, { applied: batch.map(o => o.opId), rejected: [], changes: {}, cursor: '' });
+  if (c.queue.length) return 'settle() left ' + c.queue.length + ' applied ops behind';
+
+  Store.save();
+  if (c.queue.length) return 'an unchanged store re-queued ' + c.queue.length + ' ops';
+
+  const task = Store.data.tasks[0];
+  task.title = 'שינוי ראשון'; task.updatedAt = Date.now();
+  Store.save();
+  if (c.queue.length !== 1) return 'one edit produced ' + c.queue.length + ' ops';
+
+  task.title = 'שינוי שני'; task.updatedAt = Date.now() + 1;
+  Store.save();
+  if (c.queue.length !== 1) return 'a second edit appended instead of replacing';
+  if (c.queue[0].row.title !== 'שינוי שני') return 'the outbox carries a stale payload';
+  return true;
+});
+
+check('a delete becomes a tombstone op, and a rejected op cannot wedge the queue', () => {
+  const APP = loadApp();
+  const Store = APP.Store, S = APP.sync, Sync = S.Sync;
+  Store.load();
+  const c = Store.data.sync;
+  let batch = c.queue.slice();
+  Sync.settle(batch, { applied: batch.map(o => o.opId), rejected: [], changes: {}, cursor: '' });
+
+  const gone = Store.data.notes[0].id;
+  Store.remove('notes', gone);
+  if (c.queue.length !== 1) return 'a delete produced ' + c.queue.length + ' ops';
+  if (c.queue[0].action !== 'delete') return 'a delete queued a ' + c.queue[0].action;
+  if (c.queue[0].id !== gone) return 'the tombstone names the wrong record';
+
+  // the server refuses it — the op is dropped and does not come straight back
+  batch = c.queue.slice();
+  Sync.settle(batch, {
+    applied: [], rejected: [{ opId: batch[0].opId, error: 'nope' }],
+    changes: {}, cursor: ''
+  });
+  if (c.queue.length) return 'a rejected op stayed in the queue';
+  Store.save();
+  if (c.queue.length) return 'a rejected op was immediately re-queued (wedged loop)';
+  return true;
+});
+
+check('a failed push loses nothing — the queue survives a reload', () => {
+  const APP = loadApp();
+  const Store = APP.Store, S = APP.sync;
+  Store.load();
+  const before = Store.data.sync.queue.length;
+
+  // simulate the reload: normalise the persisted block exactly as load() does
+  const revived = S.normSync(JSON.parse(JSON.stringify(Store.data.sync)));
+  if (revived.queue.length !== before) {
+    return 'reload kept ' + revived.queue.length + ' of ' + before + ' queued ops';
+  }
+  if (revived.queue.some(op => !S.validOp(op))) return 'a revived op is malformed';
+  return true;
+});
+
+check('conflicts resolve last-write-wins on updated_at', () => {
+  const APP = loadApp();
+  const Store = APP.Store, S = APP.sync, Sync = S.Sync;
+  Store.load();
+  const c = Store.data.sync;
+  const batch = c.queue.slice();
+  Sync.settle(batch, { applied: batch.map(o => o.opId), rejected: [], changes: {}, cursor: '' });
+
+  const local = Store.data.tasks[0];
+  local.title = 'הגרסה המקומית';
+  local.updatedAt = Date.parse('2026-07-27T12:00:00.000Z');
+
+  // (a) an older remote edit must not win
+  const stale = S.toRow('tasks', local);
+  stale.title = 'הגרסה הישנה';
+  stale.updated_at = '2026-07-27T09:00:00.000Z';
+  Sync.merge({ tasks: [stale] });
+  if (Store.find('tasks', local.id).title !== 'הגרסה המקומית') return 'an older remote edit overwrote a newer local one';
+
+  // (b) a newer remote edit must win
+  const fresh = S.toRow('tasks', local);
+  fresh.title = 'הגרסה מהענן';
+  fresh.updated_at = '2026-07-27T15:00:00.000Z';
+  Sync.merge({ tasks: [fresh] });
+  const merged = Store.find('tasks', local.id);
+  if (merged.title !== 'הגרסה מהענן') return 'a newer remote edit did not win';
+  if (merged.updatedAt !== Date.parse('2026-07-27T15:00:00.000Z')) return 'the merged record kept the local stamp';
+
+  // (c) a merged remote row is not echoed straight back into the outbox
+  const queued = c.queue.length;
+  Store.save();
+  if (c.queue.length !== queued) return 'a merged remote row was re-queued as a local change';
+  return true;
+});
+
+check('a remote tombstone deletes locally, and a newer local edit survives it', () => {
+  const APP = loadApp();
+  const Store = APP.Store, S = APP.sync, Sync = S.Sync;
+  Store.load();
+  const c = Store.data.sync;
+  const batch = c.queue.slice();
+  Sync.settle(batch, { applied: batch.map(o => o.opId), rejected: [], changes: {}, cursor: '' });
+
+  const doomed = Store.data.lists[0];
+  doomed.updatedAt = Date.parse('2026-07-27T09:00:00.000Z');
+  const tomb = S.toRow('lists', doomed);
+  tomb.deleted_at = '2026-07-27T12:00:00.000Z';
+  tomb.updated_at = '2026-07-27T12:00:00.000Z';
+  Sync.merge({ lists: [tomb] });
+  if (Store.find('lists', doomed.id)) return 'a remote tombstone did not delete locally';
+
+  // a local edit newer than the tombstone wins and is re-offered to the server
+  const kept = Store.data.lists[0];
+  if (!kept) return 'no second list to test the reverse case';
+  kept.updatedAt = Date.parse('2026-07-27T18:00:00.000Z');
+  const lateTomb = S.toRow('lists', kept);
+  lateTomb.deleted_at = '2026-07-27T12:00:00.000Z';
+  lateTomb.updated_at = '2026-07-27T12:00:00.000Z';
+  Sync.merge({ lists: [lateTomb] });
+  if (!Store.find('lists', kept.id)) return 'a newer local edit lost to an older tombstone';
+  Store.save();
+  if (!c.queue.some(op => op.id === kept.id && op.action === 'upsert')) {
+    return 'the surviving record was never re-offered to the server';
+  }
+  return true;
+});
+
+/* ---- 19g. local-first ordering and the status indicator ---- */
+
+check('a mutation writes localStorage before it ever touches the network', () => {
+  const save = (js.match(/save: function \(\) \{[\s\S]*?\n    \},/) || [''])[0];
+  if (!save) return 'no Store.save()';
+  const capture = save.indexOf('Sync.capture()');
+  const write = save.indexOf('localStorage.setItem');
+  const push = save.indexOf('Sync.schedule()');
+  if (capture === -1 || write === -1 || push === -1) return 'save() no longer does all three steps';
+  if (!(capture < write && write < push)) return 'save() order is capture/write/push no longer';
+  if (/Sync\.flush\(\)/.test(save)) return 'save() pushes synchronously — the network is on the tap path';
+  return true;
+});
+
+check('the sync engine never blocks a render (no await on the mutation path)', () => {
+  const engine = (js.match(/var Sync = \{[\s\S]*?\n  \};/) || [''])[0];
+  if (!engine) return 'no Sync engine';
+  if (/\bawait\b/.test(engine)) return 'the engine awaits — a slow network would freeze the UI';
+  if (engine.indexOf('window.fetch') === -1) return 'the engine never calls the API';
+  if (engine.indexOf("'online'") === -1) return 'no reconnect listener — a pull never happens on reconnect';
+  if (engine.indexOf('setInterval') === -1) return 'nothing schedules the background flush';
+  return true;
+});
+
+check('cloud status indicator ships the three mandated states', () => {
+  ['id="syncBtn"', 'id="syncIco"', 'id="syncLabel"'].forEach(n => {
+    if (html.indexOf(n) === -1) throw new Error('missing ' + n);
+  });
+  const topbar = (html.match(/<header class="topbar"[\s\S]*?<\/header>/) || [''])[0];
+  if (topbar.indexOf('id="syncBtn"') === -1) return 'the badge is not in the app header';
+
+  [['🟢', 'מסונכרן לענן'], ['🟡', 'ממתין לסנכרון'], ['🔴', 'אופליין']].forEach(([ico, text]) => {
+    if (js.indexOf(ico) === -1) throw new Error('missing glyph ' + ico);
+    if (js.indexOf(text) === -1) throw new Error('missing label ' + text);
+  });
+  ['.sync-btn.is-synced', '.sync-btn.is-pending', '.sync-btn.is-offline'].forEach(sel => {
+    if (css.indexOf(sel) === -1) throw new Error('no style for ' + sel);
+  });
+  return true;
+});
+
+check('sync state is computed from real conditions, not guessed', () => {
+  const APP = loadApp();
+  const Sync = APP.sync.Sync, Store = APP.Store;
+  Store.load();
+  // the sandbox runs on file:// with no reachable origin => local-only
+  if (Sync.enabled()) return 'the cloud reported itself reachable over file://';
+  if (Sync.state() !== 'offline') return 'state is ' + Sync.state() + ' with no reachable cloud';
+  if (APP.sync.STATES.join(',') !== 'synced,pending,offline') {
+    return 'state vocabulary is ' + APP.sync.STATES.join(',');
+  }
+  // flush() must be a no-op, not a throw, when there is nothing to talk to
+  if (Sync.flush() !== null) return 'flush() attempted a call with no endpoint';
+  return true;
+});
+
+check('the service worker never caches the sync API', () => {
+  if (sw.indexOf("'/api/'") === -1) return '/api/ responses fall into the static cache';
+  return true;
+});
+
+check('PROJECT_PLAN documents the Sprint 5 cloud layer', () => {
+  const required = [
+    'D1', 'Cloudflare Worker', '/api/sync',
+    'מסונכרן לענן', 'ממתין לסנכרון', 'אופליין',
+    'last-write-wins', 'outbox'
+  ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
 });

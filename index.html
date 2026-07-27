@@ -60,6 +60,12 @@
           <h1 id="viewTitle">היום שלי</h1>
           <p id="todayLabel" class="topbar-sub"></p>
         </div>
+        <!-- cloud sync status — 🟢 מסונכרן לענן / 🟡 ממתין לסנכרון / 🔴 אופליין -->
+        <button class="sync-btn is-offline" id="syncBtn" type="button"
+                data-syncstate="offline" aria-live="polite" title="אופליין">
+          <span class="sync-ico" id="syncIco" aria-hidden="true">🔴</span>
+          <span class="sync-label" id="syncLabel">אופליין</span>
+        </button>
         <button class="push-btn" id="pushBtn" type="button" aria-pressed="false">
           <span class="push-ico" id="pushIco" aria-hidden="true">🔔</span>
           <span class="push-label" id="pushLabel">הפעל התראות פוש</span>

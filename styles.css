@@ -203,9 +203,43 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 /* browser has no Notification support — never rendered */
 .push-btn[hidden]{ display:none; }
 
+/* ---------- cloud sync status (Sprint 5) ----------
+   Three honest states, colour never the sole carrier: the glyph and the
+   Hebrew label say the same thing the tint does.                          */
+.sync-btn{
+  flex:0 0 auto;
+  display:inline-flex; align-items:center; gap:7px;
+  padding:0 13px; height:38px; min-height:38px;
+  background:var(--card-2); border:1px solid var(--line-soft);
+  border-radius:999px;
+  color:var(--muted); font-size:12.5px; font-weight:700; white-space:nowrap;
+  transition:color .18s, background .18s, border-color .18s;
+}
+.sync-ico{ font-size:11px; line-height:1; }
+
+/* 🟢 queue empty, the cloud has everything */
+.sync-btn.is-synced{
+  color:var(--personal); background:var(--personal-soft); border-color:var(--personal-edge);
+}
+/* 🟡 mutations are waiting in the outbox */
+.sync-btn.is-pending{
+  color:var(--waiting); background:var(--waiting-soft); border-color:var(--waiting-edge);
+}
+/* 🔴 no network, or no cloud configured — the app still works, locally */
+.sync-btn.is-offline{
+  color:var(--danger); background:var(--danger-soft); border-color:var(--danger-edge);
+}
+
+@media (prefers-reduced-motion: no-preference){
+  .sync-btn.is-pending .sync-ico{ animation:sync-pulse 1.8s ease-in-out infinite; }
+}
+@keyframes sync-pulse{ 0%,100%{ opacity:1; } 50%{ opacity:.35; } }
+
 @media (max-width:420px){
   .push-label{ display:none; }
   .push-btn{ padding:0; width:38px; min-width:38px; justify-content:center; }
+  .sync-label{ display:none; }
+  .sync-btn{ padding:0; width:38px; min-width:38px; justify-content:center; }
 }
 
 /* ---------- segmented control (global category filter) ---------- */

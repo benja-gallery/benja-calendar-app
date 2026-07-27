@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v4';   // Sprint 4 — client CRM, client drawer, next-action engine
+var CACHE_VERSION = 'v5';   // Sprint 5 — D1 schema, Worker sync API, offline queue
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */
@@ -76,6 +76,10 @@ self.addEventListener('fetch', function (event) {
   var url;
   try { url = new URL(req.url); } catch (e) { return; }
   if (url.origin !== self.location.origin) return;          // never cache 3rd party
+
+  // the sync API is live data — a cached /api/* response would hand the client
+  // a stale delta and silently stall the outbox (Sprint 5)
+  if (url.pathname.indexOf('/api/') !== -1) return;
 
   // navigations: network-first, fall back to the cached shell when offline
   if (req.mode === 'navigate') {

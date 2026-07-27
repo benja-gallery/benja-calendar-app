@@ -109,6 +109,47 @@
   var AGENDA_DAYS = 30;  // rolling agenda window
   var SWIPE_MIN = 55;    // px before a horizontal drag counts as navigation
 
+  /* --- cloud sync engine (Sprint 5) --- */
+
+  var SYNC_TABLES = ['events', 'tasks', 'lists', 'notes', 'clients'];
+
+  /**
+   * The column list of every D1 table, in the exact order
+   * migrations/0001_sprint5_init.sql declares it. healthcheck.js cross-checks
+   * this object against the SQL *and* against functions/api/_shared.js, so a
+   * column can never be added in one place and forgotten in the other two.
+   */
+  var SYNC_SCHEMA = {
+    events: ['id', 'title', 'category', 'start_time', 'end_time', 'location',
+      'client_id', 'category_type', 'updated_at', 'owner_id', 'notes',
+      'created_at', 'deleted_at'],
+    tasks: ['id', 'title', 'category', 'status', 'priority', 'due_date',
+      'next_action', 'subtasks_json', 'client_id', 'updated_at', 'owner_id',
+      'due_time', 'notes', 'created_at', 'deleted_at'],
+    lists: ['id', 'title', 'category', 'items_json', 'client_id',
+      'updated_at', 'owner_id', 'list_date', 'created_at', 'deleted_at'],
+    notes: ['id', 'title', 'body', 'category', 'is_pinned', 'client_id',
+      'updated_at', 'owner_id', 'created_at', 'deleted_at'],
+    clients: ['id', 'name', 'phone', 'email', 'status', 'next_action',
+      'initial_interest', 'updated_at', 'owner_id', 'category', 'budget',
+      'next_action_at', 'follow_up_at', 'last_contact_at', 'general_notes',
+      'client_notes_json', 'history_json', 'created_at', 'deleted_at']
+  };
+
+  /* relative — stays correct under a GitHub Pages sub-path, exactly like sw.js */
+  var SYNC_ENDPOINT = 'api';
+  var SYNC_STATES = ['synced', 'pending', 'offline'];
+  var SYNC_LABEL = {
+    synced: { ico: '🟢', text: 'מסונכרן לענן' },
+    pending: { ico: '🟡', text: 'ממתין לסנכרון' },
+    offline: { ico: '🔴', text: 'אופליין' }
+  };
+  var SYNC_MS = 30000;         // background flush cadence
+  var SYNC_DEBOUNCE = 1200;    // quiet window after a local write before pushing
+  var SYNC_BATCH = 100;        // ops per /api/sync round-trip (server caps at 200)
+  var SYNC_QUEUE_MAX = 1000;   // outbox ceiling — one op per record, deduped
+  var ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+
   /* ------------------------------------------------------------- utilities */
 
   function $(sel, root) { return (root || document).querySelector(sel); }
@@ -636,6 +677,7 @@
           notify: { on: false, lead: 10 }, fired: {}
         },
         events: [], tasks: [], lists: [], notes: [], clients: [],
+        sync: blankSync(),
         seeded: false
       };
     },
@@ -653,6 +695,7 @@
               if (Array.isArray(parsed[k])) d[k] = parsed[k];
             });
             if (parsed.prefs && typeof parsed.prefs === 'object') d.prefs = parsed.prefs;
+            if (parsed.sync && typeof parsed.sync === 'object') d.sync = parsed.sync;
             d.seeded = !!parsed.seeded;
           }
         } catch (e) { /* corrupt payload — fall back to a blank store, never crash */ }
@@ -693,15 +736,26 @@
       if (typeof d.prefs.notify.lead !== 'number' || d.prefs.notify.lead < 0) d.prefs.notify.lead = 10;
       if (!d.prefs.fired || typeof d.prefs.fired !== 'object') d.prefs.fired = {};
 
+      // Sprint 5: the cloud block is absent in every pre-D1 store, and its
+      // outbox is replayed from disk — a queued mutation survives a reload
+      d.sync = normSync(d.sync);
+
       this.data = d;
       if (!d.seeded) { this.seed(); }
       return d;
     },
 
+    /**
+     * Local-first, in this order and never any other: diff the change into the
+     * outbox, write localStorage, and only then ask the cloud to catch up.
+     * The network is never on the path between a tap and a repaint.
+     */
     save: function () {
+      Sync.capture();
       try {
         window.localStorage.setItem(STORE_KEY, JSON.stringify(this.data));
       } catch (e) { /* quota or private mode — the in-memory session still works */ }
+      Sync.schedule();
     },
 
     /** first-run sample content so the dashboard is not born empty */
@@ -826,6 +880,519 @@
       return this.data[collection].filter(function (r) { return r.id === id; })[0] || null;
     }
   };
+
+  /* ==========================================================================
+     Cloud sync engine (Sprint 5) — offline-first, last-write-wins
+
+     Shape of the contract
+       * localStorage is the source of truth the UI reads. Every tap writes it
+         first; the cloud is a follower, never a gate (PROJECT_PLAN §8.1).
+       * Store.save() diffs the store against a per-record shadow of "what the
+         server has" and drops the difference into a persisted outbox. Nothing
+         in the app has to remember to enqueue — a mutation cannot escape the
+         diff, and the queue survives a reload because it lives in the store.
+       * One POST /api/sync does both halves: replay the outbox, then pull
+         everything the server has seen since our cursor.
+       * Conflicts resolve last-write-wins on the ISO updated_at, on both ends.
+     ========================================================================== */
+
+  /* ---------------------------------------------------- serialisation ----- */
+
+  function toISOStamp(ms) {
+    var n = typeof ms === 'number' && ms > 0 && ms < 8.64e15 ? ms : Date.now();
+    return new Date(n).toISOString();
+  }
+
+  function fromISOStamp(s) {
+    var n = typeof s === 'string' ? Date.parse(s) : NaN;
+    return isNaN(n) ? 0 : n;
+  }
+
+  function str(v) { return v == null ? '' : String(v); }
+
+  function jsonOut(v) {
+    try { return JSON.stringify(Array.isArray(v) ? v : []); } catch (e) { return '[]'; }
+  }
+
+  function jsonIn(s) {
+    try {
+      var v = JSON.parse(typeof s === 'string' && s ? s : '[]');
+      return Array.isArray(v) ? v : [];
+    } catch (e) { return []; }
+  }
+
+  /** 'YYYY-MM-DD' + 'HH:MM' → 'YYYY-MM-DDTHH:MM'; an untimed record keeps the bare date */
+  function joinStamp(date, time) {
+    var d = str(date);
+    if (!d) return '';
+    var t = str(time);
+    return t ? d + 'T' + t : d;
+  }
+
+  function splitStamp(v) {
+    var s = str(v);
+    var i = s.indexOf('T');
+    return i === -1 ? { date: s, time: '' } : { date: s.slice(0, i), time: s.slice(i + 1, i + 6) };
+  }
+
+  /** local record → D1 row. Emits exactly the columns of SYNC_SCHEMA, no more. */
+  var TO_ROW = {
+    events: function (r) {
+      return {
+        id: r.id, title: str(r.title), category: normCat(r.category),
+        start_time: joinStamp(r.date, r.start),
+        end_time: joinStamp(r.date, r.end),
+        location: str(r.location), client_id: str(r.clientId),
+        category_type: str(r.type) || 'event',
+        updated_at: toISOStamp(r.updatedAt), owner_id: str(r.ownerId) || OWNER.id,
+        notes: str(r.notes), created_at: toISOStamp(r.createdAt), deleted_at: null
+      };
+    },
+    tasks: function (r) {
+      return {
+        id: r.id, title: str(r.title), category: normCat(r.category),
+        status: normStatus(r.status), priority: normPriority(r.priority),
+        due_date: str(r.due), next_action: str(r.nextAction),
+        subtasks_json: jsonOut(r.subtasks), client_id: str(r.clientId),
+        updated_at: toISOStamp(r.updatedAt), owner_id: str(r.ownerId) || OWNER.id,
+        due_time: str(r.time), notes: str(r.notes),
+        created_at: toISOStamp(r.createdAt), deleted_at: null
+      };
+    },
+    lists: function (r) {
+      return {
+        id: r.id, title: str(r.title), category: normCat(r.category),
+        items_json: jsonOut(r.items), client_id: str(r.clientId),
+        updated_at: toISOStamp(r.updatedAt), owner_id: str(r.ownerId) || OWNER.id,
+        list_date: str(r.date), created_at: toISOStamp(r.createdAt), deleted_at: null
+      };
+    },
+    notes: function (r) {
+      return {
+        id: r.id, title: str(r.title), body: str(r.body), category: normCat(r.category),
+        is_pinned: r.pinned ? 1 : 0, client_id: str(r.clientId),
+        updated_at: toISOStamp(r.updatedAt), owner_id: str(r.ownerId) || OWNER.id,
+        created_at: toISOStamp(r.createdAt), deleted_at: null
+      };
+    },
+    clients: function (r) {
+      return {
+        id: r.id, name: str(r.name), phone: str(r.phone), email: str(r.email),
+        status: normClientStatus(r.status), next_action: str(r.nextAction),
+        initial_interest: str(r.interest),
+        updated_at: toISOStamp(r.updatedAt), owner_id: str(r.ownerId) || OWNER.id,
+        category: normCat(r.category), budget: str(r.budget),
+        next_action_at: str(r.nextActionAt), follow_up_at: str(r.followUpAt),
+        last_contact_at: str(r.lastContactAt), general_notes: str(r.notes),
+        client_notes_json: jsonOut(r.clientNotes), history_json: jsonOut(r.history),
+        created_at: toISOStamp(r.createdAt), deleted_at: null
+      };
+    }
+  };
+
+  /** D1 row → local record, re-normalised through the same migrators as a load */
+  var FROM_ROW = {
+    events: function (row) {
+      var s = splitStamp(row.start_time), e = splitStamp(row.end_time);
+      return {
+        type: str(row.category_type) || 'event', id: row.id,
+        title: str(row.title), category: normCat(row.category),
+        date: s.date, start: s.time, end: e.time,
+        location: str(row.location), notes: str(row.notes),
+        clientId: str(row.client_id)
+      };
+    },
+    tasks: function (row) {
+      return migrateTask({
+        type: 'task', id: row.id, title: str(row.title), category: normCat(row.category),
+        status: normStatus(row.status), priority: normPriority(row.priority),
+        due: str(row.due_date), time: str(row.due_time),
+        nextAction: str(row.next_action), subtasks: jsonIn(row.subtasks_json),
+        notes: str(row.notes), clientId: str(row.client_id)
+      });
+    },
+    lists: function (row) {
+      return migrateList({
+        type: 'list', id: row.id, title: str(row.title), category: normCat(row.category),
+        items: jsonIn(row.items_json), date: str(row.list_date),
+        clientId: str(row.client_id)
+      });
+    },
+    notes: function (row) {
+      return migrateNote({
+        type: 'note', id: row.id, title: str(row.title), body: str(row.body),
+        category: normCat(row.category), pinned: !!Number(row.is_pinned),
+        clientId: str(row.client_id)
+      });
+    },
+    clients: function (row) {
+      return migrateClient({
+        type: 'client', id: row.id, name: str(row.name), category: normCat(row.category),
+        phone: str(row.phone), email: str(row.email),
+        status: normClientStatus(row.status), interest: str(row.initial_interest),
+        budget: str(row.budget), nextAction: str(row.next_action),
+        nextActionAt: str(row.next_action_at), followUpAt: str(row.follow_up_at),
+        lastContactAt: str(row.last_contact_at), notes: str(row.general_notes),
+        clientNotes: jsonIn(row.client_notes_json), history: jsonIn(row.history_json)
+      });
+    }
+  };
+
+  function toRow(table, rec) {
+    var fn = TO_ROW[table];
+    return fn && rec && rec.id ? fn(rec) : null;
+  }
+
+  /** the returned record carries the server's stamps, so LWW stays comparable */
+  function fromRow(table, row) {
+    var fn = FROM_ROW[table];
+    if (!fn || !row || typeof row.id !== 'string') return null;
+    var rec = fn(row);
+    rec.ownerId = str(row.owner_id) || OWNER.id;
+    rec.createdAt = fromISOStamp(row.created_at) || fromISOStamp(row.updated_at);
+    rec.updatedAt = fromISOStamp(row.updated_at);
+    return rec;
+  }
+
+  /* ------------------------------------------------------ payload guards --- */
+
+  /** a row may only ever carry the columns its table declares */
+  function validRow(table, row) {
+    var cols = SYNC_SCHEMA[table];
+    if (!cols || !row || typeof row !== 'object') return false;
+    if (typeof row.id !== 'string' || !row.id) return false;
+    if (typeof row.updated_at !== 'string' || !ISO_RE.test(row.updated_at)) return false;
+    var keys = Object.keys(row);
+    for (var i = 0; i < keys.length; i++) {
+      if (cols.indexOf(keys[i]) === -1) return false;
+    }
+    return true;
+  }
+
+  /** nothing malformed ever leaves the queue — or survives a reload inside it */
+  function validOp(op) {
+    if (!op || typeof op !== 'object') return false;
+    if (typeof op.opId !== 'string' || !op.opId) return false;
+    if (SYNC_TABLES.indexOf(op.table) === -1) return false;
+    if (typeof op.id !== 'string' || !op.id) return false;
+    if (op.action !== 'upsert' && op.action !== 'delete') return false;
+    if (op.action === 'upsert' && !validRow(op.table, op.row)) return false;
+    return true;
+  }
+
+  function blankSync() {
+    var s = { endpoint: SYNC_ENDPOINT, queue: [], shadow: {}, cursor: '', lastSyncAt: '' };
+    SYNC_TABLES.forEach(function (t) { s.shadow[t] = {}; });
+    return s;
+  }
+
+  function normSync(raw) {
+    var s = blankSync();
+    if (!raw || typeof raw !== 'object') return s;
+
+    if (typeof raw.endpoint === 'string') s.endpoint = raw.endpoint;
+    if (typeof raw.cursor === 'string' && ISO_RE.test(raw.cursor)) s.cursor = raw.cursor;
+    if (typeof raw.lastSyncAt === 'string') s.lastSyncAt = raw.lastSyncAt;
+
+    s.queue = (Array.isArray(raw.queue) ? raw.queue : [])
+      .filter(validOp)
+      .slice(0, SYNC_QUEUE_MAX);
+
+    var shadow = raw.shadow && typeof raw.shadow === 'object' ? raw.shadow : {};
+    SYNC_TABLES.forEach(function (t) {
+      var src = shadow[t] && typeof shadow[t] === 'object' ? shadow[t] : {};
+      Object.keys(src).forEach(function (id) {
+        if (typeof src[id] === 'number') s.shadow[t][id] = src[id];
+      });
+    });
+    return s;
+  }
+
+  /* --------------------------------------------------------- the engine --- */
+
+  var Sync = {
+    busy: false,
+    lastError: '',
+    timer: null,
+    debounce: null,
+
+    cfg: function () {
+      var d = Store.data;
+      if (!d) return null;
+      if (!d.sync || typeof d.sync !== 'object') d.sync = blankSync();
+      SYNC_TABLES.forEach(function (t) {
+        if (!d.sync.shadow[t]) d.sync.shadow[t] = {};
+      });
+      return d.sync;
+    },
+
+    /** the cloud needs an origin to call — file:// and a blank endpoint mean local-only */
+    enabled: function () {
+      var c = Sync.cfg();
+      if (!c || !c.endpoint) return false;
+      var p = (window.location && window.location.protocol) || '';
+      return p === 'http:' || p === 'https:';
+    },
+
+    online: function () {
+      var n = window.navigator;
+      return !n || typeof n.onLine !== 'boolean' ? true : n.onLine;
+    },
+
+    /** 🟢 מסונכרן לענן · 🟡 ממתין לסנכרון · 🔴 אופליין */
+    state: function () {
+      if (!Sync.online() || !Sync.enabled()) return 'offline';
+      var c = Sync.cfg();
+      if (!c) return 'offline';
+      if (c.queue.length || Sync.busy) return 'pending';
+      return c.lastSyncAt ? 'synced' : 'pending';
+    },
+
+    /* ---- outbox ---- */
+
+    /**
+     * Diff the whole store against the shadow and enqueue what differs. Called
+     * from Store.save(), so every mutation path in the app is covered without
+     * a single call site having to opt in.
+     */
+    capture: function () {
+      var d = Store.data;
+      var c = Sync.cfg();
+      if (!d || !c) return;
+
+      SYNC_TABLES.forEach(function (t) {
+        var shadow = c.shadow[t];
+        var live = {};
+        var known = {};
+
+        Object.keys(shadow).forEach(function (id) { known[id] = 1; });
+        c.queue.forEach(function (op) { if (op.table === t) known[op.id] = 1; });
+
+        (d[t] || []).forEach(function (rec) {
+          if (!rec || !rec.id) return;
+          live[rec.id] = 1;
+          var stamp = rec.updatedAt || 0;
+          if (shadow[rec.id] !== stamp) Sync.enqueue(t, rec.id, 'upsert', toRow(t, rec), stamp);
+        });
+
+        // gone locally but known to the server (or to a pending op) => tombstone
+        Object.keys(known).forEach(function (id) {
+          if (!live[id]) Sync.enqueue(t, id, 'delete', null, Date.now());
+        });
+      });
+    },
+
+    /** one op per record: a second edit before a push replaces the first */
+    enqueue: function (table, id, action, row, stamp) {
+      var c = Sync.cfg();
+      if (!c) return null;
+      var at = stamp || Date.now();
+      var op = {
+        opId: uid('op'), table: table, id: id, action: action,
+        row: action === 'upsert' ? row : null, stamp: at, at: toISOStamp(at)
+      };
+      if (action === 'upsert' && !validRow(table, op.row)) return null;
+
+      for (var i = 0; i < c.queue.length; i++) {
+        if (c.queue[i].table === table && c.queue[i].id === id) { c.queue[i] = op; return op; }
+      }
+      if (c.queue.length >= SYNC_QUEUE_MAX) return null;
+      c.queue.push(op);
+      return op;
+    },
+
+    /* ---- network ---- */
+
+    /** debounced push — a burst of taps costs one round-trip, not one each */
+    schedule: function () {
+      if (!Sync.enabled()) { Sync.paint(); return; }
+      if (Sync.debounce) clearTimeout(Sync.debounce);
+      Sync.debounce = setTimeout(function () {
+        Sync.debounce = null;
+        Sync.flush();
+      }, SYNC_DEBOUNCE);
+      Sync.paint();
+    },
+
+    /**
+     * One round-trip does both halves of a sync: replay the outbox, then pull
+     * everything newer than our cursor. Called on launch, on reconnect, on a
+     * 30s heartbeat and after a debounced local write.
+     */
+    flush: function () {
+      var c = Sync.cfg();
+      if (!c || Sync.busy) return null;
+      if (!Sync.enabled() || !Sync.online() || typeof window.fetch !== 'function') {
+        Sync.paint();
+        return null;
+      }
+
+      var batch = c.queue.slice(0, SYNC_BATCH);
+      Sync.busy = true;
+      Sync.paint();
+
+      return window.fetch(c.endpoint + '/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          since: c.cursor || '',
+          ops: batch.map(function (op) {
+            return {
+              opId: op.opId, table: op.table, id: op.id,
+              action: op.action, at: op.at, row: op.row
+            };
+          })
+        })
+      })
+        .then(function (res) {
+          if (!res || !res.ok) throw new Error('HTTP ' + (res ? res.status : '?'));
+          return res.json();
+        })
+        .then(function (out) {
+          if (!out || out.ok !== true || !out.data) {
+            throw new Error((out && out.error && out.error.message) || 'bad envelope');
+          }
+          Sync.settle(batch, out.data);
+          c.lastSyncAt = out.data.now || toISOStamp(Date.now());
+          Sync.lastError = '';
+          Store.save();
+          render();
+          return true;
+        })
+        ['catch'](function (e) {
+          // the queue is untouched — a failed push never loses a mutation
+          Sync.lastError = (e && e.message) ? e.message : 'sync failed';
+          return false;
+        })
+        .then(function (res) {
+          Sync.busy = false;
+          Sync.paint();
+          return res;
+        });
+    },
+
+    /** advance the shadow for what landed, then merge what came back */
+    settle: function (batch, data) {
+      var c = Sync.cfg();
+      if (!c) return;
+
+      var applied = {}, rejected = {};
+      (data.applied || []).forEach(function (id) { applied[id] = 1; });
+      (data.rejected || []).forEach(function (r) { if (r && r.opId) rejected[r.opId] = 1; });
+
+      batch.forEach(function (op) {
+        if (!applied[op.opId] && !rejected[op.opId]) return;
+
+        // Applied or refused, the server has spoken about this exact version:
+        // forget it, so the diff stops re-offering it and the queue cannot
+        // wedge on a payload the server will never take. A later local edit
+        // bumps updatedAt and the record is picked up again on the next diff.
+        if (op.action === 'delete') delete c.shadow[op.table][op.id];
+        else c.shadow[op.table][op.id] = op.stamp;
+      });
+
+      c.queue = c.queue.filter(function (op) {
+        return !applied[op.opId] && !rejected[op.opId];
+      });
+
+      if (data.rejected && data.rejected.length) {
+        Sync.lastError = data.rejected.length + ' ops rejected';
+      }
+
+      Sync.merge(data.changes || {});
+      if (typeof data.cursor === 'string' && ISO_RE.test(data.cursor)) c.cursor = data.cursor;
+    },
+
+    /**
+     * Last-write-wins on updated_at. The shadow is always set to the *server's*
+     * stamp, never the local one — so a local record that is genuinely newer
+     * still differs from the shadow and gets pushed on the next capture.
+     */
+    merge: function (changes) {
+      var d = Store.data, c = Sync.cfg();
+      if (!d || !c || !changes || typeof changes !== 'object') return 0;
+      var touched = 0;
+
+      SYNC_TABLES.forEach(function (t) {
+        var rows = changes[t];
+        if (!Array.isArray(rows)) return;
+
+        rows.forEach(function (row) {
+          if (!row || typeof row.id !== 'string' || !row.id) return;
+          var stamp = fromISOStamp(row.updated_at);
+          var local = Store.find(t, row.id);
+          var arr = d[t];
+
+          if (row.deleted_at) {                       // tombstone
+            if (local && (local.updatedAt || 0) <= stamp) {
+              arr.splice(arr.indexOf(local), 1);
+              touched++;
+            }
+            delete c.shadow[t][row.id];
+            return;
+          }
+
+          var incoming = fromRow(t, row);
+          if (!incoming) return;
+
+          if (!local) { arr.push(incoming); touched++; }
+          else if ((local.updatedAt || 0) < stamp) { arr[arr.indexOf(local)] = incoming; touched++; }
+
+          c.shadow[t][row.id] = stamp;
+        });
+      });
+
+      return touched;
+    },
+
+    /* ---- status indicator ---- */
+
+    paint: function () {
+      var btn = $('#syncBtn');
+      if (!btn) return;
+      var st = Sync.state();
+      var meta = SYNC_LABEL[st];
+      var c = Sync.cfg();
+      var q = c ? c.queue.length : 0;
+
+      btn.className = 'sync-btn is-' + st;
+      btn.setAttribute('data-syncstate', st);
+      $('#syncIco').textContent = meta.ico;
+      $('#syncLabel').textContent = meta.text;
+
+      var detail = meta.text;
+      if (q) detail += ' · ' + q + ' שינויים ממתינים';
+      else if (st === 'synced' && c && c.lastSyncAt) detail += ' · ' + hhmm(c.lastSyncAt);
+      if (Sync.lastError && st !== 'offline') detail += ' · ' + Sync.lastError;
+      btn.title = detail;
+      btn.setAttribute('aria-label', detail);
+    },
+
+    init: function () {
+      var btn = $('#syncBtn');
+      if (btn) btn.addEventListener('click', function () { Sync.flush(); });
+
+      window.addEventListener('online', function () { Sync.paint(); Sync.flush(); });
+      window.addEventListener('offline', function () { Sync.paint(); });
+      document.addEventListener('visibilitychange', function () {
+        if (!document.hidden) Sync.flush();
+      });
+
+      if (Sync.timer) clearInterval(Sync.timer);
+      Sync.timer = setInterval(function () { Sync.flush(); }, SYNC_MS);
+
+      Sync.paint();
+      Sync.flush();                       // pull remote updates on app launch
+    }
+  };
+
+  /** 'HH:MM' out of an ISO instant, for the "last synced" tooltip */
+  function hhmm(iso) {
+    var ms = fromISOStamp(iso);
+    if (!ms) return '';
+    var d = new Date(ms);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
 
   /* ------------------------------------------------------------------ state */
 
@@ -1965,6 +2532,7 @@
     renderTasks();
     renderClients();
     renderDrawer();
+    Sync.paint();
     $('#todayLabel').textContent = hebDate(todayISO());
     $('#railUserName').textContent = OWNER.name;
   }
@@ -2684,6 +3252,7 @@
     setView('today');
     registerServiceWorker();
     Notify.init();
+    Sync.init();
   }
 
   if (document.readyState === 'loading') {
@@ -2696,6 +3265,27 @@
   window.APP = {
     Store: Store, isoDate: isoDate, plural: plural, normCat: normCat,
     STORE_KEY: STORE_KEY, Notify: Notify, Cal: Cal,
+
+    // cloud sync engine — schema, serialisers, outbox and merge, all pure
+    // enough for healthcheck.js to drive without a network or a DOM
+    sync: {
+      TABLES: SYNC_TABLES,
+      SCHEMA: SYNC_SCHEMA,
+      STATES: SYNC_STATES,
+      LABEL: SYNC_LABEL,
+      ENDPOINT: SYNC_ENDPOINT,
+      Sync: Sync,
+      blankSync: blankSync,
+      normSync: normSync,
+      toRow: toRow,
+      fromRow: fromRow,
+      toISOStamp: toISOStamp,
+      fromISOStamp: fromISOStamp,
+      joinStamp: joinStamp,
+      splitStamp: splitStamp,
+      validRow: validRow,
+      validOp: validOp
+    },
 
     // pure tasks / lists / notes engine — the healthcheck drives it directly
     tasks: {
