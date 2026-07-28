@@ -26,6 +26,21 @@
 # Until they are set, /api/gcal/* answers 503 gcal_not_configured and the app
 # keeps working exactly as it did in Sprint 5 (§7.4e).
 #
+# Web Push (Sprint 11, §7.4m) needs four more secrets:
+#   node tools/gen-vapid.js                       # prints the P-256 key pair
+#   wrangler pages secret put VAPID_PUBLIC_KEY
+#   wrangler pages secret put VAPID_PRIVATE_KEY
+#   wrangler pages secret put VAPID_SUBJECT       # mailto:you@example.com
+#   wrangler pages secret put PUSH_DISPATCH_SECRET
+#   wrangler d1 migrations apply benja-calendar --remote   # 0004 adds the two push tables
+# Until they are set, /api/push/* answers 503, the client stays on its local
+# 30-second scan, and nothing else changes.
+#
+# NOTE: there is deliberately no [triggers] block here. Cloudflare PAGES has no
+# scheduled handler — a cron declared on a Pages project never fires. The
+# reminder clock is a separate Worker in tools/push-cron-worker/, which POSTs
+# /api/push/dispatch once a minute with PUSH_DISPATCH_SECRET.
+#
 # Until database_id is filled in, /api/* answers 500 no_binding and the client
 # stays on its local store — the app is fully usable either way (§8).
 # ===========================================================================

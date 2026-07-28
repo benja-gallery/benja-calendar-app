@@ -26,7 +26,7 @@
 <!-- ?v= MUST match CACHE_VERSION in sw.js. GitHub Pages serves these with
      max-age=600 and no content hash, so without the query an installed phone
      can keep serving the previous build out of its own HTTP cache. -->
-<link rel="stylesheet" href="styles.css?v=v16">
+<link rel="stylesheet" href="styles.css?v=v17">
 </head>
 <body>
 
@@ -120,6 +120,17 @@
 
     <!-- ---------- VIEW: MY DAY ---------- -->
     <section class="view is-active" id="view-today" aria-label="היום שלי">
+
+      <!-- 0. התראות — the permission, said out loud (Sprint 11).
+           The top-bar pill carries the same state, but it is one of four pills
+           in a crowded bar. A blocked permission is worse than an unasked one:
+           the app looks armed and delivers nothing, so a missed meeting gets
+           blamed on the app instead of on the setting causing it. -->
+      <div class="nfy-alert card" id="notifyAlert" role="status" aria-live="polite" hidden>
+        <span class="nfy-ico" id="notifyAlertIco" aria-hidden="true">🔔</span>
+        <p class="nfy-text" id="notifyAlertText"></p>
+        <button class="nfy-cta" id="notifyAlertCta" type="button">הפעל התראות</button>
+      </div>
 
       <!-- 1. Smart summary -->
       <div class="summary card">
@@ -489,6 +500,6 @@
   <button class="toast-undo" id="toastUndo" data-undo="1" type="button" hidden>אחזר</button>
 </div>
 
-<script src="app.js?v=v16"></script>
+<script src="app.js?v=v17"></script>
 </body>
 </html>

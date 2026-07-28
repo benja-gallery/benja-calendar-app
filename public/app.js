@@ -114,6 +114,9 @@
   var CHIME_TONES = [880, 1174.66];   // A5 → D6, a two-note bell
   var CHIME_STEP = 0.16;              // seconds between the two notes
   var CHIME_TAIL = 0.55;              // seconds each note takes to die away
+  /* every gesture type that counts as "the user touched the page" for the
+     autoplay policy — the AudioContext is unlocked from the first of them */
+  var CHIME_GESTURES = ['pointerdown', 'touchstart', 'mousedown', 'keydown', 'click'];
 
   /* --- client CRM (Sprint 4) --- */
   var CLIENT_STATUSES = ['lead', 'contacted', 'interested', 'quoted',
@@ -420,6 +423,39 @@
       try {
         if (ctx.state === 'suspended' && typeof ctx.resume === 'function') ctx.resume();
       } catch (e) { return false; }
+      return true;
+    },
+
+    /**
+     * Sprint 11 — the two toggles are not the only session that has a gesture.
+     *
+     * Until now `unlock()` was reached from exactly two taps: enabling
+     * notifications and toggling the chime. A phone whose permission was
+     * granted on a previous visit never taps either one again, so the first
+     * thing that ever touched the AudioContext was `play()` — called from
+     * inside the 30-second scan. A timer callback is not a gesture: the context
+     * is created `suspended`, `resume()` outside a gesture is refused on both
+     * iOS and Android, and the reminder arrives silently. That is the "no sound"
+     * half of the field report.
+     *
+     * So the unlock is moved onto the FIRST touch anywhere in the document,
+     * whatever it lands on. The listeners stay attached on purpose rather than
+     * firing once: iOS suspends the context every time the app is backgrounded,
+     * and the next tap is what brings it back. Nothing is created while the
+     * chime is switched off — `armed()` is still the only vote that matters.
+     */
+    armOnFirstGesture: function (doc) {
+      var d = doc || (typeof document !== 'undefined' ? document : null);
+      if (!d || typeof d.addEventListener !== 'function') return false;
+      if (Chime.gestureArmed) return true;
+      Chime.gestureArmed = true;
+
+      function onGesture() {
+        if (Chime.armed()) Chime.unlock();
+      }
+      CHIME_GESTURES.forEach(function (type) {
+        try { d.addEventListener(type, onGesture, true); } catch (e) { /* older engine */ }
+      });
       return true;
     },
 
@@ -1151,7 +1187,9 @@
         prefs: {
           filter: 'all', calView: 'month', taskTab: 'all', clientTab: 'all',
           workspace: 'tasks',
-          notify: { on: false, lead: 10, sound: true }, fired: {},
+          // serverAt — when the Worker last accepted this device's push
+          // subscription. '' means local-only delivery (Sprint 11).
+          notify: { on: false, lead: 10, sound: true, serverAt: '' }, fired: {},
           // Sprint 10 — "משימות קרובות" on My Day starts open: the whole point
           // of the widget is that nothing can hide inside it
           upcomingOpen: true
@@ -1225,12 +1263,14 @@
 
       // reminder prefs may be absent in a store written before the PWA upgrade
       if (!d.prefs.notify || typeof d.prefs.notify !== 'object') {
-        d.prefs.notify = { on: false, lead: 10, sound: true };
+        d.prefs.notify = { on: false, lead: 10, sound: true, serverAt: '' };
       }
       d.prefs.notify.on = !!d.prefs.notify.on;
       if (typeof d.prefs.notify.lead !== 'number' || d.prefs.notify.lead < 0) d.prefs.notify.lead = 10;
       // Sprint 10 — the chime defaults ON, and only an explicit false turns it off
       d.prefs.notify.sound = d.prefs.notify.sound !== false;
+      // Sprint 11 — absent in every store written before server push existed
+      if (typeof d.prefs.notify.serverAt !== 'string') d.prefs.notify.serverAt = '';
       if (!d.prefs.fired || typeof d.prefs.fired !== 'object') d.prefs.fired = {};
       d.prefs.upcomingOpen = d.prefs.upcomingOpen !== false;
 
@@ -5895,8 +5935,28 @@
   var NOTIFY_BADGE = 'icons/favicon-32.png';
   var SCAN_MS = 30000;
 
+  /* relative, exactly like SYNC_ENDPOINT and GCAL_ENDPOINT */
+  var PUSH_ENDPOINT = 'api/push';
+
+  /**
+   * Sprint 11 — how late a reminder may still be raised, in minutes.
+   *
+   * Until now the window was `0 <= gap <= lead`: the moment a start time went
+   * one minute past, the record was skipped and, because the scan only ever
+   * looks forward, skipped forever. Anything that cost the scan a minute — a
+   * screen that slept, a tab in the background, a task created "for a minute
+   * ago" — silently swallowed the reminder. That is the "nothing fired" half of
+   * the field report, and a hard `gap < 0` is the whole of it.
+   *
+   * A late reminder is still worth having; a stale one is not. Twenty minutes
+   * is the line, and the fired-ledger still guarantees exactly one delivery.
+   */
+  var MISS_GRACE_MIN = 20;
+
   var Notify = {
     timer: null,
+    // the in-flight server registration, so a focus + a launch cannot race
+    linking: null,
 
     supported: function () {
       return typeof window.Notification !== 'undefined';
@@ -5915,6 +5975,7 @@
     /** paint the top-bar toggle to match the real browser permission state */
     paint: function () {
       this.paintSound();
+      this.paintAlert();
 
       var btn = $('#pushBtn'), label = $('#pushLabel'), ico = $('#pushIco');
       if (!btn) return;
@@ -5929,16 +5990,91 @@
         ico.textContent = '🔕';
         label.textContent = 'התראות חסומות';
         btn.setAttribute('aria-pressed', 'false');
+        btn.title = 'ההתראות חסומות בהגדרות האתר בדפדפן';
       } else if (p === 'granted' && Store.data.prefs.notify.on) {
         btn.classList.add('is-on');
         ico.textContent = '🔔';
         label.textContent = 'התראות פעילות';
         btn.setAttribute('aria-pressed', 'true');
+        // the honest difference between the two delivery paths, on the control
+        // itself: a locally-scheduled reminder cannot outlive a closed app
+        btn.title = Store.data.prefs.notify.serverAt
+          ? 'התראות שרת פעילות — יגיעו גם כשהאפליקציה סגורה'
+          : 'התראות מקומיות בלבד — יגיעו רק כשהאפליקציה פתוחה';
       } else {
         ico.textContent = '🔔';
         label.textContent = 'הפעל התראות פוש';
         btn.setAttribute('aria-pressed', 'false');
+        btn.title = 'הפעלת התראות פוש ותזכורות';
       }
+    },
+
+    /**
+     * The permission state, reduced to the four answers a banner has to give.
+     * 'off' is a granted permission the user has switched off inside the app —
+     * a deliberate choice, so it is stated but not shouted about.
+     */
+    alertState: function () {
+      if (!this.supported()) return 'unsupported';
+      var p = this.permission();
+      if (p === 'denied') return 'denied';
+      if (p !== 'granted') return 'ask';
+      return Store.data.prefs.notify.on ? 'ok' : 'off';
+    },
+
+    /**
+     * Sprint 11 — the permission, said out loud on the screen the app opens on.
+     *
+     * The top-bar pill already carries the state, but it is one of four pills in
+     * a crowded bar. A user who never notices it has no reminders and no idea
+     * why, and a *blocked* permission is worse than an unasked one: the app
+     * looks armed and delivers nothing, which is exactly how a missed meeting
+     * gets blamed on the app rather than on the browser setting causing it.
+     * This banner is the only surface in the app that says so out loud.
+     */
+    paintAlert: function () {
+      var box = $('#notifyAlert');
+      if (!box) return;
+
+      var state = this.alertState();
+      if (state === 'ok') { box.hidden = true; return; }
+
+      var text = $('#notifyAlertText'), cta = $('#notifyAlertCta'), ico = $('#notifyAlertIco');
+      box.hidden = false;
+      box.classList.toggle('is-blocked', state === 'denied' || state === 'unsupported');
+
+      if (state === 'denied') {
+        if (ico) ico.textContent = '🔕';
+        if (text) {
+          text.textContent = 'ההתראות חסומות בדפדפן — תזכורות לא יגיעו אליך כלל, ' +
+            'גם לא כשהאפליקציה פתוחה.';
+        }
+        if (cta) { cta.hidden = false; cta.textContent = 'איך לבטל את החסימה?'; }
+      } else if (state === 'unsupported') {
+        if (ico) ico.textContent = '🔕';
+        if (text) {
+          text.textContent = 'הדפדפן הזה לא תומך בהתראות. באייפון צריך להוסיף את ' +
+            'האפליקציה למסך הבית ולפתוח אותה משם.';
+        }
+        if (cta) cta.hidden = true;
+      } else {
+        if (ico) ico.textContent = '🔔';
+        if (text) {
+          text.textContent = state === 'off'
+            ? 'ההתראות כבויות — תזכורות לפגישות ולמשימות לא יגיעו אליך.'
+            : 'התראות עוד לא הופעלו — בלעדיהן שום תזכורת לא תגיע לטלפון.';
+        }
+        if (cta) { cta.hidden = false; cta.textContent = 'הפעל התראות'; }
+      }
+    },
+
+    /** the banner's CTA — the same gesture as the pill, plus the blocked recipe */
+    onAlertTap: function () {
+      if (this.alertState() === 'denied') {
+        toast('לביטול החסימה: תפריט הדפדפן ← הגדרות אתר ← התראות ← אפשר');
+        return;
+      }
+      this.onToggle();
     },
 
     onToggle: function () {
@@ -5961,7 +6097,7 @@
         Store.save();
         self.paint();
         toast(Store.data.prefs.notify.on ? 'התראות פוש הופעלו' : 'התראות פוש כובו');
-        if (Store.data.prefs.notify.on) self.tick();
+        if (Store.data.prefs.notify.on) { self.tick(); self.linkServer(); }
         return;
       }
 
@@ -5988,6 +6124,7 @@
           ' דקות לפני כל פגישה ומשימה מתוזמנת — ולכל פריט אפשר לבחור תזכורת משלו.');
         toast('התראות פוש הופעלו');
         this.tick();
+        this.linkServer();
       } else {
         Store.data.prefs.notify.on = false;
         Store.save();
@@ -6071,7 +6208,10 @@
       var out = [];
 
       function when(gap) {
-        if (gap <= 0) return 'מתחיל עכשיו';
+        // a reminder inside the grace window is late, and says so rather than
+        // claiming a start time that has already passed
+        if (gap < 0) return 'התחיל לפני ' + (-gap) + ' דק׳';
+        if (gap === 0) return 'מתחיל עכשיו';
         if (gap < 60) return 'בעוד ' + gap + ' דק׳';
         if (gap < 1440) return 'בעוד ' + Math.round(gap / 60) + ' שע׳';
         return 'מחר';
@@ -6089,7 +6229,8 @@
         var window_ = remindLead(e, lead);
         if (window_ === null) return;                 // this record is muted
         var gap = gapTo(e.date, e.start);
-        if (gap === null || gap < 0 || gap > window_) return;
+        // early is a miss, late-but-inside-the-grace-window is a delivery
+        if (gap === null || gap > window_ || gap < -MISS_GRACE_MIN) return;
         out.push({
           id: e.id, on: e.date,
           title: 'פגישה ' + when(gap),
@@ -6103,7 +6244,7 @@
         var window_ = remindLead(x, lead);
         if (window_ === null) return;
         var gap = gapTo(x.due, x.time);
-        if (gap === null || gap < 0 || gap > window_) return;
+        if (gap === null || gap > window_ || gap < -MISS_GRACE_MIN) return;
         out.push({
           id: x.id, on: x.due,
           title: 'משימה ' + when(gap),
@@ -6142,21 +6283,92 @@
       if (dirty) Store.save();
     },
 
+    /** base64url VAPID key → the Uint8Array pushManager.subscribe() demands */
+    keyBytes: function (publicKey) {
+      var pad = '='.repeat((4 - publicKey.length % 4) % 4);
+      var raw = window.atob((publicKey + pad).replace(/-/g, '+').replace(/_/g, '/'));
+      var bytes = new Uint8Array(raw.length);
+      for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      return bytes;
+    },
+
     /**
-     * Web-push subscription hook. Wire a VAPID public key here once a push
-     * server exists; the service worker already handles the delivered event.
+     * Web-push subscription. Given a VAPID public key, returns the browser's
+     * PushSubscription — the existing one when there is one, so a reload does
+     * not churn a new endpoint on every launch.
      */
     subscribe: function (publicKey) {
       if (!publicKey || !('serviceWorker' in navigator) || !('PushManager' in window)) {
         return Promise.resolve(null);
       }
-      var raw = window.atob(publicKey.replace(/-/g, '+').replace(/_/g, '/'));
-      var bytes = new Uint8Array(raw.length);
-      for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      var bytes = this.keyBytes(publicKey);
 
       return navigator.serviceWorker.ready.then(function (reg) {
-        return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: bytes });
+        return reg.pushManager.getSubscription().then(function (existing) {
+          if (existing) return existing;
+          return reg.pushManager.subscribe({
+            userVisibleOnly: true, applicationServerKey: bytes
+          });
+        });
       });
+    },
+
+    /**
+     * Sprint 11 — hand the subscription to the Worker, which is the only thing
+     * in this system that can raise a reminder while the app is closed.
+     *
+     * Everything below `tick()` runs in a page. A page that is not open runs
+     * nothing: mobile Chrome freezes a backgrounded tab's timers within
+     * minutes, iOS suspends the whole process, and a closed PWA has no timers
+     * at all. Before this the entire reminder engine was that page timer, and
+     * `subscribe()` was a hook with no caller — which is why a task scheduled
+     * for a moment when the app happened to be closed produced nothing.
+     *
+     * The registration is best-effort by design: no key configured, no network,
+     * no PushManager — each one resolves to null and leaves the local scan
+     * exactly as capable as it was, which is the same contract /api/sync and
+     * /api/gcal/* already keep.
+     */
+    linkServer: function () {
+      var self = this;
+      if (!this.armed()) return Promise.resolve(null);
+      if (!window.fetch || !navigator.serviceWorker || !('PushManager' in window)) {
+        return Promise.resolve(null);
+      }
+      var proto = (window.location && window.location.protocol) || '';
+      if (proto !== 'http:' && proto !== 'https:') return Promise.resolve(null);
+      if (this.linking) return this.linking;
+
+      this.linking = window.fetch(PUSH_ENDPOINT + '/subscribe', { method: 'GET' })
+        .then(function (res) { return res.json(); })
+        .then(function (body) {
+          var data = body && body.ok && body.data;
+          if (!data || !data.configured || !data.publicKey) return null;   // no VAPID yet
+          return self.subscribe(data.publicKey);
+        })
+        .then(function (sub) {
+          if (!sub) return null;
+          var json = typeof sub.toJSON === 'function' ? sub.toJSON() : sub;
+          return window.fetch(PUSH_ENDPOINT + '/subscribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              endpoint: json.endpoint,
+              keys: json.keys,
+              ua: (navigator.userAgent || '').slice(0, 300)
+            })
+          }).then(function (res) { return res.json(); }).then(function (out) {
+            if (!out || !out.ok) return null;
+            Store.data.prefs.notify.serverAt = toISOStamp(Date.now());
+            Store.save();
+            self.paint();
+            return json.endpoint;
+          });
+        })
+        ['catch'](function () { return null; })
+        .then(function (result) { self.linking = null; return result; });
+
+      return this.linking;
     },
 
     init: function () {
@@ -6168,6 +6380,14 @@
 
       var sound = $('#soundBtn');
       if (sound) sound.addEventListener('click', function () { self.onSoundToggle(); });
+
+      var cta = $('#notifyAlertCta');
+      if (cta) cta.addEventListener('click', function () { self.onAlertTap(); });
+
+      /* The autoplay policy only starts an AudioContext inside a gesture, and
+         the two toggles above are not the only session that has one. This puts
+         the unlock on the first touch anywhere on the page. */
+      Chime.armOnFirstGesture(document);
 
       /* A server-sent push is rendered by sw.js, which has no audio at all.
          When a window IS open the worker asks it to make the sound, so a real
@@ -6183,10 +6403,18 @@
 
       // a phone that wakes from sleep skipped every interval in between
       document.addEventListener('visibilitychange', function () {
-        if (!document.hidden) { self.paint(); self.tick(); }
+        if (document.hidden) return;
+        self.paint();
+        self.tick();
+        // iOS suspends the AudioContext with the app; a resume costs nothing
+        // when it is already running and is the difference between a chime and
+        // silence when it is not
+        if (Chime.armed()) Chime.unlock();
       });
 
       this.tick();
+      // the subscription is what lets a reminder arrive with the app closed
+      this.linkServer();
     }
   };
 
@@ -6848,7 +7076,11 @@
       remindLead: remindLead,
       remindTag: remindTag,
       migrateEvent: migrateEvent,
-      Chime: Chime
+      Chime: Chime,
+      // Sprint 11 — the grace window and the gesture list, so healthcheck can
+      // assert the late-delivery contract rather than pattern-match for it
+      GRACE: MISS_GRACE_MIN,
+      GESTURES: CHIME_GESTURES
     },
 
     lists: {

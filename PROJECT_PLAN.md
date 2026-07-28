@@ -1385,6 +1385,128 @@ hour 14 with the painted order still equal to the reported order; migration 0003
 and agreeing three ways, including a `remind_key` round-trip through `toRow`/`fromRow`; and the
 `v16` bump reaching both cache-busted URLs.
 
+### 7.4m Server push, the audio unlock and the late-reminder grace (shipped — Sprint 11)
+
+Field report: *"a task scheduled for now did not raise a notification and made no sound on the
+phone."* One symptom, three independent causes. All three are fixed here, and each is pinned
+by execution in `healthcheck.js` §43 rather than by inspection.
+
+**Cause 1 — nothing was running.** Every reminder up to Sprint 10 was raised by
+`Notify.tick()`, called from a `setInterval(30s)` **inside the page**. Mobile Chrome freezes a
+backgrounded tab's timers within minutes, iOS suspends the whole process, and a closed PWA
+runs nothing at all. `Notify.subscribe()` existed but had **no caller**, no VAPID key and no
+server, so `sw.js`'s `push` handler had never received a single event. The reminder engine
+was, in practice, "reminders work if you happen to be looking at the app".
+
+**Cause 2 — the chime was locked.** `Chime.unlock()` was reached from exactly two taps:
+enabling notifications and toggling the sound. A phone whose permission was granted on an
+earlier visit taps neither again, so the first thing to touch the `AudioContext` was `play()`
+— called from inside the scan. A timer callback is not a user gesture: the context is created
+`suspended`, `resume()` outside a gesture is refused on iOS and Android, and the reminder
+arrives silently.
+
+**Cause 3 — a hard `gap < 0`.** `Notify.due()` required `0 <= gap <= lead`. The moment a start
+time went one minute past, the record was skipped — and because the scan only ever looks
+forward, skipped *forever*. Anything costing the scan a minute (a sleeping screen, a
+backgrounded tab, a task created "for a minute ago") swallowed the reminder whole.
+
+#### §1 Web Push — the delivery path that survives a closed app
+
+| Artefact | Role |
+|---|---|
+| `functions/api/push/_webpush.js` | VAPID (RFC 8292) + `aes128gcm` payload encryption (RFC 8291), written directly on WebCrypto — no npm in a Worker |
+| `functions/api/push/subscribe.js` | `GET` the public key · `POST` a subscription · `DELETE` one |
+| `functions/api/push/dispatch.js` | the scan, moved off the phone: `GET` dry-run, `POST` send |
+| `tools/push-cron-worker/` | the clock — a standalone scheduled Worker that POSTs the dispatcher once a minute |
+| `tools/gen-vapid.js` | prints a P-256 key pair for `wrangler pages secret put` |
+
+**Cloudflare Pages Functions cannot be cron-triggered.** Pages compiles `functions/` into
+request handlers only; there is no `scheduled()` to declare and a `[triggers]` block in the
+project's `wrangler.toml` would never fire. So the dispatcher is a *route* and the clock is a
+*separate Worker* — which also keeps every binding, key and row inside the Pages project. A
+`[triggers]` block appearing in the root `wrangler.toml` fails the build.
+
+`/api/push/dispatch` mirrors `Notify.due()` exactly, because both ends read the same
+`remind_key` column: the same vocabulary, the same default, the same grace window, the same
+today-and-tomorrow horizon and the same ledger key (`id@<the record's own date>`, never
+`@today`). Two engines that disagreed by a minute would announce the same record twice.
+
+- **Never open.** Both verbs require `PUSH_DISPATCH_SECRET`, compared in constant time. With
+  no secret set the route answers `503` and sends nothing — an open dispatcher is a free
+  notification cannon pointed at the owner's phone.
+- **Time is wall-clock.** A local record stores `YYYY-MM-DDTHH:MM` in Israel time (§3), so the
+  Worker asks `Intl` for the local face of the current instant instead of doing offset
+  arithmetic — which is also how it stays right across DST with no transition table.
+- **Marked only on delivery.** `push_dispatch` is written only once a device actually
+  accepted the message. Marking on *attempt* would let a push-service outage silently consume
+  the reminder: the ledger would read "sent", the phone would have nothing, and the next run
+  would skip it.
+- **A dead endpoint is retired, not retried.** `404`/`410` sets `disabled_at`; a browser that
+  rotates its endpoint is caught by `pushsubscriptionchange` in `sw.js`, which re-subscribes
+  and hands the new endpoint back — the only place a *closed* app can re-register itself.
+- **Schema** (`migrations/0004_sprint11_push.sql`, append-only, adds only new tables):
+  `push_subscriptions` (keyed by a hash of the endpoint, so a phone that re-links on every
+  launch updates one row forever) and `push_dispatch` (the server-side twin of `prefs.fired`).
+
+**Deployment** — four secrets on the Pages project: `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`,
+`VAPID_SUBJECT` and `PUSH_DISPATCH_SECRET`, plus the same dispatch secret on the cron Worker.
+Until they are set, `/api/push/*` answers `503`, the client's `linkServer()` resolves to
+`null`, and the app behaves exactly as it did in Sprint 10 — local reminders, no regression.
+No key ever reaches the browser: the client learns only the **public** half.
+
+#### §2 The audio unlock
+
+`Chime.armOnFirstGesture(document)` moves the unlock onto the **first touch anywhere in the
+document**, whatever it lands on, and runs at boot. The listeners (`pointerdown`, `touchstart`,
+`mousedown`, `keydown`, `click`, all capture-phase) stay attached rather than firing once,
+because iOS suspends the context every time the app is backgrounded and the next tap is what
+brings it back; `visibilitychange` resumes it too. Nothing is created while the chime is
+switched off — `Chime.armed()` is still the only vote — and every path declines rather than
+throws where there is no audio at all.
+
+#### §3 The grace window
+
+`MISS_GRACE_MIN = 20`. The condition becomes `-20 <= gap <= lead`: **early is still a miss,
+late-but-recent is a delivery.** A reminder that slipped by a minute now fires, says
+`התחיל לפני N דק׳` rather than claiming a start time that has passed, and — because the
+fired-ledger is unchanged — fires exactly once. An hour-old reminder is still stale and stays
+skipped. The same constant governs the Worker, so both engines forgive identically.
+
+#### §4 The permission banner
+
+`#notifyAlert` on "היום שלי" — the first thing under the header. The top-bar pill already
+carried the permission state, but it is one of four pills in a crowded bar, and a *blocked*
+permission is worse than an unasked one: the app shows an armed bell and delivers nothing, so
+a missed meeting gets blamed on the app instead of the setting causing it. Four states, gold
+while merely unasked, `--danger` once actually blocked, colour never the sole carrier
+(🔔 → 🔕 and the sentence says which it is):
+
+| State | What it says |
+|---|---|
+| `ask` | התראות עוד לא הופעלו — בלעדיהן שום תזכורת לא תגיע לטלפון |
+| `off` | ההתראות כבויות — תזכורות לפגישות ולמשימות לא יגיעו אליך |
+| `denied` | ההתראות חסומות בדפדפן… + **איך לבטל את החסימה?** — a blocked permission cannot be re-requested, so the CTA teaches instead of pretending |
+| `unsupported` | …באייפון צריך להוסיף את האפליקציה למסך הבית — which is genuinely the iOS answer |
+
+The push pill's `title` now states which delivery path is live: *התראות שרת פעילות — יגיעו גם
+כשהאפליקציה סגורה* against *התראות מקומיות בלבד*. `prefs.notify.serverAt` is the stamp behind
+it, absent and defaulted in every store written before this sprint.
+
+**Shipped shell** — `sw.js` is bumped to `v17`, with `app.js?v=v17` and `styles.css?v=v17`.
+
+**Verification** — `healthcheck.js` §43 adds 17 checks. The two that matter most are executed
+against the real standards rather than pattern-matched: a **VAPID token verified with
+WebCrypto** against the key that signed it (RFC 8292 header shape, origin-only `aud`, the
+24-hour ceiling, and a raw 64-byte JWS signature rather than DER), and a **full RFC 8291
+round-trip** in which a stand-in device redoes the ECDH + HKDF ladder and decrypts the payload
+back to its Hebrew original — with a second message proving the ephemeral key is never reused.
+Around them: the dispatcher's selector driven over thirteen synthetic records (late, stale,
+early, muted, all-day, closed, undated, day-before), its timezone reading, the secret gate on
+both verbs, the deliver-then-mark rule, the gesture unlock driven through a document stub
+(including that a silenced chime creates no context), the client's grace window and its
+fire-once ledger, all four banner states driven through the real `alertState()`, and a scan of
+every source file for a committed key.
+
 ### 7.4 General layout
 
 **Layout direction:** RTL by default (`dir="rtl"`), with LTR fallback driven by locale.

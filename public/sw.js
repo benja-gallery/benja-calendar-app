@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v16';  // Sprint 10 — Inbox/Upcoming, notes area, reminder chime
+var CACHE_VERSION = 'v17';  // Sprint 11 — server push, audio unlock, late-reminder grace
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */
@@ -188,6 +188,40 @@ function chimeInClients() {
       });
     })['catch'](function () { /* no clients — the OS tone stands alone */ });
 }
+
+/**
+ * Sprint 11 — a push subscription is not permanent.
+ *
+ * Browsers rotate an endpoint on their own schedule (a push service outage, a
+ * profile reset, an app update). The old endpoint then starts answering 410
+ * GONE and every reminder for this device silently stops — with no window open
+ * to notice. This event is the browser's one warning, and the only place a
+ * closed app can re-register itself, so it re-subscribes with the same
+ * application key and hands the new endpoint straight back to the Worker.
+ */
+self.addEventListener('pushsubscriptionchange', function (event) {
+  var old = event.oldSubscription || null;
+  var key = (old && old.options && old.options.applicationServerKey) || null;
+
+  event.waitUntil(
+    Promise.resolve(event.newSubscription || (key
+      ? self.registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
+      : null))
+      .then(function (sub) {
+        if (!sub) return null;
+        var json = typeof sub.toJSON === 'function' ? sub.toJSON() : sub;
+        return fetch(new URL('./api/push/subscribe', self.location.href).href, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            endpoint: json.endpoint,
+            keys: json.keys,
+            previous: old ? old.endpoint : ''
+          })
+        });
+      })['catch'](function () { /* the page re-links on its next launch */ })
+  );
+});
 
 self.addEventListener('notificationclick', function (event) {
   event.notification.close();

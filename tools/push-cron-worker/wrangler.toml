@@ -1,0 +1,22 @@
+# ===========================================================================
+# tools/push-cron-worker/wrangler.toml — the reminder clock (Sprint 11)
+#
+# Deployed SEPARATELY from the Pages project. Cloudflare Pages Functions have
+# no scheduled handler, so this Worker exists purely to give the dispatcher a
+# heartbeat. It carries no data binding and no VAPID key.
+#
+#   wrangler secret put PUSH_DISPATCH_SECRET   # the same value set on Pages
+#   wrangler deploy
+# ===========================================================================
+
+name = "benja-calendar-push-cron"
+main = "worker.js"
+compatibility_date = "2026-07-27"
+
+[vars]
+DISPATCH_URL = "https://benja-calendar-app.pages.dev/api/push/dispatch"
+
+# Every minute. A reminder is a wall-clock promise: at a five-minute cadence a
+# "בזמן האירוע" lead would land up to five minutes late, every time.
+[triggers]
+crons = ["* * * * *"]

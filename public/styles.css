@@ -369,6 +369,38 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 .scroll-tail{ height:24px; }
 
 /* ==========================================================================
+   0. התראות alert — the permission, said out loud (Sprint 11)
+
+   Gold while the permission is merely unasked; --danger once the browser has
+   actually blocked it, because a blocked permission means the app is showing
+   an armed bell and delivering nothing. Colour is never the sole carrier: the
+   glyph flips 🔔 → 🔕 and the sentence says which of the two it is.
+   ========================================================================== */
+
+.nfy-alert{
+  display:flex; align-items:center; flex-wrap:wrap; gap:10px;
+  margin-top:6px; padding:14px 16px;
+  background:var(--gold-soft); border:1px solid var(--gold-edge);
+}
+/* a display rule must never outrank the hidden attribute — a granted
+   permission has nothing to say and the banner has to actually go away */
+.nfy-alert[hidden]{ display:none; }
+.nfy-alert.is-blocked{ background:var(--danger-soft); border-color:var(--danger-edge); }
+.nfy-ico{ font-size:18px; line-height:1; }
+.nfy-text{
+  flex:1 1 190px; min-width:0;
+  font-size:13.5px; line-height:1.6; color:var(--ink);
+}
+.nfy-cta{
+  flex:0 0 auto;
+  display:inline-flex; align-items:center; justify-content:center;
+  padding:0 16px; height:var(--tap); min-height:var(--tap);
+  background:var(--gold); border:0; border-radius:999px;
+  color:var(--surface); font-size:13px; font-weight:800; white-space:nowrap;
+}
+.nfy-alert.is-blocked .nfy-cta{ background:var(--danger); color:var(--ink); }
+
+/* ==========================================================================
    1. Smart summary
    ========================================================================== */
 

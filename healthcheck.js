@@ -513,9 +513,10 @@ check('reminder scan ignores the category filter (business must not be muted)', 
 check('notification state is persisted and never double-fires', () => {
   if (!/prefs\.notify/.test(js)) return 'toggle state is not persisted';
   if (!/prefs\.fired/.test(js)) return 'no fired-ledger — a reminder would repeat every scan';
-  // Sprint 10 added the chime vote to the same block, so the fallback shape
-  // grew a third key — the point of the check is that a legacy store gets one
-  if (!/d\.prefs\.notify = \{ on: false, lead: 10, sound: true \}/.test(js)) {
+  // Sprint 10 added the chime vote to the same block and Sprint 11 the
+  // server-link stamp, so the fallback shape keeps growing keys — the point of
+  // the check is that a legacy store gets one, not what it currently holds
+  if (!/d\.prefs\.notify = \{ on: false, lead: 10, sound: true[^}]*\}/.test(js)) {
     return 'legacy stores are not migrated';
   }
   if (!/notify\.sound = d\.prefs\.notify\.sound !== false/.test(js)) {
@@ -2812,7 +2813,9 @@ const CONTROLS = [
   // Sprint 8: the recycle bin pill
   'trash-btn',
   // Sprint 9: the batch-archive button
-  'archive-btn'
+  'archive-btn',
+  // Sprint 11: the notification-permission banner's CTA
+  'nfy-cta'
 ];
 
 /** chips that stay visually small and clear the floor with a hit expander */
@@ -5449,12 +5452,15 @@ check('a blank reminder can never erase a stored choice', () => {
   return true;
 });
 
-check('the shell was bumped to v16 for this sprint', () => {
+check('the shell has never regressed below the Sprint 10 cache version', () => {
   const m = sw.match(/CACHE_VERSION\s*=\s*'v(\d+)'/);
   if (!m) return 'no CACHE_VERSION';
   if (parseInt(m[1], 10) < 16) return 'the cache is still v' + m[1] + ' — returning phones keep the old shell';
-  if (html.indexOf('app.js?v=v16') === -1) return 'app.js is not busted to v16';
-  if (html.indexOf('styles.css?v=v16') === -1) return 'styles.css is not busted to v16';
+  // the two busted URLs are checked against whatever the worker actually says,
+  // rather than against a literal that has to be edited every sprint
+  const v = 'v' + m[1];
+  if (html.indexOf('app.js?v=' + v) === -1) return 'app.js is not busted to ' + v;
+  if (html.indexOf('styles.css?v=' + v) === -1) return 'styles.css is not busted to ' + v;
   return true;
 });
 
@@ -5467,9 +5473,622 @@ check('PROJECT_PLAN documents Sprint 10', () => {
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
 });
 
+/* ==========================================================================
+   43. Sprint 11 — server push, the audio unlock and the late-reminder grace
+
+   The field report was one symptom with three separate causes, and each one is
+   pinned here by execution rather than by pattern-match:
+
+     1. Nothing ran when the app was closed — the whole reminder engine was a
+        setInterval inside the page. §43a–c cover the Worker that replaced it.
+     2. The AudioContext was first touched inside a timer callback, so the
+        autoplay policy left it suspended and the chime was silent. §43d.
+     3. `gap < 0` skipped anything whose start time had already passed, and the
+        scan only looks forward — so a reminder missed by one minute was missed
+        forever. §43e.
+   ========================================================================== */
+
+const MIGRATION_PUSH = 'migrations/0004_sprint11_push.sql';
+const PUSH_FILES = ['_webpush', 'subscribe', 'dispatch'].map(n => 'functions/api/push/' + n + '.js');
+
+/* ---- 43a. artefacts and the append-only migration rule ---- */
+
+check('Sprint 11 artefacts are present (push routes, migration, cron worker)', () => {
+  const wanted = PUSH_FILES.concat([
+    MIGRATION_PUSH,
+    'tools/push-cron-worker/worker.js',
+    'tools/push-cron-worker/wrangler.toml',
+    'tools/gen-vapid.js'
+  ]);
+  const missing = wanted.filter(f => !fs.existsSync(path.join(ROOT, f)));
+  return missing.length ? 'missing: ' + missing.join(', ') : true;
+});
+
+const sqlPush = fs.readFileSync(path.join(ROOT, MIGRATION_PUSH), 'utf8');
+
+check('migration 0004 is append-only and adds only new tables', () => {
+  // the entity column order is rebuilt out of 0001 + 0002 + 0003 elsewhere in
+  // this file; 0004 touching any of those five tables would break that rebuild
+  if (/ALTER\s+TABLE\s+(events|tasks|lists|notes|clients)\b/i.test(sqlPush)) {
+    return '0004 alters an entity table — the column cross-check reads 0001–0003 only';
+  }
+  ['push_subscriptions', 'push_dispatch'].forEach(t => {
+    if (sqlPush.indexOf('CREATE TABLE IF NOT EXISTS ' + t) === -1) {
+      throw new Error('0004 does not create ' + t);
+    }
+  });
+  if (sqlPush.indexOf('push_subscriptions') !== -1 && sql.indexOf('push_subscriptions') !== -1) {
+    return '0001 was edited to carry the push tables — migrations are append-only';
+  }
+  return true;
+});
+
+check('every push route parses and declares the handlers it needs', () => {
+  PUSH_FILES.forEach(f => {
+    new vm.Script(stripModule(fs.readFileSync(path.join(ROOT, f), 'utf8')), { filename: f });
+  });
+  const sub = fs.readFileSync(path.join(ROOT, 'functions/api/push/subscribe.js'), 'utf8');
+  ['onRequestGet', 'onRequestPost', 'onRequestDelete', 'onRequestOptions'].forEach(h => {
+    if (sub.indexOf('function ' + h) === -1) throw new Error('subscribe.js has no ' + h);
+  });
+  const disp = fs.readFileSync(path.join(ROOT, 'functions/api/push/dispatch.js'), 'utf8');
+  ['onRequestGet', 'onRequestPost', 'onRequestOptions'].forEach(h => {
+    if (disp.indexOf('function ' + h) === -1) throw new Error('dispatch.js has no ' + h);
+  });
+  return true;
+});
+
+/* ---- 43b. the dispatcher is never an open cannon ---- */
+
+const dispatchSrc = fs.readFileSync(path.join(ROOT, 'functions/api/push/dispatch.js'), 'utf8');
+const webpushSrc = fs.readFileSync(path.join(ROOT, 'functions/api/push/_webpush.js'), 'utf8');
+
+check('the dispatcher refuses to run without its secret', () => {
+  if (dispatchSrc.indexOf('PUSH_DISPATCH_SECRET') === -1) return 'no dispatch secret at all';
+  if (!/if \(!secret\) return 'unconfigured'/.test(dispatchSrc)) {
+    return 'a missing secret does not disable the route — it would be open to anyone';
+  }
+  // both verbs must be gated: a GET dry run still discloses the whole calendar
+  const gated = (dispatchSrc.match(/authorised\(request, env\)/g) || []).length;
+  if (gated < 2) return 'only ' + gated + ' handler checks the secret';
+  if (dispatchSrc.indexOf('diff |= given.charCodeAt(i) ^ expected.charCodeAt(i)') === -1) {
+    return 'the secret is compared with ===, which leaks its length and prefix through timing';
+  }
+  return true;
+});
+
+check('no VAPID key or dispatch secret is hardcoded anywhere', () => {
+  const sources = [js, sw, html, dispatchSrc, webpushSrc,
+    fs.readFileSync(path.join(ROOT, 'functions/api/push/subscribe.js'), 'utf8'),
+    fs.readFileSync(path.join(ROOT, 'tools/push-cron-worker/worker.js'), 'utf8'),
+    fs.readFileSync(path.join(ROOT, 'tools/push-cron-worker/wrangler.toml'), 'utf8')];
+
+  for (const src of sources) {
+    // a real VAPID public key is 87 base64url chars and starts with the
+    // uncompressed-point marker; a private key is 43
+    if (/['"]B[A-Za-z0-9_-]{85,86}['"]/.test(src)) return 'a VAPID public key is committed in source';
+    if (/VAPID_PRIVATE_KEY\s*[:=]\s*['"][A-Za-z0-9_-]{20,}/.test(src)) {
+      return 'a VAPID private key is committed in source';
+    }
+    if (/PUSH_DISPATCH_SECRET\s*=\s*['"][^'"]{8,}/.test(src)) {
+      return 'the dispatch secret is committed in source';
+    }
+  }
+  // the private key must never be readable outside the crypto module
+  if (js.indexOf('VAPID_PRIVATE_KEY') !== -1) return 'the browser bundle names the private key';
+  return true;
+});
+
+check('Pages cannot cron itself, and the repo says so out loud', () => {
+  // comments stripped first: the Pages toml explains WHY it carries no
+  // trigger, and the word appearing inside that explanation is not a trigger
+  const decls = src => src.split('\n').filter(l => !/^\s*#/.test(l)).join('\n');
+
+  const toml = decls(read('wrangler.toml'));
+  if (/^\s*\[triggers\]/m.test(toml)) {
+    return 'wrangler.toml declares a cron trigger — Pages compiles no scheduled handler, so it would never fire';
+  }
+  if (read('wrangler.toml').indexOf('tools/push-cron-worker') === -1) {
+    return 'nothing in the Pages config points at where the clock actually lives';
+  }
+  const cronToml = decls(fs.readFileSync(path.join(ROOT, 'tools/push-cron-worker/wrangler.toml'), 'utf8'));
+  if (!/^\s*\[triggers\]/m.test(cronToml)) return 'the cron Worker declares no trigger';
+  if (!/crons\s*=\s*\["\* \* \* \* \*"\]/.test(cronToml)) return 'the cron is not once a minute';
+  const cronJs = fs.readFileSync(path.join(ROOT, 'tools/push-cron-worker/worker.js'), 'utf8');
+  if (cronJs.indexOf('async scheduled(') === -1) return 'the cron Worker has no scheduled handler';
+  if (cronJs.indexOf('Bearer') === -1) return 'the cron Worker calls the dispatcher without the secret';
+  return true;
+});
+
+/* ---- 43c. the server-side selector, executed for real ---- */
+
+/** dispatch.js imports two modules; stripping them leaves selectDue standalone */
+function loadDispatch() {
+  const sandbox = { console, Date, Math, JSON, RegExp, Intl, parseInt, Object, String };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    stripModule(dispatchSrc) +
+    '\n;globalThis.__d = { selectDue, localNow, addDaysISO, timeToMinutes, leadOf, phrase };',
+    sandbox, { filename: 'dispatch.js' });
+  return sandbox.__d;
+}
+
+check('the dispatcher selects exactly what the client would, late ones included', () => {
+  const DS = loadDispatch();
+  const now = { date: '2026-07-28', minutes: 10 * 60 };          // 10:00 local
+  const tomorrow = '2026-07-29';
+
+  const rows = {
+    events: [
+      // 10 minutes out, on the system default lead of 10 — the ordinary case
+      { id: 'e-soon', title: 'פגישה', start_time: '2026-07-28T10:10', remind_key: 'default', location: 'זום' },
+      // ONE MINUTE PAST. The bug the field report is about: before the grace
+      // window this was skipped here and skipped forever after.
+      { id: 'e-late', title: 'התחילה', start_time: '2026-07-28T09:59', remind_key: 'at' },
+      // half an hour past — stale, and staying skipped is the correct answer
+      { id: 'e-stale', title: 'עברה', start_time: '2026-07-28T09:30', remind_key: 'at' },
+      // an hour out on a 15-minute lead: too early, must not fire yet
+      { id: 'e-early', title: 'מאוחר יותר', start_time: '2026-07-28T11:00', remind_key: '15' },
+      // muted at the record level, whatever the global toggle says
+      { id: 'e-mute', title: 'מושתקת', start_time: '2026-07-28T10:05', remind_key: 'none' },
+      // tomorrow, and only a "יום לפני" lead reaches it
+      { id: 'e-day', title: 'מחר', start_time: tomorrow + 'T09:00', remind_key: '1440' },
+      { id: 'e-day-no', title: 'מחר · שעה', start_time: tomorrow + 'T09:00', remind_key: '60' },
+      // all-day: no clock to lead from
+      { id: 'e-allday', title: 'יום שלם', start_time: '2026-07-28', remind_key: 'at' }
+    ],
+    tasks: [
+      { id: 't-soon', title: 'משימה', due_date: '2026-07-28', due_time: '10:05', status: 'todo', remind_key: 'default' },
+      { id: 't-late', title: 'איחרה', due_date: '2026-07-28', due_time: '09:55', status: 'todo', remind_key: 'at' },
+      { id: 't-done', title: 'הושלמה', due_date: '2026-07-28', due_time: '10:00', status: 'done', remind_key: 'at' },
+      { id: 't-cancel', title: 'בוטלה', due_date: '2026-07-28', due_time: '10:00', status: 'cancelled', remind_key: 'at' },
+      { id: 't-undated', title: 'ללא שעה', due_date: '2026-07-28', due_time: '', status: 'todo', remind_key: 'at' }
+    ]
+  };
+
+  const ids = DS.selectDue(rows, now, 10).map(x => x.id);
+  const want = ['e-soon', 'e-late', 'e-day', 't-soon', 't-late'];
+  const never = ['e-stale', 'e-early', 'e-mute', 'e-day-no', 'e-allday', 't-done', 't-cancel', 't-undated'];
+
+  const absent = want.filter(id => ids.indexOf(id) === -1);
+  if (absent.length) return 'the dispatcher would never send: ' + absent.join(', ');
+  const leaked = never.filter(id => ids.indexOf(id) !== -1);
+  if (leaked.length) return 'the dispatcher would wrongly send: ' + leaked.join(', ');
+
+  // a late reminder must say it is late rather than claim a future start
+  const late = DS.selectDue(rows, now, 10).filter(x => x.id === 'e-late')[0];
+  if (late.title.indexOf('התחיל') === -1) return 'a late reminder still reads as upcoming: ' + late.title;
+
+  // and it is keyed by the record's OWN date, never by today
+  const day = DS.selectDue(rows, now, 10).filter(x => x.id === 'e-day')[0];
+  if (day.on !== tomorrow) return 'a day-before reminder is keyed ' + day.on + ', expected ' + tomorrow;
+  return true;
+});
+
+check('the dispatcher reads wall-clock time in the app timezone', () => {
+  const DS = loadDispatch();
+  const now = DS.localNow('Asia/Jerusalem');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(now.date)) return 'localNow returned ' + now.date;
+  if (!(now.minutes >= 0 && now.minutes < 1440)) return 'minutes out of range: ' + now.minutes;
+
+  // midnight must be 0, never 1440 — some engines render hour 24 under hour12:false
+  if (DS.localNow('UTC').minutes >= 1440) return 'midnight resolves to minute 1440';
+
+  // a stored record is wall clock, so UTC and Jerusalem must disagree by the
+  // real offset rather than by a hardcoded one
+  const utc = DS.localNow('UTC').minutes;
+  const il = DS.localNow('Asia/Jerusalem').minutes;
+  const delta = ((il - utc) % 1440 + 1440) % 1440;
+  if (delta !== 120 && delta !== 180) return 'Israel is ' + delta + ' minutes off UTC, expected 120 or 180';
+
+  if (DS.addDaysISO('2026-02-28', 1) !== '2026-03-01') return 'the scan window breaks on a month rollover';
+  if (DS.addDaysISO('2026-12-31', 1) !== '2027-01-01') return 'the scan window breaks on a year rollover';
+  if (DS.leadOf('none', 10) !== null) return 'ללא התראה is not muted server-side';
+  if (DS.leadOf('default', 10) !== 10) return 'the system default is not honoured server-side';
+  if (DS.leadOf('junk', 10) !== 10) return 'an unknown key does not fall back to the default';
+  if (DS.leadOf('1440', 10) !== 1440) return 'יום לפני is not 1440 minutes server-side';
+  return true;
+});
+
+check('a reminder is only ever marked sent once something actually landed', () => {
+  // marking on attempt would let a push-service outage silently eat the
+  // reminder: the ledger would say sent, the phone would have nothing
+  if (!/if \(delivered > 0\) \{/.test(dispatchSrc)) return 'the ledger is written regardless of delivery';
+  if (dispatchSrc.indexOf('INSERT INTO push_dispatch') === -1) return 'nothing is ever recorded as sent';
+  if (dispatchSrc.indexOf("DELETE FROM push_dispatch WHERE on_date < ?") === -1) {
+    return 'the ledger is never swept — it grows forever';
+  }
+  // a dead endpoint is retired rather than retried every minute
+  if (dispatchSrc.indexOf('res.gone') === -1) return 'a 410 GONE endpoint is never retired';
+  if (sqlPush.indexOf('disabled_at') === -1) return 'the subscription table cannot retire an endpoint';
+  return true;
+});
+
+/* ---- 43d. the AudioContext unlock ---- */
+
+check('the AudioContext is unlocked by the first gesture anywhere, not just the toggles', () => {
+  const R = loadApp().reminders;
+  if (!R.GESTURES || R.GESTURES.indexOf('touchstart') === -1) return 'touchstart is not a gesture';
+  if (R.GESTURES.indexOf('pointerdown') === -1) return 'pointerdown is not a gesture';
+
+  // a document stub that records what is bound and can replay a gesture
+  const bound = {};
+  const doc = {
+    addEventListener: (type, fn) => { bound[type] = fn; },
+    removeEventListener: () => {}
+  };
+
+  const APP = loadApp({ document: doc });
+  const C = APP.reminders.Chime;
+  APP.Store.load();
+
+  if (C.armOnFirstGesture(doc) !== true) return 'the gesture unlock never armed';
+  const missing = APP.reminders.GESTURES.filter(t => typeof bound[t] !== 'function');
+  if (missing.length) return 'no listener for: ' + missing.join(', ');
+
+  // arming twice must not double-bind
+  let calls = 0;
+  doc.addEventListener = () => { calls++; };
+  C.armOnFirstGesture(doc);
+  if (calls !== 0) return 'a second arm bound ' + calls + ' more listeners';
+
+  // this sandbox has no AudioContext at all, so the gesture must decline
+  // rather than throw — a tap can never fail on a device with no speaker
+  bound.pointerdown();
+
+  // and nothing is created while the chime is switched off
+  APP.Store.data.prefs.notify.sound = false;
+  if (C.armed() !== false) return 'a silenced chime still reports itself armed';
+  bound.touchstart();
+  if (C.ctx !== null) return 'a context was created while the chime was off';
+  return true;
+});
+
+check('the unlock is reached from a gesture, never only from a timer', () => {
+  // the original bug: play() was the first thing to touch the context, and it
+  // is called from inside setInterval — no gesture, so no sound, ever
+  if (js.indexOf('Chime.armOnFirstGesture(document)') === -1) {
+    return 'nothing arms the unlock at boot — the context is first touched by the scan';
+  }
+  if (!/if \(Chime\.armed\(\)\) Chime\.unlock\(\);/.test(js)) {
+    return 'a returning app never resumes a context iOS suspended in the background';
+  }
+  return true;
+});
+
+/* ---- 43e. the client's own grace window, executed for real ---- */
+
+check('a reminder one minute late still fires; a stale one never does', () => {
+  const APP = loadApp(), Store = APP.Store;
+  Store.load();
+  const today = APP.isoDate(new Date());
+  const now = clockNow();
+
+  // parked well inside the day so "a minute ago" cannot cross midnight
+  if (now < 120 || now > 1380) return true;                     // skipped near the boundaries
+
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.notify.lead = 10;
+
+  const ev = (title, mins, remind) => Store.add('events', {
+    type: 'event', title, category: 'personal', date: today,
+    start: hhmm(now + mins), end: '', location: '', notes: '', clientId: '', remind
+  });
+
+  const late = ev('התחילה לפני דקה', -1, 'at');
+  const grace = ev('לפני רבע שעה', -15, 'at');
+  const stale = ev('לפני שעה', -60, 'at');
+
+  const ids = APP.Notify.due().map(x => x.id);
+  if (ids.indexOf(late.id) === -1) return 'a reminder one minute past its start was swallowed';
+  if (ids.indexOf(grace.id) === -1) return 'a reminder inside the grace window was swallowed';
+  if (ids.indexOf(stale.id) !== -1) return 'an hour-old reminder was raised as if it were news';
+
+  if (APP.reminders.GRACE !== 20) return 'the grace window is ' + APP.reminders.GRACE + ', expected 20';
+
+  // the wording has to be honest about being late
+  const said = APP.Notify.due().filter(x => x.id === late.id)[0];
+  if (said.title.indexOf('התחיל') === -1) return 'a late reminder claims it is still upcoming: ' + said.title;
+  return true;
+});
+
+check('a late reminder still fires exactly once', () => {
+  const APP = loadApp(), Store = APP.Store;
+  Store.load();
+  const today = APP.isoDate(new Date());
+  const now = clockNow();
+  if (now < 120 || now > 1380) return true;
+
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.fired = {};
+  const rec = Store.add('events', {
+    type: 'event', title: 'איחרה', category: 'personal', date: today,
+    start: hhmm(now - 2), end: '', location: '', notes: '', clientId: '', remind: 'at'
+  });
+
+  const shown = [];
+  APP.Notify.armed = () => true;
+  APP.Notify.show = (tag) => { shown.push(tag); };
+
+  APP.Notify.tick();
+  APP.Notify.tick();
+  if (shown.length !== 1) return 'the late reminder fired ' + shown.length + ' times';
+  if (shown[0] !== rec.id + '@' + today) return 'the mark is keyed ' + shown[0];
+  return true;
+});
+
+/* ---- 43f. the client half of server push ---- */
+
+check('the client actually registers for server push', () => {
+  if (js.indexOf("var PUSH_ENDPOINT = 'api/push'") === -1) return 'no push endpoint';
+  if (js.indexOf('linkServer:') === -1) return 'nothing hands the subscription to the Worker';
+  // the Sprint-10 subscribe() was a hook with no caller; that is the bug
+  if ((js.match(/self\.linkServer\(\)|this\.linkServer\(\)/g) || []).length < 3) {
+    return 'linkServer is defined but barely called — boot, grant and toggle must all link';
+  }
+  if (js.indexOf('pushManager.getSubscription()') === -1) {
+    return 'a reload churns a new endpoint instead of reusing the existing subscription';
+  }
+  if (js.indexOf("PUSH_ENDPOINT + '/subscribe'") === -1) return 'the subscription is never POSTed';
+  // and a deployment with no VAPID key must degrade, not break
+  if (js.indexOf('if (!data || !data.configured || !data.publicKey) return null;') === -1) {
+    return 'an unconfigured deployment is not handled — the client would throw on every launch';
+  }
+  return true;
+});
+
+check('a rotated push subscription re-registers itself', () => {
+  // a browser rotates an endpoint on its own schedule; without this handler
+  // the old one starts answering 410 and every reminder silently stops
+  if (sw.indexOf('pushsubscriptionchange') === -1) return 'sw.js ignores a rotated subscription';
+  if (sw.indexOf('api/push/subscribe') === -1) return 'the new endpoint is never sent anywhere';
+  const subSrc = fs.readFileSync(path.join(ROOT, 'functions/api/push/subscribe.js'), 'utf8');
+  if (subSrc.indexOf('body.previous') === -1) return 'the replaced endpoint is never cleaned up';
+  if (subSrc.indexOf('fail_count = 0, disabled_at = NULL') === -1) {
+    return 'a device that just proved it is alive stays disabled';
+  }
+  return true;
+});
+
+check('the permission banner tells the user when reminders cannot arrive', () => {
+  ['notifyAlert', 'notifyAlertText', 'notifyAlertCta', 'notifyAlertIco'].forEach(id => {
+    if (html.indexOf('id="' + id + '"') === -1) throw new Error('no #' + id);
+  });
+  if (!/\.nfy-alert\.is-blocked\{/.test(css)) return 'a blocked permission looks the same as an unasked one';
+  if (!/\.nfy-cta\{[^}]*min-height:var\(--tap\)/.test(css.replace(/\s+/g, ' ').replace(/ \{/g, '{'))) {
+    return 'the banner CTA is under the 44px tap floor';
+  }
+
+  const APP = loadApp();                       // this sandbox has no Notification at all
+  APP.Store.load();
+  if (APP.Notify.alertState() !== 'unsupported') {
+    return 'a browser with no Notification API reports ' + APP.Notify.alertState();
+  }
+
+  // every state the banner has to speak for, driven through the real object
+  APP.Notify.supported = () => true;
+  APP.Notify.permission = () => 'denied';
+  if (APP.Notify.alertState() !== 'denied') return 'a blocked permission is not reported as blocked';
+  APP.Notify.permission = () => 'default';
+  if (APP.Notify.alertState() !== 'ask') return 'an unasked permission is not reported';
+  APP.Notify.permission = () => 'granted';
+  APP.Store.data.prefs.notify.on = false;
+  if (APP.Notify.alertState() !== 'off') return 'notifications switched off in-app are not reported';
+  APP.Store.data.prefs.notify.on = true;
+  if (APP.Notify.alertState() !== 'ok') return 'a working setup still nags';
+
+  // a blocked permission cannot be re-requested, so the CTA has to teach
+  // instead of pretending — requestPermission() there is a silent no-op
+  if (js.indexOf('לביטול החסימה') === -1) return 'a blocked user is never told how to unblock';
+  return true;
+});
+
+check('the server-link state is normalised on load and never crashes a legacy store', () => {
+  const APP = loadApp(), Store = APP.Store;
+  Store.load();
+  if (Store.data.prefs.notify.serverAt !== '') return 'serverAt does not default to local-only';
+  // a store written before this sprint carries no serverAt at all
+  Store.data.prefs.notify = { on: true, lead: 10, sound: true };
+  Store.load();
+  if (typeof Store.data.prefs.notify.serverAt !== 'string') return 'a legacy store leaves serverAt undefined';
+  return true;
+});
+
+check('the shell was bumped to v17 for this sprint', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'v(\d+)'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[1], 10) < 17) return 'the cache is still v' + m[1] + ' — returning phones keep the old shell';
+  if (html.indexOf('app.js?v=v17') === -1) return 'app.js is not busted to v17';
+  if (html.indexOf('styles.css?v=v17') === -1) return 'styles.css is not busted to v17';
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 11', () => {
+  const required = [
+    'Sprint 11', 'VAPID', 'RFC 8291', 'push_subscriptions', 'push_dispatch',
+    '/api/push/dispatch', 'MISS_GRACE_MIN', 'armOnFirstGesture', 'v17'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ==========================================================================
+   43g. Web Push crypto, executed against the real standards
+
+   Everything above this point is synchronous. WebCrypto is not, and the two
+   things most worth proving here — that a push service would accept the VAPID
+   token, and that the target device could actually decrypt the payload — are
+   pure promises. Getting either wrong produces a notification that is accepted
+   by nobody and read by nothing, which looks exactly like "push does not work".
+
+   So these run last, and report() waits for them.
+   ========================================================================== */
+
+const asyncChecks = [];
+
+function checkAsync(name, fn) {
+  asyncChecks.push(() => Promise.resolve()
+    .then(fn)
+    .then(res => {
+      if (res === true || res === undefined) pass.push(name);
+      else fail.push(name + ' — ' + res);
+    })
+    ['catch'](err => { fail.push(name + ' — threw: ' + err.message); }));
+}
+
+/** _webpush.js is import-free, so stripping its exports is enough to run it */
+function loadWebPush() {
+  const sandbox = {
+    console, Date, Math, JSON, RegExp, Error, URL, crypto,
+    atob, btoa, TextEncoder, TextDecoder, Uint8Array, DataView, ArrayBuffer,
+    String, Array, Object, parseInt, fetch: () => Promise.reject(new Error('no network in a healthcheck'))
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    stripModule(webpushSrc) +
+    '\n;globalThis.__wp = { b64urlToBytes, bytesToB64url, vapidHeader, encryptPayload, sendPush };',
+    sandbox, { filename: '_webpush.js' });
+  return sandbox.__wp;
+}
+
+checkAsync('the VAPID token is a real ES256 JWT a push service would accept', async () => {
+  const WP = loadWebPush();
+  const pair = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const rawPub = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+  const jwk = await crypto.subtle.exportKey('jwk', pair.privateKey);
+
+  const header = await WP.vapidHeader(
+    'https://fcm.googleapis.com/fcm/send/abc123',
+    WP.bytesToB64url(rawPub), jwk.d, 'mailto:ben@example.com'
+  );
+
+  const m = /^vapid t=([\w-]+\.[\w-]+\.[\w-]+), k=([\w-]+)$/.exec(header);
+  if (!m) return 'the Authorization header is not RFC 8292 shaped: ' + header.slice(0, 60);
+  if (m[2] !== WP.bytesToB64url(rawPub)) return 'the header advertises a different key than it signed with';
+
+  const [h, p, s] = m[1].split('.');
+  const claims = JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
+  // the audience is the push service ORIGIN — a full endpoint there would leak
+  // which device the token was minted for
+  if (claims.aud !== 'https://fcm.googleapis.com') return 'aud is ' + claims.aud + ', expected the origin alone';
+  if (claims.sub !== 'mailto:ben@example.com') return 'sub was dropped';
+  const life = claims.exp - Math.floor(Date.now() / 1000);
+  if (life <= 0 || life > 24 * 3600) return 'exp is ' + life + 's away, outside the 24-hour ceiling';
+  if (JSON.parse(Buffer.from(h, 'base64url').toString('utf8')).alg !== 'ES256') return 'alg is not ES256';
+
+  // the signature is raw r||s, and it must verify against the public half
+  const sig = Buffer.from(s, 'base64url');
+  if (sig.length !== 64) return 'the signature is ' + sig.length + ' bytes — DER, not the raw JWS pair';
+  const valid = await crypto.subtle.verify(
+    { name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, sig, new TextEncoder().encode(h + '.' + p)
+  );
+  return valid ? true : 'the JWT signature does not verify against its own key';
+});
+
+checkAsync('an encrypted payload decrypts back on the receiving device (RFC 8291)', async () => {
+  const WP = loadWebPush();
+
+  // stand in for the phone: the key pair and auth secret a browser hands over
+  // in the subscription
+  const ua = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+  const uaPublic = new Uint8Array(await crypto.subtle.exportKey('raw', ua.publicKey));
+  const authSecret = crypto.getRandomValues(new Uint8Array(16));
+
+  const message = JSON.stringify({ title: 'פגישה בעוד 10 דק׳', body: 'סטודיו · 14:00' });
+  const body = await WP.encryptPayload(
+    message, WP.bytesToB64url(uaPublic), WP.bytesToB64url(authSecret)
+  );
+
+  // parse the aes128gcm header the way a push client does
+  const salt = body.slice(0, 16);
+  const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
+  const rs = view.getUint32(16);
+  const idlen = body[20];
+  if (idlen !== 65) return 'the key id is ' + idlen + ' bytes, expected an uncompressed P-256 point';
+  const asPublic = body.slice(21, 21 + idlen);
+  const cipher = body.slice(21 + idlen);
+  if (rs < cipher.length) return 'the declared record size is smaller than the record';
+
+  // redo the derivation from the device's side
+  const asKey = await crypto.subtle.importKey('raw', asPublic, { name: 'ECDH', namedCurve: 'P-256' }, false, []);
+  const shared = new Uint8Array(
+    await crypto.subtle.deriveBits({ name: 'ECDH', public: asKey }, ua.privateKey, 256)
+  );
+
+  const enc = new TextEncoder();
+  const cat = (...parts) => {
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const p of parts) { out.set(p, at); at += p.length; }
+    return out;
+  };
+  const hmac = async (keyBytes, data) => {
+    const k = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+    return new Uint8Array(await crypto.subtle.sign('HMAC', k, data));
+  };
+  const hkdf = async (s, ikm, info, len) =>
+    (await hmac(await hmac(s, ikm), cat(info, new Uint8Array([1])))).slice(0, len);
+
+  const keyInfo = cat(enc.encode('WebPush: info'), new Uint8Array([0]), uaPublic, asPublic);
+  const ikm = await hkdf(authSecret, shared, keyInfo, 32);
+  const cek = await hkdf(salt, ikm, cat(enc.encode('Content-Encoding: aes128gcm'), new Uint8Array([0])), 16);
+  const nonce = await hkdf(salt, ikm, cat(enc.encode('Content-Encoding: nonce'), new Uint8Array([0])), 12);
+
+  const aes = await crypto.subtle.importKey('raw', cek, { name: 'AES-GCM' }, false, ['decrypt']);
+  let plain;
+  try {
+    plain = new Uint8Array(
+      await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce, tagLength: 128 }, aes, cipher)
+    );
+  } catch (e) {
+    return 'the device cannot decrypt the payload — the key ladder is wrong';
+  }
+
+  if (plain[plain.length - 1] !== 2) return 'the record is not terminated with the 0x02 delimiter';
+  const back = new TextDecoder().decode(plain.slice(0, -1));
+  if (back !== message) return 'the payload came back as ' + back.slice(0, 60);
+
+  // Hebrew has to survive the round trip intact — every notification is Hebrew
+  if (JSON.parse(back).title.indexOf('פגישה') !== 0) return 'the Hebrew title did not survive encryption';
+
+  // and a fresh ephemeral key per message: reusing one would let a relay that
+  // logs bodies link two messages to the same sender key
+  const again = await WP.encryptPayload(message, WP.bytesToB64url(uaPublic), WP.bytesToB64url(authSecret));
+  if (WP.bytesToB64url(again.slice(21, 86)) === WP.bytesToB64url(asPublic)) {
+    return 'the same ephemeral key was reused for a second message';
+  }
+  return true;
+});
+
+checkAsync('a dead endpoint is an outcome, never an exception', async () => {
+  const WP = loadWebPush();
+  // no keys configured at all
+  const none = await WP.sendPush({ endpoint: 'https://x/y', p256dh: '', auth: '' }, { title: 'x' }, {});
+  if (none.ok !== false || none.error !== 'vapid_not_configured') {
+    return 'an unconfigured deployment does not decline cleanly';
+  }
+  // a malformed subscription must not throw out of the dispatch loop, or one
+  // bad row would abort every remaining device in the run
+  const bad = await WP.sendPush(
+    { endpoint: 'https://push.example/1', p256dh: 'not-a-key', auth: 'nope' },
+    { title: 'x' },
+    { VAPID_PUBLIC_KEY: 'B' + 'a'.repeat(85), VAPID_PRIVATE_KEY: 'a'.repeat(43) }
+  );
+  if (bad.ok !== false) return 'a malformed subscription reported success';
+  if (bad.gone !== false) return 'a malformed subscription was mistaken for a retired one';
+  return true;
+});
+
 /* --------------------------------------------------------------- report */
 
-report();
+/* The synchronous checks have all run by now; §43g is promise-based, so the
+   report waits for it rather than printing a green board mid-flight. */
+asyncChecks
+  .reduce((chain, run) => chain.then(run), Promise.resolve())
+  ['catch'](err => { fail.push('async checks threw — ' + err.message); })
+  .then(report);
 
 function report() {
   const total = pass.length + fail.length;
