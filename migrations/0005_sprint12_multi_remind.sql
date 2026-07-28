@@ -1,0 +1,60 @@
+-- ===========================================================================
+-- 0005_sprint12_multi_remind.sql — several reminders per record (Sprint 12)
+--
+-- APPEND-ONLY, exactly like every migration before it. 0001–0004 are never
+-- edited, and this one adds NO column: healthcheck.js keeps rebuilding the
+-- entity column order out of 0001 + 0002 + 0003 unchanged, and the client
+-- (public/app.js SYNC_SCHEMA) and the Worker (functions/api/_shared.js SCHEMA)
+-- still list remind_key in exactly that trailing position.
+--
+-- WHY NO NEW COLUMN
+--   The mandate asks that the reminder structure support an ARRAY of reminders
+--   per record. remind_key is already TEXT, and a second column would mean two
+--   places that can disagree about the same fact — a `reminders_json` that says
+--   one thing and a remind_key that says another, with /api/gcal/sync writing
+--   whole event rows through both. So the COLUMN did not change; its
+--   VOCABULARY widened, in one place, for both engines that read it.
+--
+-- THE WIDENED VOCABULARY (public/app.js normRemindList / this repo's
+-- functions/api/push/dispatch.js remindTokens — the two must stay identical)
+--
+--   remind_key is a COMMA-JOINED TOKEN LIST. A token is either
+--
+--     a built-in lead      'default' | 'at' | '15' | '60' | '1440'
+--     an absolute moment   '@YYYY-MM-DDTHH:MM'
+--
+--   'none'      — the muted state, written as the single token 'none'
+--   'default'   — the system-wide lead (prefs.notify.lead)
+--
+--   Examples
+--     '1440,at'                     יום לפני  +  בזמן האירוע
+--     'at,@2026-08-02T07:30'        בזמן האירוע  +  a 07:30 reminder two days out
+--     'none'                        muted, this record only
+--
+--   Built-ins come first in vocabulary order, customs after in chronological
+--   order, and the list is deduped — so two records carrying the same
+--   reminders serialise to the same string and the sync outbox sees no phantom
+--   change.
+--
+-- BACKWARD COMPATIBILITY
+--   Every pre-Sprint-12 row holds exactly one bare token ('default', 'at',
+--   '15', '60', '1440', 'none'), which parses as a one-token list and keeps
+--   the exact behaviour it already had. Nothing below rewrites a stored
+--   choice; the two statements only repair rows that were never given one,
+--   which is the same repair 0003 performed for the same reason.
+--
+--   The value is still NEVER '': remind_key is preserve-if-blank on the Worker
+--   side (a blank incoming value means "I have nothing to say", so a blank
+--   could never clear a choice), and the client serialises an empty list as
+--   'none' rather than as ''.
+--
+-- DELIVERY
+--   Each reminder in the list is dispatched independently and marked
+--   independently: push_dispatch.key is '<token>#<id>@<date>', so "יום לפני"
+--   and "בזמן האירוע" on one meeting are two deliveries, not one that swallows
+--   the other. push_dispatch.on_date carries the reminder's OWN date, so a
+--   custom reminder set for next week survives tonight's sweep.
+-- ===========================================================================
+
+UPDATE events SET remind_key = 'default' WHERE remind_key IS NULL OR TRIM(remind_key) = '';
+UPDATE tasks  SET remind_key = 'default' WHERE remind_key IS NULL OR TRIM(remind_key) = '';

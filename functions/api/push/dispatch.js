@@ -34,6 +34,23 @@ import { sendPush } from './_webpush.js';
 const REMIND_MINUTES = { at: 0, '15': 15, '60': 60, '1440': 1440 };
 const CLOSED_STATUSES = ['done', 'cancelled'];
 
+/* Sprint 12 — remind_key is a comma-joined TOKEN LIST, not a single key.
+
+   A token is either a built-in lead ('default' | 'at' | '15' | '60' | '1440')
+   or an absolute moment, '@YYYY-MM-DDTHH:MM'. The empty list is the muted
+   state — the list form of the old 'none' — and a row written before this
+   sprint holds exactly one bare token, which parses to a one-token list. Both
+   ends read the same column, so a lead that means 15 minutes on the phone has
+   to mean 15 minutes here; otherwise the two engines announce the same record
+   at different times and the user gets it twice. */
+const REMIND_MULTI = ['default', 'at', '15', '60', '1440'];
+/* the order a list is STORED in — chronological, so a record's reminders
+   serialise identically on both ends and the sync outbox sees no phantom
+   change. Mirrors app.js REMIND_ORDER. */
+const REMIND_ORDER = ['default', '1440', '60', '15', 'at'];
+const REMIND_CUSTOM_RE = /^@\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+const REMIND_MAX = 12;
+
 const DEFAULT_LEAD_MIN = 10;      // mirrors prefs.notify.lead's default
 const MISS_GRACE_MIN = 20;        // mirrors app.js MISS_GRACE_MIN
 const MAX_SENDS = 60;             // a single run is a minute of work, not a broadcast
@@ -87,6 +104,45 @@ function leadOf(key, fallback) {
   return fallback;                       // 'default', '', null, or anything unknown
 }
 
+const isCustom = tok => typeof tok === 'string' && REMIND_CUSTOM_RE.test(tok);
+
+/**
+ * remind_key → the token list it stands for, the exact twin of app.js
+ * normRemindList() + remindersOf().
+ *
+ * An EMPTY list is muted. A value that says nothing this build understands is
+ * "no opinion" and resolves to the system default — an unknown key has meant
+ * that since Sprint 10, and a forward-compatible vocabulary must never mute a
+ * record by accident. Dropping a reminder is the one failure nobody can see.
+ */
+export function remindTokens(value) {
+  const raw = String(value == null ? '' : value).split(',').map(s => s.trim()).filter(Boolean);
+  if (!raw.length) return ['default'];
+
+  const seen = new Set(), builtin = [], custom = [];
+  for (const tok of raw) {
+    if (tok === 'none' || seen.has(tok)) continue;
+    if (REMIND_MULTI.indexOf(tok) !== -1) { seen.add(tok); builtin.push(tok); }
+    else if (isCustom(tok)) { seen.add(tok); custom.push(tok); }
+  }
+  builtin.sort((a, b) => REMIND_ORDER.indexOf(a) - REMIND_ORDER.indexOf(b));
+  custom.sort();
+  const out = builtin.concat(custom).slice(0, REMIND_MAX);
+  if (out.length) return out;
+  return raw.indexOf('none') !== -1 ? [] : ['default'];
+}
+
+/**
+ * The ledger key for ONE reminder of one record: '<token>#<id>@<date>'.
+ *
+ * The token leads and the date trails, exactly as the client keys prefs.fired,
+ * so a record carrying both "יום לפני" and "בזמן האירוע" produces two marks
+ * instead of one that swallows the other.
+ */
+function remindMark(tok, id, on) {
+  return tok + '#' + id + '@' + on;
+}
+
 function phrase(gap) {
   if (gap < 0) return 'התחיל לפני ' + (-gap) + ' דק׳';
   if (gap === 0) return 'מתחיל עכשיו';
@@ -116,35 +172,49 @@ export function selectDue(rows, now, defaultLead) {
     return day * 1440 + at - now.minutes;
   }
 
+  /**
+   * Sprint 12 — one record, several reminders, one entry each.
+   *
+   * A built-in keeps the window it has always had: open from its own lead
+   * until MISS_GRACE_MIN after the start. A custom stamp is an absolute
+   * moment with no lead at all, so its window is only the grace tail, and it
+   * is keyed by ITS OWN date — a reminder set for next Tuesday must not be
+   * swept tonight by the `on_date < today` sweep.
+   */
+  function collect(rec, id, kind, clockDate, clockTime, body) {
+    for (const tok of remindTokens(rec.remind_key)) {
+      if (isCustom(tok)) {
+        const stamp = tok.slice(1);
+        const day = stamp.slice(0, 10);
+        const gap = gapTo(day, stamp.slice(11, 16));
+        if (gap === null || gap > 0 || gap < -MISS_GRACE_MIN) continue;
+        out.push({ id, on: day, tok, key: remindMark(tok, id, day), title: 'תזכורת · ' + kind, body });
+        continue;
+      }
+      const window_ = leadOf(tok, defaultLead);
+      if (window_ === null) continue;
+      const gap = gapTo(clockDate, clockTime);
+      if (gap === null || gap > window_ || gap < -MISS_GRACE_MIN) continue;
+      out.push({
+        id, on: clockDate, tok, key: remindMark(tok, id, clockDate),
+        title: kind + ' ' + phrase(gap), body
+      });
+    }
+  }
+
   for (const e of rows.events) {
-    const window_ = leadOf(e.remind_key, defaultLead);
-    if (window_ === null) continue;
     const stamp = String(e.start_time || '');
     const cut = stamp.indexOf('T');
     if (cut === -1) continue;                       // all-day: no clock to lead from
-    const gap = gapTo(stamp.slice(0, cut), stamp.slice(cut + 1, cut + 6));
-    if (gap === null || gap > window_ || gap < -MISS_GRACE_MIN) continue;
-    out.push({
-      id: e.id,
-      on: stamp.slice(0, cut),
-      title: 'פגישה ' + phrase(gap),
-      body: (e.title || 'פגישה') + ' · ' + stamp.slice(cut + 1, cut + 6) +
-        (e.location ? ' · ' + e.location : '')
-    });
+    collect(e, e.id, 'פגישה', stamp.slice(0, cut), stamp.slice(cut + 1, cut + 6),
+      (e.title || 'פגישה') + ' · ' + stamp.slice(cut + 1, cut + 6) +
+      (e.location ? ' · ' + e.location : ''));
   }
 
   for (const t of rows.tasks) {
     if (CLOSED_STATUSES.indexOf(t.status) !== -1) continue;   // הושלם / בוטל
-    const window_ = leadOf(t.remind_key, defaultLead);
-    if (window_ === null) continue;
-    const gap = gapTo(String(t.due_date || ''), String(t.due_time || ''));
-    if (gap === null || gap > window_ || gap < -MISS_GRACE_MIN) continue;
-    out.push({
-      id: t.id,
-      on: String(t.due_date),
-      title: 'משימה ' + phrase(gap),
-      body: (t.title || 'משימה') + ' · ' + t.due_time
-    });
+    collect(t, t.id, 'משימה', String(t.due_date || ''), String(t.due_time || ''),
+      (t.title || 'משימה') + ' · ' + t.due_time);
   }
 
   return out;
@@ -198,14 +268,15 @@ async function scan(env) {
 
   const due = selectDue(rows, now, defaultLead);
 
-  /* The ledger, keyed by the record's OWN date exactly as the client keys
-     prefs.fired. Keyed by today instead, a day-before reminder would be swept
-     overnight and fire again in the morning. */
+  /* The ledger, keyed per REMINDER and stamped with the reminder's OWN date,
+     exactly as the client keys prefs.fired. Keyed by today instead, a
+     day-before reminder would be swept overnight and fire again in the
+     morning; keyed by the record alone, the first of a record's several
+     reminders would swallow all the others. */
   const fresh = [];
   for (const item of due) {
-    const key = item.id + '@' + item.on;
-    const seen = await binding.prepare('SELECT key FROM push_dispatch WHERE key = ?').bind(key).first();
-    if (!seen) fresh.push(Object.assign({ key: key }, item));
+    const seen = await binding.prepare('SELECT key FROM push_dispatch WHERE key = ?').bind(item.key).first();
+    if (!seen) fresh.push(item);
   }
 
   return { now: now, tz: tz, defaultLead: defaultLead, scanned: rows.events.length + rows.tasks.length, due: due, fresh: fresh };

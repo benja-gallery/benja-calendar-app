@@ -1683,6 +1683,20 @@ body.is-selecting .fab{ opacity:0; pointer-events:none; }
   font-size:12.5px; font-weight:800;
   font-variant-numeric:tabular-nums;
 }
+/* Sprint 12 §3 — the count left the toggle and became its own control.
+   Collapsing the widget and opening the full open-items sheet are two
+   different intentions and one button cannot carry both, so the header is a
+   row of two: the toggle takes the room, the count keeps its own tap target. */
+.up-head-row{ display:flex; align-items:stretch; gap:8px; }
+.up-head-row .up-head{ flex:1 1 auto; }
+.up-head-row .up-count{
+  min-width:var(--tap); height:auto; min-height:var(--tap);
+  border:1px solid var(--gold-edge); background:var(--gold-soft);
+  cursor:pointer;
+  transition:border-color .18s, background .18s;
+}
+.up-head-row .up-count:hover{ border-color:var(--gold); background:var(--card-2); }
+
 .up-meta{ margin:8px 6px 0; }
 .up-meta:empty{ display:none; }
 .up-block > .card{ margin-top:10px; }
@@ -1703,7 +1717,121 @@ body.is-selecting .fab{ opacity:0; pointer-events:none; }
 /* ---------- reminder and CRM-link chips ---------- */
 .badge.remind{ background:var(--progress-soft); color:var(--progress); }
 .badge.rm-none{ background:var(--muted-soft); color:var(--faint); }
+.badge.rm-multi{ background:var(--gold-soft); color:var(--gold); }
+.badge.rm-custom{ background:var(--business-soft); color:var(--business); }
 .badge.linked{ background:var(--business-soft); color:var(--business); }
+
+/* ==========================================================================
+   Sprint 12 §1 — the reminder panel
+
+   The old control was one <select>, which could only ever express ONE
+   reminder. This is the shape of the two questions actually being asked: a
+   plain on/off, and — while it is on — as many reminders as you like.
+   ========================================================================== */
+
+.rm-mode{ width:100%; }
+.rm-mode .seg{ flex:1 1 0; }
+
+.rm-panel{
+  margin-top:10px; padding:12px;
+  background:var(--card-2); border:1px solid var(--line-soft);
+  border-radius:var(--r-lg);
+}
+.rm-panel[hidden]{ display:none; }
+
+.rm-hint{ margin:0 0 10px; color:var(--faint); font-size:12px; line-height:1.6; }
+
+.rm-opts{ display:grid; gap:2px; }
+
+/* the whole row is the tap target, not just the 16px box inside it */
+.rm-opt{
+  display:flex; align-items:center; gap:10px;
+  min-height:var(--tap); padding:0 8px;
+  border-radius:var(--r-md);
+  color:var(--ink); font-size:13.5px; font-weight:600;
+  cursor:pointer;
+}
+.rm-opt:hover{ background:var(--surface); }
+.rm-opt input{ inline-size:18px; block-size:18px; accent-color:var(--gold); flex:0 0 auto; }
+.rm-opt span{ flex:1 1 auto; min-width:0; }
+
+.rm-customs{ display:grid; gap:8px; margin-top:10px; }
+.rm-customs:empty{ margin-top:0; }
+.rm-custom{ display:flex; align-items:center; gap:8px; }
+.rm-custom .rm-when{ flex:1 1 auto; min-width:0; }
+.rm-custom .mini{ flex:0 0 auto; }
+
+.rm-add{ margin-top:10px; width:100%; justify-content:center; }
+
+.rm-summary{ margin:8px 4px 0; }
+.rm-field.is-muted .rm-summary{ color:var(--faint); }
+
+/* ==========================================================================
+   Sprint 12 §3 — "כל מה שפתוח", the sheet behind the counter
+   ========================================================================== */
+
+/* the chip that opens it. It is a real <button>, so it says out loud that it
+   is a door rather than a fact — colour is never the only signal. */
+.chip-btn{
+  cursor:pointer;
+  color:var(--gold); background:var(--gold-soft); border-color:var(--gold-edge);
+  min-height:32px;
+  transition:border-color .18s, background .18s;
+}
+.chip-btn:hover{ border-color:var(--gold); background:var(--card-2); }
+.chip-btn b{ color:var(--ink); }
+
+.open-filters{ flex-wrap:wrap; margin-bottom:10px; }
+.open-meta{ margin:0 4px 8px; }
+.open-list{ max-height:none; }
+
+/* ==========================================================================
+   Sprint 12 §4 — פרטי פריט, the reading view
+   ========================================================================== */
+
+.detail-body{ padding:2px 2px 8px; }
+
+.dt-head{ display:flex; align-items:flex-start; gap:10px; margin-bottom:10px; }
+.dt-title{
+  flex:1 1 auto; min-width:0; margin:0;
+  color:var(--ink); font-size:17px; font-weight:800; line-height:1.45;
+  overflow-wrap:anywhere;
+}
+
+.dt-notes{
+  margin:0 0 14px; padding:12px;
+  background:var(--card-2); border:1px solid var(--line-soft);
+  border-radius:var(--r-lg);
+  color:var(--muted); font-size:13.5px; line-height:1.75;
+  white-space:pre-wrap; overflow-wrap:anywhere;
+}
+
+.dt-lines{ display:grid; gap:1px; background:var(--line-soft); border-radius:var(--r-lg); overflow:hidden; }
+.dt-line{
+  display:flex; align-items:baseline; gap:10px;
+  padding:11px 12px; background:var(--card);
+}
+.dt-key{ flex:0 0 92px; color:var(--faint); font-size:12px; font-weight:700; }
+.dt-val{ flex:1 1 auto; min-width:0; color:var(--ink); font-size:13.5px; font-weight:600; overflow-wrap:anywhere; }
+
+/* every active reminder, named — the one thing no surface in the app said out
+   loud before, and the whole reason a record could carry a reminder nobody
+   could confirm was there */
+.dt-remind{
+  margin-top:14px; padding:12px;
+  background:var(--gold-soft); border:1px solid var(--gold-edge);
+  border-radius:var(--r-lg);
+}
+.dt-remind.is-muted{ background:var(--muted-soft); border-color:var(--line-soft); }
+.dt-remind .dt-key{ display:block; margin-bottom:8px; color:var(--gold); }
+.dt-remind.is-muted .dt-key{ color:var(--faint); }
+.dt-rms{ margin:0; padding:0; list-style:none; display:grid; gap:6px; }
+.dt-rm{ color:var(--ink); font-size:13px; font-weight:600; }
+.dt-rm.rm-custom{ color:var(--business); }
+
+.detail-acts{ flex-wrap:wrap; }
+.detail-acts .btn{ flex:1 1 auto; }
+.detail-acts .btn[hidden]{ display:none; }
 
 /* ---------- the chime toggle, beside the push toggle ---------- */
 /* .push-btn takes margin-inline-start:auto to push the pair away from the

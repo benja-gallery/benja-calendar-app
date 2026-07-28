@@ -5222,12 +5222,14 @@ check('every mandated reminder option ships with its lead and its Hebrew label',
   return true;
 });
 
-check('the reminder picker is offered on both a task and an event', () => {
+check('the reminder panel is offered on both a task and an event', () => {
+  // Sprint 12 replaced the single <select> with a panel: one <select> could
+  // only ever express ONE reminder, and the mandate asks for several at once
   ['task', 'event'].forEach(t => {
     const form = (js.match(new RegExp(t + ': function \\(\\) \\{[\\s\\S]*?\\n {4}\\},')) || [''])[0];
-    if (form.indexOf("picker('remind'") === -1) throw new Error('the ' + t + ' form offers no reminder');
+    if (form.indexOf('remindField()') === -1) throw new Error('the ' + t + ' form offers no reminder panel');
   });
-  if (js.indexOf('rec.remind = normRemind(v.remind)') === -1) return 'an edit never writes the reminder back';
+  if (js.indexOf('setReminders(rec, v.reminders)') === -1) return 'an edit never writes the reminders back';
   return true;
 });
 
@@ -5294,10 +5296,17 @@ check('a day-before reminder is marked by its own date, so it fires once', () =>
 
   APP.Notify.tick();
   if (shown.length !== 1) return 'the reminder fired ' + shown.length + ' times on the first scan';
-  if (shown[0] !== meeting.id + '@' + tomorrow) {
-    return 'the mark is keyed ' + shown[0] + ', expected the event\'s OWN date';
+
+  /* Sprint 12 — the mark is now per REMINDER, not per record: a record can
+     carry several at once and one record-wide key would let whichever fired
+     first swallow the rest. The token LEADS and the date still TRAILS, which
+     is what keeps the overnight sweep's key.slice(-10) reading a date. */
+  const mark = '1440#' + meeting.id + '@' + tomorrow;
+  if (shown[0] !== mark) {
+    return 'the mark is keyed ' + shown[0] + ", expected the event's OWN date";
   }
-  if (Store.data.prefs.fired[meeting.id + '@' + today]) {
+  if (shown[0].slice(-10) !== tomorrow) return 'the sweep can no longer read a date off the key';
+  if (Store.data.prefs.fired['1440#' + meeting.id + '@' + today]) {
     return "the mark was keyed by today — it would be swept and fire again tomorrow";
   }
 
@@ -5306,7 +5315,7 @@ check('a day-before reminder is marked by its own date, so it fires once', () =>
 
   // a mark for a date still ahead must survive the daily sweep
   APP.Notify.tick();
-  if (!Store.data.prefs.fired[meeting.id + '@' + tomorrow]) return 'the mark was swept while still needed';
+  if (!Store.data.prefs.fired[mark]) return 'the mark was swept while still needed';
   return true;
 });
 
@@ -5445,10 +5454,19 @@ check('a blank reminder can never erase a stored choice', () => {
   if (!block) return 'no PRESERVE_IF_BLANK map';
   if (!/events:[^\]]*'remind_key'/.test(block)) return 'events.remind_key is not preserved';
   if (!/tasks:[^\]]*'remind_key'/.test(block)) return 'tasks.remind_key is not preserved';
-  // ...which is only safe because the client never sends a blank
-  if (js.indexOf("remind_key: normRemind(r.remind)") === -1) {
-    return 'the client can emit a blank reminder, which would read as "no opinion"';
+  // ...which is only safe because the client never sends a blank. Sprint 12
+  // widened the column to a comma-joined token list, so the guarantee moved
+  // from normRemind() to remindKey(), which answers 'none' for an empty list
+  // and therefore still cannot emit ''.
+  if ((js.match(/remind_key: remindColumn\(r\)/g) || []).length !== 2) {
+    return 'the client no longer serialises remind_key through remindColumn()';
   }
+  const R = loadApp().reminders;
+  [[], '', 'none', 'nonsense', null, ['none']].forEach(v => {
+    if (R.remindKey(v) === '') throw new Error('remindKey(' + JSON.stringify(v) + ') emitted a blank');
+  });
+  if (R.remindColumn({ reminders: [] }) !== 'none') return 'a muted record does not serialise as none';
+  if (R.remindColumn({}) !== 'default') return 'a record with no opinion does not serialise as default';
   return true;
 });
 
@@ -5608,7 +5626,7 @@ function loadDispatch() {
   vm.createContext(sandbox);
   vm.runInContext(
     stripModule(dispatchSrc) +
-    '\n;globalThis.__d = { selectDue, localNow, addDaysISO, timeToMinutes, leadOf, phrase };',
+    '\n;globalThis.__d = { selectDue, localNow, addDaysISO, timeToMinutes, leadOf, phrase, remindTokens };',
     sandbox, { filename: 'dispatch.js' });
   return sandbox.__d;
 }
@@ -5815,7 +5833,8 @@ check('a late reminder still fires exactly once', () => {
   APP.Notify.tick();
   APP.Notify.tick();
   if (shown.length !== 1) return 'the late reminder fired ' + shown.length + ' times';
-  if (shown[0] !== rec.id + '@' + today) return 'the mark is keyed ' + shown[0];
+  // Sprint 12 — '<token>#<id>@<date>', the date still trailing for the sweep
+  if (shown[0] !== 'at#' + rec.id + '@' + today) return 'the mark is keyed ' + shown[0];
   return true;
 });
 
@@ -5896,12 +5915,10 @@ check('the server-link state is normalised on load and never crashes a legacy st
   return true;
 });
 
-check('the shell was bumped to v17 for this sprint', () => {
+check('the shell has never regressed below the Sprint 11 cache version', () => {
   const m = sw.match(/CACHE_VERSION\s*=\s*'v(\d+)'/);
   if (!m) return 'no CACHE_VERSION';
   if (parseInt(m[1], 10) < 17) return 'the cache is still v' + m[1] + ' — returning phones keep the old shell';
-  if (html.indexOf('app.js?v=v17') === -1) return 'app.js is not busted to v17';
-  if (html.indexOf('styles.css?v=v17') === -1) return 'styles.css is not busted to v17';
   return true;
 });
 
@@ -5909,6 +5926,745 @@ check('PROJECT_PLAN documents Sprint 11', () => {
   const required = [
     'Sprint 11', 'VAPID', 'RFC 8291', 'push_subscriptions', 'push_dispatch',
     '/api/push/dispatch', 'MISS_GRACE_MIN', 'armOnFirstGesture', 'v17'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ==========================================================================
+   §44 — SPRINT 12
+   multiple reminders per record, real-time visibility, the open-items sheet
+   and the task detail reader
+   ========================================================================== */
+
+/* ---- 44a. the reminder vocabulary, widened ---- */
+
+check('a record can carry several reminders at once', () => {
+  const R = loadApp().reminders;
+
+  // the mandate's own example: יום לפני AND בזמן האירוע, together
+  const both = R.normRemindList('1440,at');
+  if (both.length !== 2) return 'a two-reminder list collapsed to ' + JSON.stringify(both);
+
+  // order is canonical, so two records with the same reminders serialise the
+  // same way and the sync outbox sees no phantom change
+  if (R.remindKey(['at', '1440']) !== R.remindKey(['1440', 'at'])) {
+    return 'the same two reminders serialise two different ways';
+  }
+  if (R.remindKey(['at', 'at', '15']) !== '15,at') {
+    return 'duplicates survive normalisation: ' + R.remindKey(['at', 'at', '15']);
+  }
+  /* the stored order is CHRONOLOGICAL, not the order the checkboxes are drawn
+     in: "יום לפני · שעה לפני · בזמן האירוע" is the order those three actually
+     arrive, and the detail reader lists them exactly as they are stored */
+  if (R.remindKey(['at', '15', '1440', '60']) !== '1440,60,15,at') {
+    return 'a list is not stored chronologically: ' + R.remindKey(['at', '15', '1440', '60']);
+  }
+
+  // the four mandated built-ins are all multi-selectable
+  ['at', '15', '60', '1440'].forEach(k => {
+    if (R.BUILTIN.indexOf(k) === -1) throw new Error(k + ' is not offered as a checkbox');
+    if (R.MULTI.indexOf(k) === -1) throw new Error(k + ' cannot be combined with another');
+  });
+
+  // and a ceiling exists, so a stuck "+ הוסף" cannot grow a record without bound
+  if (!(R.MAX > 4)) return 'REMIND_MAX is ' + R.MAX + ' — too small to hold the built-ins';
+  const flood = R.normRemindList(Array.from({ length: 40 }, (_, i) =>
+    '@2026-08-' + String((i % 28) + 1).padStart(2, '0') + 'T09:00'));
+  if (flood.length > R.MAX) return 'the list grew to ' + flood.length + ', past the ceiling';
+  return true;
+});
+
+check('a custom timestamp reminder is a first-class member of the list', () => {
+  const R = loadApp().reminders;
+
+  if (!R.isCustomRemind('@2026-08-02T07:30')) return 'a well-formed stamp is not recognised';
+  ['@2026-08-02', '@2026-08-02T07', '2026-08-02T07:30', '@bogus', ''].forEach(bad => {
+    if (R.isCustomRemind(bad)) throw new Error('"' + bad + '" was accepted as a custom reminder');
+  });
+
+  const mixed = R.normRemindList('at,@2026-08-02T07:30,@2026-08-01T06:00');
+  // built-ins first, customs after — and the customs in chronological order
+  if (mixed.join('|') !== 'at|@2026-08-01T06:00|@2026-08-02T07:30') {
+    return 'a mixed list came back as ' + mixed.join('|');
+  }
+  if (R.customRemindDate('@2026-08-02T07:30') !== '2026-08-02') return 'the date is misread';
+  if (R.customRemindTime('@2026-08-02T07:30') !== '07:30') return 'the time is misread';
+  // it must READ as something, or the detail sheet lists a raw token
+  if (!R.customRemindText('@2026-08-02T07:30')) return 'a custom reminder has no human label';
+  return true;
+});
+
+check('the muted state is the empty list, and nothing else can mean it', () => {
+  const R = loadApp().reminders;
+
+  if (R.normRemindList('none').length !== 0) return "'none' does not mute";
+  if (R.remindersOf({ remind: 'none' }).length !== 0) return 'a legacy muted record is no longer muted';
+  if (R.remindersOf({ reminders: [] }).length !== 0) return 'an empty list is not treated as muted';
+  if (R.remindOn({ reminders: [] })) return 'remindOn() says a muted record wants reminders';
+  if (!R.remindOn({ reminders: ['at'] })) return 'remindOn() says a record with a reminder wants none';
+
+  /* An unknown key is NO OPINION, never silence. A forward-compatible
+     vocabulary that muted a record it could not parse would drop reminders
+     invisibly — the one failure the user cannot see happening. */
+  if (R.remindersOf({ remind: 'someday' }).join() !== 'default') {
+    return 'an unknown key was read as ' + JSON.stringify(R.remindersOf({ remind: 'someday' }));
+  }
+  if (R.remindersOf({}).join() !== 'default') return 'a record with no reminder field is not default';
+  return true;
+});
+
+check('a pre-Sprint-12 record keeps exactly the behaviour it had', () => {
+  const R = loadApp().reminders;
+  // every single-key store and every single-key D1 row parses as a one-token
+  // list, so nothing written before this sprint changes when it is announced
+  ['default', 'at', '15', '60', '1440'].forEach(k => {
+    const back = R.remindersOf({ remind: k });
+    if (back.length !== 1 || back[0] !== k) {
+      throw new Error("legacy '" + k + "' became " + JSON.stringify(back));
+    }
+    if (R.remindColumn({ remind: k }) !== k) throw new Error("legacy '" + k + "' no longer round-trips");
+  });
+  if (R.remindColumn({ remind: 'none' }) !== 'none') return 'a legacy mute does not round-trip';
+  return true;
+});
+
+check('several reminders on one record are several deliveries, not one', () => {
+  const APP = loadApp(), Store = APP.Store, D = APP.dates;
+  Store.load();
+  const today = APP.isoDate(new Date());
+  const tomorrow = D.addDaysISO(today, 1);
+  const now = clockNow();
+
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.fired = {};
+  Store.data.prefs.notify.lead = 10;
+
+  // tomorrow at this same minute: 1440 minutes out, so "יום לפני" is open and
+  // "בזמן האירוע" is not — and both are carried by the SAME record
+  const meeting = Store.add('events', {
+    type: 'event', title: 'פגישה עם שתי התראות', category: 'business',
+    date: tomorrow, start: hhmm(now), end: '', location: '', notes: '', clientId: '',
+    reminders: ['1440', 'at']
+  });
+
+  const due = APP.Notify.due().filter(x => x.id === meeting.id);
+  if (due.length !== 1) return 'expected only the day-before reminder now, got ' + due.length;
+  if (due[0].tok !== '1440') return 'the wrong reminder is open: ' + due[0].tok;
+
+  // and the two are marked separately, so neither can swallow the other
+  const shown = [];
+  APP.Notify.armed = () => true;
+  APP.Notify.show = (tag) => { shown.push(tag); };
+  APP.Notify.tick();
+  APP.Notify.tick();
+  if (shown.length !== 1) return 'the day-before reminder fired ' + shown.length + ' times';
+
+  const marks = Object.keys(Store.data.prefs.fired);
+  if (marks.length !== 1) return 'the ledger holds ' + marks.length + ' marks, expected 1';
+  if (marks[0] !== '1440#' + meeting.id + '@' + tomorrow) return 'the mark is ' + marks[0];
+  // the sweep reads the date off the END of the key — that invariant survived
+  if (marks[0].slice(-10) !== tomorrow) return 'the sweep can no longer read a date off the mark';
+
+  // the "בזמן האירוע" mark is a DIFFERENT key, so tomorrow it still fires
+  if (Store.data.prefs.fired['at#' + meeting.id + '@' + tomorrow]) {
+    return 'the day-before delivery consumed the at-the-time reminder too';
+  }
+  return true;
+});
+
+check('a custom timestamp reminder fires at the minute it names, once', () => {
+  const APP = loadApp(), Store = APP.Store;
+  Store.load();
+  const today = APP.isoDate(new Date());
+  const now = clockNow();
+  if (now < 180 || now > 1260) return true;        // needs room either side of midnight
+
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.fired = {};
+
+  /* The point of a custom reminder: it has NOTHING to do with the record's own
+     clock. This task is due in two hours; the reminder is for right now. */
+  const task = Store.add('tasks', {
+    type: 'task', title: 'משימה עם תזכורת מוחלטת', category: 'personal',
+    due: today, time: hhmm(now + 120), status: 'todo', priority: 'medium',
+    nextAction: '', subtasks: [], done: false, notes: '', clientId: '',
+    reminders: ['@' + today + 'T' + hhmm(now)]
+  });
+  // ...and one for two hours from now, which must NOT fire early: a custom
+  // stamp has no lead window at all
+  const later = Store.add('tasks', {
+    type: 'task', title: 'מאוחר יותר', category: 'personal',
+    due: today, time: hhmm(now), status: 'todo', priority: 'medium',
+    nextAction: '', subtasks: [], done: false, notes: '', clientId: '',
+    reminders: ['@' + today + 'T' + hhmm(now + 120)]
+  });
+
+  const ids = APP.Notify.due().map(x => x.id);
+  if (ids.indexOf(task.id) === -1) return 'a custom reminder for right now never fired';
+  if (ids.indexOf(later.id) !== -1) return 'a custom reminder fired two hours early';
+
+  const shown = [];
+  APP.Notify.armed = () => true;
+  APP.Notify.show = (tag) => { shown.push(tag); };
+  APP.Notify.tick();
+  APP.Notify.tick();
+  if (shown.length !== 1) return 'the custom reminder fired ' + shown.length + ' times';
+  if (shown[0] !== '@' + today + 'T' + hhmm(now) + '#' + task.id + '@' + today) {
+    return 'the mark is ' + shown[0];
+  }
+  if (shown[0].slice(-10) !== today) return 'the sweep can no longer read a date off a custom mark';
+  return true;
+});
+
+check('the form asks the two questions the mandate asks', () => {
+  const APP = loadApp();
+  const panel = APP.reminders.remindField();
+
+  // 1. the master toggle, in the mandate's own words
+  if (panel.indexOf('data-remindmode="on"') === -1) return 'no "עם התראה" switch';
+  if (panel.indexOf('data-remindmode="off"') === -1) return 'no "ללא התראה" switch';
+  if (APP.reminders.ON_LABEL.indexOf('עם התראה') === -1) return 'the on label is not "עם התראה"';
+  if (APP.reminders.OFF_LABEL.indexOf('ללא התראה') === -1) return 'the off label is not "ללא התראה"';
+
+  // 2. multi-select checkboxes — NOT a <select>, which could only say one thing
+  const boxes = (panel.match(/type="checkbox"/g) || []).length;
+  if (boxes < 5) return 'only ' + boxes + ' reminder checkboxes; expected default + the four leads';
+  ['בזמן האירוע', '15 דקות לפני', 'שעה לפני', 'יום לפני'].forEach(t => {
+    if (panel.indexOf(t) === -1) throw new Error('the panel never offers "' + t + '"');
+  });
+
+  // 3. any number of absolute reminders, added one at a time
+  if (panel.indexOf('data-remindadd') === -1) return 'no "+ הוסף התראת זמן נוספת" button';
+  if (panel.indexOf('הוסף התראת זמן נוספת') === -1) return 'the add button is not the mandated copy';
+  if (js.indexOf("type=\"datetime-local\" data-remindwhen=") === -1) {
+    return 'a custom reminder has no date-and-time picker';
+  }
+
+  // and one hidden field is what submitForm()'s generic sweep collects
+  if (panel.indexOf('name="reminders"') === -1) return 'the panel submits nothing';
+  return true;
+});
+
+check('the reminder panel round-trips a real record through the form', () => {
+  const APP = loadApp(), F = APP.reminders.FormRemind;
+  // no DOM: load()/paint() must survive a document with no form in it, which
+  // is also the browser state between two openForm() calls
+  const held = '1440,at,@2026-08-02T07:30';
+  F.load(held);
+  if (!F.on) return 'a record with reminders opened muted';
+  if (F.customs.length !== 1) return 'the custom reminder was not unpacked';
+  if (F.value() !== held) return 'the panel re-serialised as ' + F.value();
+
+  F.setMode('off');
+  if (F.value() !== 'none') return 'the off switch does not mute; it emits ' + F.value();
+  F.setMode('on');
+  if (F.value() !== held) return 'switching back lost the list';
+
+  F.toggle('at', false);
+  if (F.value().indexOf('at') !== -1) return 'unticking a box left it in the list';
+  F.toggle('at', true);
+  if (F.value() !== held) return 'ticking the box back did not restore the list';
+
+  // "עם התראה" with nothing ticked is not silence — silence is the other switch
+  F.load('');
+  F.setMode('on');
+  ['default', 'at', '15', '60', '1440'].forEach(k => F.toggle(k, false));
+  if (F.value() !== 'default') return 'an armed panel with nothing ticked emits ' + F.value();
+
+  // a muted record opens muted, so the toggle tells the truth on open
+  F.load('none');
+  if (F.on) return 'a muted record opened with reminders armed';
+  return true;
+});
+
+/* ---- 44b. §2 — real-time visibility ---- */
+
+check('a record created for today is on all three surfaces at once', () => {
+  const APP = loadApp(), Store = APP.Store, U = APP.ui, T = APP.tasks;
+  Store.load();
+  const today = APP.isoDate(new Date());
+
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.filter = 'all';
+
+  const task = Store.add('tasks', {
+    type: 'task', title: 'משימה מתוזמנת להיום', category: 'personal',
+    due: today, time: '14:00', status: 'new', priority: 'medium',
+    nextAction: '', subtasks: [], done: false, notes: '', clientId: '',
+    reminders: ['at']
+  });
+
+  // 1. the timeline, in its own hour bucket
+  const slot = U.timelineEntries().filter(e => e.rec.id === task.id)[0];
+  if (!slot) return 'the task never reached the timeline';
+  if (slot.hour !== 14) return 'the task landed in the ' + slot.hour + ':00 bucket, expected 14:00';
+  if (U.timelineKeys().indexOf('tasks:' + task.id) === -1) return 'the paint order does not hold it';
+
+  // 2. today's board
+  if (U.boardTasksToday().map(x => x.id).indexOf(task.id) === -1) return "it is not on today's board";
+
+  // 3. the calendar's own day list
+  if (U.boardTasksOn(today).map(x => x.id).indexOf(task.id) === -1) return 'the calendar day does not hold it';
+
+  // ...and it is NOT in the inbox: נכנסים is "no date", and this one has one
+  if (T.inboxTasks().map(x => x.id).indexOf(task.id) !== -1) {
+    return 'a dated task was filed into נכנסים';
+  }
+  if (APP.tasks.taskMatchesTab(task, 'inbox', today)) return 'taskMatchesTab() sends a dated task to נכנסים';
+  if (!APP.tasks.taskMatchesTab(task, 'today', today)) return 'a task due today does not match היום';
+
+  // an event created for today reaches the timeline the same way
+  const ev = Store.add('events', {
+    type: 'event', title: 'פגישה היום', category: 'business', date: today,
+    start: '15:00', end: '', location: '', notes: '', clientId: '', reminders: ['at']
+  });
+  if (U.timelineKeys().indexOf('events:' + ev.id) === -1) return 'a new event never reached the timeline';
+  return true;
+});
+
+check('a new event finally meets its migrator, exactly like every other type', () => {
+  const APP = loadApp(), Store = APP.Store;
+  Store.load();
+  /* Store.shaped() had branches for clients, tasks, lists and notes — and none
+     for events. A freshly created event was the ONE record that never met its
+     migrator and entered the store unnormalised, while every event arriving
+     from D1 or from localStorage was normalised twice. */
+  const shaped = bodyOf(js, 'shaped: function (collection, rec)');
+  if (shaped.indexOf('migrateEvent') === -1) return 'Store.shaped() still skips events';
+
+  const ev = Store.add('events', {
+    type: 'event', title: 'לא מנורמל', category: 'personal',
+    date: APP.isoDate(new Date()), start: '09:00', end: '', location: '',
+    notes: '', clientId: '', remind: 'nonsense-from-a-future-build'
+  });
+  if (!Array.isArray(ev.reminders)) return 'a new event carries no reminder list';
+  if (ev.remind !== 'default') return 'an unknown key survived into the store as ' + ev.remind;
+  return true;
+});
+
+check('a saved record cannot be hidden by the filter it was saved outside of', () => {
+  const APP = loadApp(), Store = APP.Store, U = APP.ui;
+  Store.load();
+  Store.data.prefs.filter = 'business';
+
+  /* pick() gates every read path, so a personal task created while the filter
+     reads "עסקי" is counted by the summary and drawn by nothing — the exact
+     shape of the field report, and a reload "fixed" it only because the user
+     changed the filter on the way back in. */
+  const note = U.reveal('personal', '');
+  if (Store.data.prefs.filter !== 'all') return 'the filter still hides the record that was just saved';
+  if (!note) return 'the widening happened silently — the user is never told why the view moved';
+
+  // a record INSIDE the active filter moves nothing: silence is the common case
+  Store.data.prefs.filter = 'business';
+  if (U.reveal('business', '')) return 'a record already in view widened the filter anyway';
+  if (Store.data.prefs.filter !== 'business') return 'the filter was widened for no reason';
+  return true;
+});
+
+check('the calendar follows a record saved outside the period it is showing', () => {
+  const APP = loadApp(), Store = APP.Store, U = APP.ui, Cal = APP.Cal, D = APP.dates;
+  Store.load();
+  Store.data.prefs.filter = 'all';
+
+  /* Cal.anchor is captured once, when app.js is PARSED. A home-screen PWA is
+     resumed rather than reloaded, so an app left open overnight is anchored on
+     yesterday and a record created "for today" lands on a day the calendar is
+     not showing. Only a reload re-anchored it — which is why refreshing
+     "fixed" the bug. */
+  Cal.view = 'day';
+  Cal.anchor = '2026-01-01';
+  const far = '2026-09-15';
+  if (U.calShows(far)) return 'the day view claims to show a day nine months away';
+
+  U.reveal('personal', far);
+  if (Cal.anchor !== far) return 'the calendar stayed on ' + Cal.anchor;
+  if (!U.calShows(far)) return 'the calendar moved but still does not show the day';
+
+  // a day the period already covers moves nothing
+  Cal.view = 'month';
+  Cal.anchor = '2026-09-01';
+  const inMonth = '2026-09-20';
+  U.reveal('personal', inMonth);
+  if (Cal.anchor !== '2026-09-01') return 'the anchor jumped for a day the month already showed';
+
+  // and the day-rollover guard re-anchors an app that was never reloaded
+  const today = APP.isoDate(new Date());
+  const yesterday = D.addDaysISO(today, -1);
+  Cal.anchor = yesterday;
+  if (js.indexOf('function dayGuard') === -1) return 'no dayGuard()';
+  if (!/setInterval\(function \(\) \{ dayGuard\(\);/.test(js)) return 'the day guard is never run on a clock';
+  if (js.indexOf('dayGuard();\n        self.paint();') === -1) {
+    return 'a phone waking from sleep never re-checks the date';
+  }
+  return true;
+});
+
+/* ---- 44c. §3 — every open item, in one chronology ---- */
+
+check('the "פתוחות" counter is a door, and so is the widget count', () => {
+  if (js.indexOf('data-openall="1"') === -1) return 'the summary chip opens nothing';
+  if (!/class="chip chip-btn" data-openall/.test(js)) return 'the chip is not a real button';
+  if (html.indexOf('id="upcomingCount"') === -1) return 'the widget count is gone';
+  if (!/id="upcomingCount"[^>]*data-openall="1"/.test(html)) return 'the widget count opens nothing';
+  // a <button> may never nest inside a <button>
+  if (/<button[^>]*id="upcomingToggle"[\s\S]{0,400}?<button[^>]*id="upcomingCount"[\s\S]{0,80}?<\/button>[\s\S]{0,80}?<\/button>/.test(html)) {
+    return 'the count button is nested inside the toggle button';
+  }
+  ['id="openSheet"', 'id="openList"', 'id="openFilters"', 'id="openMeta"'].forEach(id => {
+    if (html.indexOf(id) === -1) throw new Error('the document ships no ' + id);
+  });
+  return true;
+});
+
+check('the open-items sheet holds everything open, chronologically', () => {
+  const APP = loadApp(), Store = APP.Store, U = APP.ui, D = APP.dates;
+  Store.load();
+  const today = APP.isoDate(new Date());
+
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.filter = 'all';
+
+  const task = (title, due, time, status) => Store.add('tasks', {
+    type: 'task', title, category: 'personal', due, time, status,
+    priority: 'medium', nextAction: '', subtasks: [], done: status === 'done',
+    notes: '', clientId: '', reminders: ['default']
+  });
+  const ev = (title, date, start) => Store.add('events', {
+    type: 'event', title, category: 'business', date, start, end: '',
+    location: '', notes: '', clientId: '', reminders: ['default']
+  });
+
+  const late = task('באיחור', D.addDaysISO(today, -3), '09:00', 'todo');
+  const soonTask = task('היום', today, '15:00', 'todo');
+  const farTask = task('בעוד חודשיים', D.addDaysISO(today, 60), '09:00', 'todo');
+  const inbox = task('ללא תאריך', '', '', 'todo');
+  const closed = task('הושלמה', today, '10:00', 'done');
+  const meeting = ev('פגישה היום', today, '11:00');
+  const farMeeting = ev('פגישה בעוד חודש', D.addDaysISO(today, 30), '09:00');
+  const past = ev('פגישה שהייתה', D.addDaysISO(today, -2), '09:00');
+
+  const ids = U.openRows('all').map(r => r.rec.id);
+
+  /* This is the whole point: the counter has always counted these and no
+     surface has ever listed them. A task two months out and a meeting next
+     month were counted by "פתוחות" and drawn by nothing. */
+  [late, soonTask, farTask, inbox, meeting, farMeeting].forEach(r => {
+    if (ids.indexOf(r.id) === -1) throw new Error('"' + r.title + '" is counted but not listed');
+  });
+  if (ids.indexOf(closed.id) !== -1) return 'a completed task is listed as open';
+  if (ids.indexOf(past.id) !== -1) return 'a meeting that already happened is listed as outstanding';
+
+  // chronological, undated last, a meeting ahead of a self-appointment
+  const rows = U.openRows('all');
+  let prev = '';
+  for (const r of rows) {
+    const key = r.on || '9999-99-99';
+    if (key < prev) return 'the list is out of order at ' + r.rec.title;
+    prev = key;
+  }
+  if (rows[rows.length - 1].rec.id !== inbox.id) return 'the undated row is not last';
+  const dayRows = rows.filter(r => r.on === today);
+  if (dayRows[0].collection !== 'events') return 'a task outranks a meeting inside the same day';
+
+  // the quick filters, each of which must actually partition
+  const of = f => U.openRows(f).map(r => r.rec.id);
+  if (of('tasks').indexOf(meeting.id) !== -1) return 'the tasks filter leaks an event';
+  if (of('events').indexOf(soonTask.id) !== -1) return 'the events filter leaks a task';
+  if (of('today').some(id => [farTask.id, inbox.id, late.id].indexOf(id) !== -1)) {
+    return 'the היום filter is not scoped to today';
+  }
+  if (of('late').join() !== late.id) return 'the באיחור filter is wrong';
+  if (of('undated').join() !== inbox.id) return 'the ללא תאריך filter is wrong';
+  if (of('week').indexOf(farTask.id) !== -1) return 'the השבוע filter reaches two months out';
+  if (of('week').indexOf(soonTask.id) === -1) return 'the השבוע filter misses today';
+
+  // every filter the document offers has a predicate behind it
+  APP.ui.OPEN_FILTERS.forEach(f => {
+    if (html.indexOf('data-openfilter="' + f + '"') === -1) throw new Error('no chip for the ' + f + ' filter');
+  });
+  (html.match(/data-openfilter="(\w+)"/g) || []).forEach(m => {
+    const f = m.match(/"(\w+)"/)[1];
+    if (APP.ui.OPEN_FILTERS.indexOf(f) === -1) throw new Error('the chip "' + f + '" filters nothing');
+  });
+
+  // the rows carry data-rec, so a tap reaches the record and Patch can update it
+  if (U.openRowHTML(rows[0]).indexOf('data-rec="') === -1) return 'an open-sheet row is not a real card';
+  if (U.openKeys().length !== U.openRows().length) return 'the membership keys do not match the rows';
+  return true;
+});
+
+check('the open-items sheet declines to paint while it is closed', () => {
+  // the same rule openTrash() keeps: painting a closed sheet burns a rebuild
+  // on a container nobody can see, and the sheet would open empty
+  const body = bodyOf(js, 'function renderOpenSheet(quiet)');
+  if (!body) return 'no renderOpenSheet()';
+  if (body.indexOf('openSheetOpen()') === -1) return 'the paint is not gated on the sheet being open';
+  // comments are stripped first: the reason the order matters is written right
+  // above the two calls, and it names both of them
+  const door = bodyOf(js, 'function openOpenSheet()')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  if (door.indexOf("openSheet('openSheet')") === -1) return 'the sheet is never unhidden';
+  if (door.indexOf("openSheet('openSheet')") > door.indexOf('renderOpenSheet()')) {
+    return 'the sheet is painted before it is unhidden — it would open empty';
+  }
+  // and it is a list container like any other: rebuilt only when membership moved
+  const settle = bodyOf(js, 'settle: function ()');
+  if (settle.indexOf("sameKeys(domKeys('#openList'), openKeys())") === -1) {
+    return 'the sheet is rebuilt on every patch, not only when its membership moved';
+  }
+  return true;
+});
+
+/* ---- 44d. §4 — the task detail reader ---- */
+
+check('tapping a task or an event opens the reader, not a form', () => {
+  const APP = loadApp(), U = APP.ui;
+  ['tasks', 'events'].forEach(c => {
+    if (U.TAP_DETAIL.indexOf(c) === -1) throw new Error(c + ' cards do not open a reading view');
+    if (U.TAP_EDIT.indexOf(c) === -1) throw new Error(c + ' cards no longer answer a tap at all');
+  });
+  // a list or a note has no reading surface of its own — its whole content is
+  // already on the card — so those still open their form directly
+  ['lists', 'notes'].forEach(c => {
+    if (U.TAP_DETAIL.indexOf(c) !== -1) throw new Error(c + ' gained a reader it does not need');
+  });
+  const gate = bodyOf(js, 'function openTapped(collection, id)');
+  if (!gate) return 'no openTapped()';
+  if (gate.indexOf('Detail.open') === -1) return 'the reader is never opened';
+  if (gate.indexOf('openEdit') === -1) return 'lists and notes lost their tap-to-edit';
+  // a tap inside the reader must not resolve to the card underneath it
+  if (bodyOf(js, 'function tapEditKey(target)').indexOf('Detail.isOpen()') === -1) {
+    return 'a tap inside the reader would open a second layer';
+  }
+  return true;
+});
+
+check('the reader states everything the mandate lists, reminders included', () => {
+  const APP = loadApp(), Store = APP.Store, D = APP.reminders;
+  Store.load();
+  const today = APP.isoDate(new Date());
+
+  Store.data.clients.length = 0;
+  Store.data.tasks.length = 0;
+  const client = Store.add('clients', {
+    type: 'client', name: 'דנה כהן', category: 'business', phone: '', email: '',
+    status: 'quoted', interest: '', budget: '', nextAction: '', nextActionAt: '',
+    followUpAt: '', notes: ''
+  });
+  const task = Store.add('tasks', {
+    type: 'task', title: 'לשלוח הצעת מחיר', category: 'business',
+    due: today, time: '14:00', status: 'progress', priority: 'high',
+    nextAction: 'לאסוף מידות', subtasks: [], done: false,
+    notes: 'הפירוט המלא של המשימה, שאף כרטיס לא היה מציג עד הסוף.',
+    clientId: client.id, reminders: ['1440', 'at', '@' + today + 'T07:30']
+  });
+
+  const Reader = APP.ui.Detail;
+  Reader.collection = 'tasks';
+  Reader.id = task.id;
+  const out = Reader.body(Store.find('tasks', task.id));
+
+  // כותרת מלאה והערות/פירוט
+  if (out.indexOf('לשלוח הצעת מחיר') === -1) return 'the reader omits the title';
+  if (out.indexOf('שאף כרטיס לא היה מציג עד הסוף') === -1) return 'the reader omits the notes';
+  // תאריך ושעה
+  if (out.indexOf('14:00') === -1) return 'the reader omits the time';
+  // קטגוריה ושם לקוח מקושר
+  if (out.indexOf('עסקי') === -1) return 'the reader omits the category';
+  if (out.indexOf('דנה כהן') === -1) return 'the reader omits the linked client';
+  // רשימת כל ההתראות הפעילות — INCLUDING the custom one
+  ['יום לפני', 'בזמן האירוע'].forEach(t => {
+    if (out.indexOf(t) === -1) throw new Error('the reader never lists "' + t + '"');
+  });
+  if (out.indexOf(D.customRemindText('@' + today + 'T07:30')) === -1) {
+    return 'the reader never lists the custom reminder';
+  }
+  if (out.indexOf('התראות (3)') === -1) return 'the reader does not say how many reminders there are';
+
+  // a muted record says so, rather than saying nothing at all
+  const quiet = Store.add('tasks', {
+    type: 'task', title: 'מושתקת', category: 'personal', due: today, time: '',
+    status: 'todo', priority: 'low', nextAction: '', subtasks: [], done: false,
+    notes: '', clientId: '', reminders: []
+  });
+  Reader.id = quiet.id;
+  const muted = Reader.body(Store.find('tasks', quiet.id));
+  if (muted.indexOf('ללא התראה') === -1) return 'a muted record does not say it is muted';
+
+  // an inbox task reads as an inbox task, not as a blank date
+  if (Store.add('tasks', { type: 'task', title: 'נכנסים', category: 'personal', due: '', time: '', status: 'todo', priority: 'low', nextAction: '', subtasks: [], done: false, notes: '', clientId: '' }) &&
+      Reader.body({ title: 'x', due: '', time: '', status: 'todo', priority: 'low', category: 'personal' }).indexOf('נכנסים') === -1) {
+    return 'an undated task does not read as נכנסים';
+  }
+  return true;
+});
+
+check('the reader offers עריכה, סימון כבוצע and מחיקה', () => {
+  ['id="detailSheet"', 'id="detailBody"', 'id="detailSheetTitle"', 'id="detailDone"'].forEach(id => {
+    if (html.indexOf(id) === -1) throw new Error('the document ships no ' + id);
+  });
+  ['edit', 'done', 'delete'].forEach(a => {
+    if (html.indexOf('data-detailact="' + a + '"') === -1) throw new Error('the reader offers no ' + a);
+  });
+  if (html.indexOf('עריכה') === -1 || html.indexOf('סימון כבוצע') === -1 || html.indexOf('מחיקה') === -1) {
+    return 'the action copy is not the mandated Hebrew';
+  }
+
+  const APP = loadApp(), Store = APP.Store, Reader = APP.ui.Detail;
+  Store.load();
+  Store.data.tasks.length = 0;
+  const today = APP.isoDate(new Date());
+  const task = Store.add('tasks', {
+    type: 'task', title: 'לסמן', category: 'personal', due: today, time: '',
+    status: 'todo', priority: 'medium', nextAction: '', subtasks: [], done: false,
+    notes: '', clientId: '', reminders: ['default']
+  });
+
+  // the reader drives the SAME writer every other surface does, so `done` can
+  // never drift out of lockstep with status
+  const act = bodyOf(js, 'act: function (what)');
+  if (act.indexOf('toggleTaskDone(rec)') === -1) return 'the reader writes status by hand';
+  if (act.indexOf('confirmDelete(') === -1) return 'the reader deletes without the one confirmation door';
+  if (act.indexOf('openEdit(collection, id)') === -1) return 'עריכה does not open the record it is reading';
+
+  // the sandbox has no document: the targeted-patch engine and the reader's own
+  // paint both want one, and neither is what this check is about
+  APP.ui.Patch.apply = () => true;
+  Reader.collection = 'tasks';
+  Reader.id = task.id;
+  Reader.act('done');
+  if (Store.find('tasks', task.id).status !== 'done') return 'סימון כבוצע did not mark the task';
+  if (!Store.find('tasks', task.id).done) return 'status and done drifted apart';
+  Reader.act('done');
+  if (Store.find('tasks', task.id).status === 'done') return 'the second tap did not un-mark it';
+
+  // an event has no status to move, so the button is not offered on one
+  // (several objects in app.js carry a paint(); this one is addressed by its
+  // own line rather than by whichever paint: bodyOf() happens to find first)
+  if (js.indexOf("done.hidden = this.collection !== 'tasks'") === -1) {
+    return 'an event is offered a "סימון כבוצע" it cannot honour';
+  }
+  return true;
+});
+
+/* ---- 44e. §5 — the server half of a multi-reminder record ---- */
+
+check('the dispatcher speaks the same reminder vocabulary as the client', () => {
+  const DS = loadDispatch(), R = loadApp().reminders;
+
+  // the two parsers must agree on every shape either end can produce
+  ['default', 'at', '15', '60', '1440', 'none', '', '1440,at',
+    'at,@2026-08-02T07:30', '@2026-08-01T06:00,@2026-08-02T07:30,60',
+    'nonsense', 'at,at,15'].forEach(v => {
+      const client = R.normRemindList(v).length ? R.normRemindList(v) : R.remindersOf({ remind: v });
+      const server = DS.remindTokens(v);
+      if (client.join('|') !== server.join('|')) {
+        throw new Error('"' + v + '" → client ' + client.join('|') + ' vs server ' + server.join('|'));
+      }
+    });
+  return true;
+});
+
+check('the dispatcher sends each reminder of a record separately', () => {
+  const DS = loadDispatch();
+  const now = { date: '2026-07-28', minutes: 10 * 60 };          // 10:00 local
+  const tomorrow = '2026-07-29';
+
+  const rows = {
+    events: [
+      // ONE record, two built-in reminders. At 10:00 today only the day-before
+      // lead reaches tomorrow's 10:00 meeting; "בזמן האירוע" is 1440 out.
+      { id: 'e-two', title: 'שתי התראות', start_time: tomorrow + 'T10:00', remind_key: '1440,at' },
+      // a custom stamp fires at the minute it names and has no lead at all
+      { id: 'e-cust', title: 'מוחלטת', start_time: tomorrow + 'T18:00', remind_key: '@2026-07-28T10:00' },
+      { id: 'e-cust-early', title: 'מאוחר יותר', start_time: tomorrow + 'T18:00', remind_key: '@2026-07-28T12:00' },
+      // muted stays muted, however the list is written
+      { id: 'e-mute', title: 'מושתקת', start_time: '2026-07-28T10:05', remind_key: 'none' }
+    ],
+    tasks: []
+  };
+
+  const due = DS.selectDue(rows, now, 10);
+  const keys = due.map(x => x.key);
+
+  const two = due.filter(x => x.id === 'e-two');
+  if (two.length !== 1) return 'expected only the day-before reminder now, got ' + two.length;
+  if (two[0].tok !== '1440') return 'the wrong reminder opened: ' + two[0].tok;
+  if (two[0].key !== '1440#e-two@' + tomorrow) return 'the mark is ' + two[0].key;
+  // the ledger sweep is `on_date < today`, so the reminder's OWN date is what
+  // must be recorded — a custom reminder next week must survive tonight
+  if (two[0].on !== tomorrow) return 'the ledger would sweep the mark early';
+
+  const cust = due.filter(x => x.id === 'e-cust')[0];
+  if (!cust) return 'a custom reminder due right now never fired';
+  if (cust.key !== '@2026-07-28T10:00#e-cust@2026-07-28') return 'the custom mark is ' + cust.key;
+  if (cust.key.slice(-10) !== '2026-07-28') return 'the custom mark does not end in its own date';
+  if (keys.some(k => k.indexOf('e-cust-early') !== -1)) return 'a custom reminder fired two hours early';
+  if (keys.some(k => k.indexOf('e-mute') !== -1)) return 'a muted record was announced anyway';
+
+  // every mark is distinct, or one delivery would consume another
+  if (new Set(keys).size !== keys.length) return 'two reminders share one ledger key';
+
+  // and scan() must mark by that key, not by the record
+  const src = read('functions/api/push/dispatch.js');
+  if (src.indexOf("item.id + '@' + item.on") !== -1) {
+    return 'the dispatcher still keys the ledger per record, not per reminder';
+  }
+  if (src.indexOf('.bind(item.key).first()') === -1) return 'the ledger is not read by the reminder key';
+  return true;
+});
+
+check('migration 0005 widens the vocabulary without touching a column', () => {
+  const p = path.join(ROOT, 'migrations', '0005_sprint12_multi_remind.sql');
+  if (!fs.existsSync(p)) return 'migration 0005 is missing';
+  const sql = fs.readFileSync(p, 'utf8');
+
+  // APPEND-ONLY: the earlier migrations are never edited, and this one must
+  // not add a column either — healthcheck rebuilds the entity column order out
+  // of 0001 + 0002 + 0003 and the client and Worker both list remind_key last
+  if (/ALTER\s+TABLE/i.test(sql)) return 'migration 0005 alters a table — the column order would drift';
+  if (/DROP|DELETE\s+FROM/i.test(sql)) return 'migration 0005 destroys data';
+
+  // it repairs rows that were never given a choice, exactly as 0003 did
+  if (!/UPDATE events SET remind_key = 'default'/.test(sql)) return 'events rows are not repaired';
+  if (!/UPDATE tasks\s+SET remind_key = 'default'/.test(sql)) return 'tasks rows are not repaired';
+
+  // and it documents the widened vocabulary, because the column itself cannot
+  ['@YYYY-MM-DDTHH:MM', 'none', 'default', 'preserve-if-blank'].forEach(s => {
+    if (sql.indexOf(s) === -1) throw new Error('0005 does not document ' + s);
+  });
+
+  // the three schema listings still agree, and still end in remind_key
+  const APP = loadApp();
+  ['events', 'tasks'].forEach(t => {
+    const cols = APP.sync.SCHEMA[t];
+    if (cols[cols.length - 1] !== 'remind_key') throw new Error(t + ' no longer ends in remind_key');
+  });
+  return true;
+});
+
+/* ---- 44f. shipped shell and specification ---- */
+
+check('the shell was bumped to v18 for this sprint', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'v(\d+)'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[1], 10) < 18) return 'the cache is still v' + m[1] + ' — returning phones keep the old shell';
+  if (html.indexOf('app.js?v=v18') === -1) return 'app.js is not busted to v18';
+  if (html.indexOf('styles.css?v=v18') === -1) return 'styles.css is not busted to v18';
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 12', () => {
+  const required = [
+    'Sprint 12', 'normRemindList', 'remindersOf', 'עם התראה', 'ללא התראה',
+    'הוסף התראת זמן נוספת', 'openEntries', 'Detail', 'dayGuard', 'reveal',
+    '0005_sprint12_multi_remind.sql', 'v18'
   ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;

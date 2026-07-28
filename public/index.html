@@ -26,7 +26,7 @@
 <!-- ?v= MUST match CACHE_VERSION in sw.js. GitHub Pages serves these with
      max-age=600 and no content hash, so without the query an installed phone
      can keep serving the previous build out of its own HTTP cache. -->
-<link rel="stylesheet" href="styles.css?v=v17">
+<link rel="stylesheet" href="styles.css?v=v18">
 </head>
 <body>
 
@@ -172,12 +172,21 @@
            default: a widget that hides the thing it exists to reveal is the bug
            it was written to fix. -->
       <section class="block up-block is-open" id="upcomingBlock" aria-label="משימות קרובות">
-        <button class="up-head" id="upcomingToggle" data-upcoming="toggle"
-                type="button" aria-expanded="true" aria-controls="upcomingList">
-          <span class="up-caret" id="upcomingCaret" aria-hidden="true">⌃</span>
-          <span class="up-title">משימות קרובות (7 הימים הבאים) / ללא תאריך</span>
-          <b class="up-count" id="upcomingCount">0</b>
-        </button>
+        <!-- Sprint 12 · §3 — the count left the toggle and became a control of
+             its own: collapsing the widget and opening the full open-items
+             sheet are two different intentions, and one button cannot carry
+             both. A <button> may not nest inside a <button>, so the header is
+             a row holding two. -->
+        <div class="up-head-row">
+          <button class="up-head" id="upcomingToggle" data-upcoming="toggle"
+                  type="button" aria-expanded="true" aria-controls="upcomingList">
+            <span class="up-caret" id="upcomingCaret" aria-hidden="true">⌃</span>
+            <span class="up-title">משימות קרובות (7 הימים הבאים) / ללא תאריך</span>
+          </button>
+          <button class="up-count" id="upcomingCount" data-openall="1" type="button"
+                  aria-haspopup="dialog"
+                  aria-label="פתיחת כל המשימות והאירועים הפתוחים">0</button>
+        </div>
         <p class="up-meta block-meta" id="upcomingMeta"></p>
         <div class="todo card" id="upcomingList"></div>
       </section>
@@ -391,6 +400,56 @@
   <div class="sheet-tail"></div>
 </div>
 
+<!-- ============ פתוחות — EVERY OPEN ITEM, IN ONE CHRONOLOGY (Sprint 12 §3) ====
+     Opened from the "פתוחות: N" chip on My Day and from the count on the
+     משימות קרובות banner. The counters have always been honest and have never
+     been reachable: the board shows today, the widget shows a week, and a
+     meeting next month was counted by both and listed by neither. -->
+<div class="sheet open-sheet" id="openSheet" role="dialog" aria-modal="true"
+     aria-labelledby="openSheetTitle" hidden>
+  <div class="sheet-grab" aria-hidden="true"></div>
+  <div class="sheet-head">
+    <h2 id="openSheetTitle">כל מה שפתוח</h2>
+    <button class="sheet-x" data-action="close-sheet" type="button" aria-label="סגירה">✕</button>
+  </div>
+  <p class="trash-hint">
+    כל המשימות הפתוחות והאירועים העתידיים במערכת, מסודרים כרונולוגית לפי תאריך
+    ושעה. לחיצה על פריט פותחת את חלונית הפרטים שלו.
+  </p>
+  <div class="segmented open-filters" id="openFilters" role="tablist" aria-label="סינון מהיר">
+    <button class="seg is-active" role="tab" aria-selected="true"  data-openfilter="all"     type="button">הכל <b class="seg-count">0</b></button>
+    <button class="seg"           role="tab" aria-selected="false" data-openfilter="today"   type="button">היום <b class="seg-count">0</b></button>
+    <button class="seg"           role="tab" aria-selected="false" data-openfilter="week"    type="button">השבוע <b class="seg-count">0</b></button>
+    <button class="seg"           role="tab" aria-selected="false" data-openfilter="late"    type="button">באיחור <b class="seg-count">0</b></button>
+    <button class="seg"           role="tab" aria-selected="false" data-openfilter="tasks"   type="button">✓ משימות <b class="seg-count">0</b></button>
+    <button class="seg"           role="tab" aria-selected="false" data-openfilter="events"  type="button">▦ אירועים <b class="seg-count">0</b></button>
+    <button class="seg"           role="tab" aria-selected="false" data-openfilter="undated" type="button">ללא תאריך <b class="seg-count">0</b></button>
+  </div>
+  <p class="block-meta open-meta" id="openMeta"></p>
+  <div class="todo card open-list" id="openList"></div>
+  <div class="sheet-tail"></div>
+</div>
+
+<!-- ============ פרטי פריט — THE READING VIEW (Sprint 12 §4) ============
+     A tap on a task or an event card lands here, not in a form: the whole
+     record laid out to be READ, every active reminder named, and the three
+     actions a reading view owes — עריכה, סימון כבוצע, מחיקה. -->
+<div class="sheet detail-sheet" id="detailSheet" role="dialog" aria-modal="true"
+     aria-labelledby="detailSheetTitle" hidden>
+  <div class="sheet-grab" aria-hidden="true"></div>
+  <div class="sheet-head">
+    <h2 id="detailSheetTitle">פרטי משימה</h2>
+    <button class="sheet-x" data-action="close-sheet" type="button" aria-label="סגירה">✕</button>
+  </div>
+  <div class="detail-body" id="detailBody"></div>
+  <div class="sheet-actions detail-acts">
+    <button class="btn btn-ghost"  id="detailDelete" data-detailact="delete" type="button">🗑 מחיקה</button>
+    <button class="btn btn-ghost"  id="detailDone"   data-detailact="done"   type="button">✓ סימון כבוצע</button>
+    <button class="btn btn-gold"   id="detailEdit"   data-detailact="edit"   type="button">✎ עריכה</button>
+  </div>
+  <div class="sheet-tail"></div>
+</div>
+
 <!-- ============ סל מחזור — THE 10-DAY RECYCLE BIN (Sprint 8) ============
      Sits BEFORE the confirmation sheet on purpose: both are .sheet at the same
      z-index, so document order is what puts "מחק לצמיתות?" above the bin it
@@ -500,6 +559,6 @@
   <button class="toast-undo" id="toastUndo" data-undo="1" type="button" hidden>אחזר</button>
 </div>
 
-<script src="app.js?v=v17"></script>
+<script src="app.js?v=v18"></script>
 </body>
 </html>

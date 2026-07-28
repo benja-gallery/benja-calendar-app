@@ -1507,6 +1507,127 @@ both verbs, the deliver-then-mark rule, the gesture unlock driven through a docu
 fire-once ledger, all four banner states driven through the real `alertState()`, and a scan of
 every source file for a committed key.
 
+### 7.4n Multiple reminders, real-time visibility, "פתוחות" and the detail reader (shipped — Sprint 12)
+
+Field report, after UI/UX testing on the phone: *"a task I create for today does not appear until
+I refresh; I cannot set more than one reminder on an item; the 'פתוחות: X' number opens nothing;
+and tapping an item drops me straight into a form, so there is nowhere to simply read it."* Four
+asks, one sprint. Everything below is pinned by execution in `healthcheck.js` §44 rather than by
+inspection, and the shell ships as **v18** on both cache-busted URLs.
+
+#### §1 One record, several reminders
+
+The old control was a single `<select>`. A single select can only ever express ONE reminder, so
+"יום לפני" **and** "בזמן האירוע" on the same meeting was not a thing the form could say. It is
+replaced by a panel that asks the two questions that were actually being asked:
+
+1. **the master toggle** — `עם התראה` / `ללא התראה`. Off means no reminder is scheduled for this
+   record at all, and the record says so out loud in the reader rather than saying nothing.
+2. **multi-select checkboxes**, any combination at once — `בזמן האירוע`, `15 דקות לפני`,
+   `שעה לפני`, `יום לפני`, plus `ברירת מחדל של המערכת`.
+3. **absolute reminders**, added one at a time through `＋ הוסף התראת זמן נוספת`. Each is a
+   `datetime-local` in its own right: it has nothing to do with the record's start time and can
+   name a day the record is not even on.
+
+**The stored shape is a token list.** A token is either a built-in lead
+(`default` | `at` | `15` | `60` | `1440`) or an absolute moment, `@YYYY-MM-DDTHH:MM`. The EMPTY
+list is the muted state — the list form of the old `none`, and the only way to say it.
+`normRemindList()` parses an array, a comma-joined string or a single legacy key into that list;
+`remindersOf()` is the ONE reader every engine goes through. Built-ins are stored in
+CHRONOLOGICAL order (`1440,60,15,at`), not in the order the checkboxes are drawn, so the reader
+lists them in the order they will actually arrive — and two records carrying the same reminders
+serialise identically, so the sync outbox sees no phantom change.
+
+**No column was added.** `remind_key` was already `TEXT`; its vocabulary widened, in one place,
+for both engines that read it. A second column would have meant two places that can disagree
+about the same fact, with `/api/gcal/sync` writing whole event rows through both.
+`migrations/0005_sprint12_multi_remind.sql` is therefore append-only and adds no column: it
+documents the widened vocabulary and repairs rows that were never given a choice, exactly as 0003
+did. Every pre-Sprint-12 row holds one bare token, parses as a one-token list, and keeps the exact
+behaviour it already had. An unknown key is still **no opinion** (`default`), never silence — a
+forward-compatible vocabulary that muted a record it could not parse would drop reminders
+invisibly, which is the one failure the user cannot see happening.
+
+**Delivery is per reminder, not per record.** The ledger key is `<token>#<id>@<date>` on both
+ends — `prefs.fired` in the page and `push_dispatch.key` in D1. The token LEADS and the date
+still TRAILS, so the overnight sweep's `key.slice(-10)` reads a date exactly as it always did. A
+record carrying both `1440` and `at` therefore produces two marks and two deliveries; one
+record-wide key would have let whichever fired first swallow the rest. A custom reminder is keyed
+and swept by ITS OWN date, so one set for next Tuesday survives tonight. `dispatch.js`
+`remindTokens()` is the byte-for-byte twin of the client parser and the healthcheck asserts they
+agree on every shape either end can produce.
+
+#### §2 Real-time visibility — what was actually wrong
+
+The store was never the problem: every selector returns a new record the instant it is added, and
+a task created with a date and a time reaches `timelineEntries()`, `boardTasksToday()` and
+`boardTasksOn()` on the same tick. Two things in the VIEW layer could still hide it, and a reload
+cleared both — which is exactly why refreshing "fixed" it.
+
+1. **The global category filter.** `pick()` gates every read path, so a personal record created
+   while the filter reads "עסקי" is counted by the summary and drawn by nothing. Same shape as
+   the Sprint-10 report: counted somewhere, listed nowhere.
+2. **The calendar anchor.** `Cal.anchor` is captured once, when `app.js` is PARSED. A home-screen
+   PWA is resumed rather than reloaded, so an app left open overnight is still anchored on
+   yesterday and a record created "for today" lands on a day the calendar is not showing.
+
+`reveal(cat, iso)` closes both before the single `render()` that follows a save — widening the
+filter and moving the anchor only when they are actually hiding the record, and saying so in the
+toast when it had to. `dayGuard()` closes the rollover for an app that is never reloaded: it
+rides the scan interval and the `visibilitychange` wake, compares `todayISO()` to the last painted
+day, re-anchors a calendar that was sitting on it, and repaints. Two smaller defects went with
+them: `Store.shaped()` had branches for clients, tasks, lists and notes and **none for events**,
+so a freshly created event was the one record that never met its migrator; and a dated task was
+verified never to match the `נכנסים` predicate, which is `onBoard && !task.due`.
+
+#### §3 "פתוחות: X" — the sheet behind the number
+
+The counter has always been honest and has never been reachable. Sprint 10 answered half of it
+with the משימות קרובות widget, but that widget is windowed to a week and holds tasks only, so a
+meeting next month was counted by both surfaces and listed by neither. The chip is now a real
+`<button>`, and so is the widget's count — which left the toggle and became a control of its own,
+because collapsing the widget and opening the sheet are two different intentions and a `<button>`
+may not nest inside a `<button>`.
+
+`openEntries()` is the selector: every open task (not `הושלם`, not `בוטל`, whatever its date) plus
+every event that has not already happened, sorted chronologically with undated last and a meeting
+ahead of a self-appointment inside the same minute. Seven quick filters —
+`הכל · היום · השבוע · באיחור · משימות · אירועים · ללא תאריך` — each with a real predicate behind
+it and a live count on the chip. The rows are the same `taskRow()` / `eventCard()` markup every
+other surface uses, carrying `data-rec`, so `Patch.record()` updates them in place and the sheet
+is rebuilt only when its MEMBERSHIP moved. It declines to paint while closed, exactly as
+`openTrash()` does.
+
+#### §4 The detail reader
+
+Tapping a card used to drop straight into its edit form: every field writable, nothing actually
+readable. A note longer than the two lines a card shows could only be read by scrolling a textarea
+inside a form, and the reminders a record carried were not stated anywhere in the app at all.
+
+`Detail` is the reading surface. It states the full title, the notes verbatim, the date and time,
+the category, the linked client, the status and priority — and **every active reminder by name**,
+custom stamps included, with a count. A muted record says it is muted rather than saying nothing.
+`TAP_DETAIL` (`tasks`, `events`) is a SUBSET of `TAP_EDIT`, never a replacement: lists and notes
+still open their form directly, because their whole content is already on the card, and every card
+keeps its own ✎ straight to the form. The three actions a reading view owes — `עריכה`,
+`סימון כבוצע`, `מחיקה` — sit at the bottom and go through the same writers everything else does:
+`toggleTaskDone()` so `done` never drifts from `status`, and `confirmDelete()` so deletion keeps
+its one door and its ten-day bin. `סימון כבוצע` is hidden on an event, which has no status to move.
+
+#### §5 Verification
+
+`healthcheck.js` §44 drives the whole sprint head-lessly: a two-reminder record through the store,
+the column, `Notify.due()` and a driven `Notify.tick()` proving two marks and one delivery each; a
+custom stamp firing at the minute it names and not two hours early; the panel round-tripping a
+real record through `FormRemind` with no DOM at all; a today-dated timed task landing on the
+timeline in hour 14, on today's board, in the calendar day and NOT in `נכנסים`; `reveal()` widening
+a filter that hides a save and moving an anchor that cannot show it; the open-items sheet over
+eight synthetic records with every quick filter partitioning correctly; the reader's own output
+asserted for each thing the mandate lists; `Detail.act('done')` driven through the real writer; the
+dispatcher's parser proven identical to the client's over twelve inputs and its per-reminder ledger
+keys proven distinct; and migration 0005 proven append-only with `remind_key` still trailing all
+three schema listings.
+
 ### 7.4 General layout
 
 **Layout direction:** RTL by default (`dir="rtl"`), with LTR fallback driven by locale.

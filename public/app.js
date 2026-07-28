@@ -110,6 +110,38 @@
     '60': '🔔 שעה לפני', '1440': '🔔 יום לפני', none: '🔕 ללא התראה'
   };
 
+  /* --- multiple reminders per record (Sprint 12 · mandate §1) ---------------
+     One record may now carry SEVERAL reminders at once — "יום לפני" *and*
+     "בזמן האירוע", plus any number of absolute wall-clock reminders that have
+     nothing to do with the record's own start time.
+
+     The stored shape is a TOKEN LIST. A token is either
+
+       a built-in lead     'default' | 'at' | '15' | '60' | '1440'
+       an absolute moment  '@YYYY-MM-DDTHH:MM'
+
+     An EMPTY list is the muted state — the array form of the old 'none'.
+
+     The list serialises to the SAME remind_key column, comma-joined, so no
+     column was added and the Worker's preserve-if-blank rule still holds: the
+     client never sends '', it sends 'none' or 'default' or a real list. A
+     store or a row written before this sprint holds a single bare key, which
+     normRemindList() reads as a one-token list — every pre-Sprint-12 record
+     keeps the exact behaviour it already had. */
+  var REMIND_BUILTIN = ['at', '15', '60', '1440'];      // the multi-select boxes, in mandate order
+  var REMIND_MULTI = ['default'].concat(REMIND_BUILTIN);
+  /* The order a LIST is stored and read in — chronological, not the order the
+     checkboxes are drawn in. "יום לפני · שעה לפני · בזמן האירוע" is the order
+     those three reminders actually arrive, which is the only order the detail
+     reader can list them in without lying about what happens when. */
+  var REMIND_ORDER = ['default', '1440', '60', '15', 'at'];
+  var REMIND_CUSTOM_PREFIX = '@';
+  var REMIND_CUSTOM_RE = /^@\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+  /** a ceiling, so a stuck "+ הוסף" cannot grow a record without bound */
+  var REMIND_MAX = 12;
+  var REMIND_ON_LABEL = '🔔 עם התראה';
+  var REMIND_OFF_LABEL = '🔕 ללא התראה';
+
   /* the reminder chime — synthesised, so it needs no binary asset in the cache */
   var CHIME_TONES = [880, 1174.66];   // A5 → D6, a two-note bell
   var CHIME_STEP = 0.16;              // seconds between the two notes
@@ -300,6 +332,14 @@
    * richer surface than the create form and already the established gesture.
    */
   var TAP_EDIT = ['events', 'tasks', 'lists', 'notes'];
+
+  /**
+   * Sprint 12 — the two collections whose tap opens the READING view first.
+   * A subset of TAP_EDIT, never a replacement for it: every card in TAP_EDIT
+   * still opens on a tap, and every card still carries its own ✎ straight to
+   * the form. This only decides which of the two surfaces comes up first.
+   */
+  var TAP_DETAIL = ['tasks', 'events'];
 
   /* --- Sprint 9: in-place completion and the היסטוריה archive log --- */
 
@@ -772,7 +812,7 @@
     t.nextAction = typeof t.nextAction === 'string' ? t.nextAction : '';
     t.subtasks = normItems(t.subtasks, 'st');
     t.done = t.status === 'done';
-    t.remind = normRemind(t.remind);                         // Sprint 10
+    setReminders(t, remindersOf(t));                         // Sprint 10 → 12
     return t;
   }
 
@@ -783,7 +823,7 @@
    */
   function migrateEvent(e) {
     if (!e || typeof e !== 'object') return e;
-    e.remind = normRemind(e.remind);
+    setReminders(e, remindersOf(e));
     return e;
   }
 
@@ -825,10 +865,156 @@
 
   /** the chip a card wears when it carries a non-default reminder */
   function remindTag(rec) {
-    var key = normRemind(rec && rec.remind);
-    var text = REMIND_SHORT[key];
-    if (!text) return '';
-    return '<span class="badge remind rm-' + key + '">' + esc(text) + '</span>';
+    var list = remindersOf(rec);
+
+    // muted is worth saying out loud — it is a choice, not an absence
+    if (!list.length) {
+      return '<span class="badge remind rm-none">' + esc(REMIND_SHORT.none) + '</span>';
+    }
+
+    // 'default' alone is the system lead: no opinion, so no chip (unchanged)
+    if (list.length === 1) {
+      var text = REMIND_SHORT[list[0]] || (isCustomRemind(list[0]) ? '🔔 ' + customRemindText(list[0]) : '');
+      if (!text) return '';
+      return '<span class="badge remind rm-' + esc(remindClass(list[0])) + '">' + esc(text) + '</span>';
+    }
+
+    // several at once: the count is the honest summary — the full list lives in
+    // the detail reader, and a row of five chips would drown the card
+    return '<span class="badge remind rm-multi">🔔 ' + list.length + ' התראות</span>';
+  }
+
+  /* ------------------------------------ multiple reminders (Sprint 12 · §1) */
+
+  /** '@YYYY-MM-DDTHH:MM' — an absolute moment, not a lead off the record */
+  function isCustomRemind(tok) {
+    return typeof tok === 'string' && REMIND_CUSTOM_RE.test(tok);
+  }
+
+  /** the 'YYYY-MM-DDTHH:MM' inside a custom token, or '' */
+  function customRemindStamp(tok) {
+    return isCustomRemind(tok) ? tok.slice(1) : '';
+  }
+
+  function customRemindDate(tok) { return customRemindStamp(tok).slice(0, 10); }
+  function customRemindTime(tok) { return customRemindStamp(tok).slice(11, 16); }
+
+  /** "מחר · 09:00" — how a custom reminder reads to a human */
+  function customRemindText(tok) {
+    var d = customRemindDate(tok);
+    if (!d) return '';
+    return relDay(d) + ' · ' + customRemindTime(tok);
+  }
+
+  function remindLabelOf(tok) {
+    return isCustomRemind(tok) ? customRemindText(tok) : (REMIND_LABEL[tok] || tok);
+  }
+
+  /** a class name a stamp can never break — '@' and ':' are not CSS-safe */
+  function remindClass(tok) {
+    return isCustomRemind(tok) ? 'custom' : String(tok);
+  }
+
+  /**
+   * Whatever a store, a D1 row or a form ever held → a clean token list.
+   *
+   * Accepts an array, a comma-joined string, or a single legacy key. 'none'
+   * contributes nothing, which is what makes the EMPTY list the one and only
+   * muted state — there is no second way to say it. Built-ins come first in
+   * vocabulary order and customs after, sorted by the moment they name, so two
+   * records with the same reminders serialise to the same string and the sync
+   * outbox sees no phantom change.
+   */
+  function normRemindList(v) {
+    var raw;
+    if (Array.isArray(v)) raw = v;
+    else if (typeof v === 'string') raw = v.split(',');
+    else raw = [];
+
+    var seen = {}, builtin = [], custom = [];
+    raw.forEach(function (item) {
+      var tok = String(item == null ? '' : item).trim();
+      if (!tok || tok === 'none' || seen[tok]) return;
+      if (REMIND_MULTI.indexOf(tok) !== -1) { seen[tok] = 1; builtin.push(tok); return; }
+      if (isCustomRemind(tok)) { seen[tok] = 1; custom.push(tok); }
+      // anything else is a vocabulary we do not speak — dropped, never guessed
+    });
+
+    builtin.sort(function (a, b) { return REMIND_ORDER.indexOf(a) - REMIND_ORDER.indexOf(b); });
+    custom.sort();                                  // ISO stamps sort chronologically as text
+    return builtin.concat(custom).slice(0, REMIND_MAX);
+  }
+
+  /**
+   * The ONE reader every engine goes through.
+   *
+   * `reminders` is authoritative the moment it is an array — including an empty
+   * one, which is a deliberate mute and must not fall back to the legacy key.
+   * Only a record that has never met migrateTask/migrateEvent (a bare literal
+   * in a test, a row mid-merge) is read off the legacy `remind` string.
+   *
+   * A legacy string that says nothing this app understands is "no opinion",
+   * NOT silence: an unknown key has meant REMIND_DEFAULT since Sprint 10, and
+   * a forward-compatible vocabulary must never mute a record by accident —
+   * dropping a reminder is the one failure the user cannot see happening.
+   */
+  function remindersOf(rec) {
+    if (rec && Array.isArray(rec.reminders)) return normRemindList(rec.reminders);
+    if (!rec || rec.remind == null || rec.remind === '') return [REMIND_DEFAULT];
+
+    var raw = String(rec.remind);
+    var list = normRemindList(raw);
+    if (list.length) return list;
+    // nothing recognised: an explicit 'none' is a mute, anything else is default
+    return raw.split(',').map(function (s) { return s.trim(); }).indexOf('none') !== -1
+      ? [] : [REMIND_DEFAULT];
+  }
+
+  /** token list → the remind_key column. Never '' — the column is preserve-if-blank. */
+  function remindKey(list) {
+    var clean = normRemindList(list);
+    return clean.length ? clean.join(',') : 'none';
+  }
+
+  function remindColumn(rec) { return remindKey(remindersOf(rec)); }
+
+  /** the single writer — `reminders` is the state, `remind` its serialised twin */
+  function setReminders(rec, list) {
+    if (!rec) return rec;
+    rec.reminders = normRemindList(list);
+    rec.remind = remindKey(rec.reminders);
+    return rec;
+  }
+
+  /** the master toggle: "עם התראה" is simply "this record has reminders" */
+  function remindOn(rec) { return remindersOf(rec).length > 0; }
+
+  /**
+   * Every reminder this record wants, resolved against the system default.
+   *
+   * A built-in becomes {tok, minutes} — how many minutes before its own start
+   * it wants to be announced. A custom becomes {tok, at} — an absolute moment
+   * that ignores the record entirely, which is exactly why it can be set for a
+   * day the record is not even on.
+   */
+  function remindPlan(rec, lead) {
+    var fallback = typeof lead === 'number' && lead >= 0 ? lead : 10;
+    return remindersOf(rec).map(function (tok) {
+      if (isCustomRemind(tok)) return { tok: tok, at: customRemindStamp(tok) };
+      if (tok === REMIND_DEFAULT) return { tok: tok, minutes: fallback };
+      return { tok: tok, minutes: REMIND_MINUTES[tok] };
+    });
+  }
+
+  /**
+   * The ledger key for one reminder of one record.
+   *
+   * The token leads and the date TRAILS, so `key.slice(-10)` is still the date
+   * the overnight sweep reads — the invariant Sprint 10 established, kept intact
+   * now that a single record can hold several keys at once.
+   */
+  function remindMark(tok, id, on) {
+    return tok + '#' + id + '@' + on;
   }
 
   /** the single writer of task state — status and `done` never drift apart */
@@ -1187,6 +1373,9 @@
         prefs: {
           filter: 'all', calView: 'month', taskTab: 'all', clientTab: 'all',
           workspace: 'tasks',
+          // Sprint 12 — the quick filter of the "פתוחות" sheet, remembered
+          // exactly like every other sub-tab in the app
+          openFilter: 'all',
           // serverAt — when the Worker last accepted this device's push
           // subscription. '' means local-only delivery (Sprint 11).
           notify: { on: false, lead: 10, sound: true, serverAt: '' }, fired: {},
@@ -1260,6 +1449,10 @@
 
       // and so does the selected workspace of the משימות screen (Sprint 10)
       if (WORK_TABS.indexOf(d.prefs.workspace) === -1) d.prefs.workspace = 'tasks';
+
+      // Sprint 12 — the "פתוחות" sheet's quick filter, absent in every store
+      // written before the sheet existed
+      if (OPEN_FILTERS.indexOf(d.prefs.openFilter) === -1) d.prefs.openFilter = 'all';
 
       // reminder prefs may be absent in a store written before the PWA upgrade
       if (!d.prefs.notify || typeof d.prefs.notify !== 'object') {
@@ -1410,6 +1603,11 @@
       if (collection === 'tasks') rec = migrateTask(rec);
       else if (collection === 'lists') rec = migrateList(rec);
       else if (collection === 'notes') rec = migrateNote(rec);
+      // Sprint 12 — events had no branch here at all, so a freshly created
+      // event was the ONE record that never met its migrator: it entered the
+      // store with whatever `remind` the form handed it, unnormalised, while
+      // every event arriving from D1 or from localStorage was normalised twice
+      else if (collection === 'events') rec = migrateEvent(rec);
       if (rec && typeof rec === 'object') {
         rec.clientId = typeof rec.clientId === 'string' ? rec.clientId : '';
       }
@@ -1505,7 +1703,9 @@
         // echoed back untouched — '' simply means "this device knows no link yet"
         google_event_id: str(r.googleEventId), etag: str(r.googleEtag),
         google_calendar_id: str(r.googleCalendarId),
-        remind_key: normRemind(r.remind)
+        // Sprint 12 — a comma-joined token list, not a single key. 'none' when
+        // muted, so the column is never '' and preserve-if-blank still holds.
+        remind_key: remindColumn(r)
       };
     },
     tasks: function (r) {
@@ -1517,7 +1717,7 @@
         updated_at: toISOStamp(r.updatedAt), owner_id: str(r.ownerId) || OWNER.id,
         due_time: str(r.time), notes: str(r.notes),
         created_at: toISOStamp(r.createdAt), deleted_at: null,
-        remind_key: normRemind(r.remind)
+        remind_key: remindColumn(r)
       };
     },
     lists: function (r) {
@@ -2393,7 +2593,10 @@
     setHTML($('#summaryChips'), [
       '<span class="chip">' + esc(relDay(todayISO())) + '</span>',
       '<span class="chip">תצוגה: <b>' + (f === 'all' ? 'הכל' : CAT_LABEL[f]) + '</b></span>',
-      '<span class="chip">פתוחות: <b>' + openTasks().length + '</b></span>',
+      // §3 — the number that started the whole field report is now the door to
+      // the list behind it, not a read-only fact about a screen that shows less
+      '<button type="button" class="chip chip-btn" data-openall="1" ' +
+      'aria-haspopup="dialog">פתוחות: <b>' + openTasks().length + '</b> ›</button>',
       '<span class="chip">ממתין ללקוח: <b>' + waitingTasks().length + '</b></span>',
       '<span class="chip">בוצעו וממתינות לתיוק: <b>' + doneUnfiled().length + '</b></span>'
     ].join(''));
@@ -3943,6 +4146,8 @@
     renderTrash();
     renderArchive();
     renderArchiveBar();
+    renderOpenSheet();
+    if (Detail.isOpen()) Detail.paint();
     Sync.paint();
     $('#todayLabel').textContent = hebDate(todayISO());
     $('#railUserName').textContent = OWNER.name;
@@ -4091,6 +4296,11 @@
       });
 
       renderDrawer(sameKeys(domKeys('#drawerBody'), Drawer.keys()));
+      /* Sprint 12 — the two new sheets are list surfaces like any other, and
+         they obey the same rule: derived text always, a container rebuild only
+         where MEMBERSHIP moved. Both decline to paint while they are closed. */
+      renderOpenSheet(sameKeys(domKeys('#openList'), openKeys()));
+      if (Detail.isOpen()) Detail.paint();
       Sync.paint();
       markEntering();
     },
@@ -5309,6 +5519,8 @@
     $('#formSheet').hidden = true;
     $('#confirmSheet').hidden = true;
     $('#trashSheet').hidden = true;
+    if ($('#openSheet')) $('#openSheet').hidden = true;
+    Detail.close();
     // a selection belongs to the bin that is open — closing it ends the mode,
     // or the next visit would open holding picks on rows nobody can see
     TrashSel.exit();
@@ -5322,7 +5534,7 @@
   /** is anything else still layered over the app? */
   function anySheetOpen() {
     return !$('#typeSheet').hidden || !$('#formSheet').hidden ||
-      !$('#trashSheet').hidden || Drawer.isOpen();
+      !$('#trashSheet').hidden || openSheetOpen() || Detail.isOpen() || Drawer.isOpen();
   }
 
   /** סל מחזור — opened from the header pill, painted fresh every time */
@@ -5338,6 +5550,308 @@
     openSheet('trashSheet');
     renderTrash();
   }
+
+  /* ==========================================================================
+     "פתוחות: N" — the sheet behind the number (Sprint 12 · mandate §3)
+
+     The counter has always been honest and has never been reachable. Sprint 10
+     answered half of it with the משימות קרובות widget on My Day, but that
+     widget is windowed to a week and holds tasks only, so a meeting next month
+     and a task next quarter were still counted by nothing you could tap.
+
+     This is the other half: ONE chronological list of everything open and
+     still ahead — tasks and meetings together, in the order they will actually
+     happen — opened straight from the number that counts it.
+     ========================================================================== */
+
+  var OPEN_FILTERS = ['all', 'tasks', 'events', 'today', 'week', 'late', 'undated'];
+  var OPEN_FILTER_LABEL = {
+    all: 'הכל', tasks: '✓ משימות', events: '▦ אירועים', today: 'היום',
+    week: 'השבוע', late: 'באיחור', undated: 'ללא תאריך'
+  };
+  var OPEN_EMPTY = {
+    all: 'אין כרגע שום משימה פתוחה או אירוע עתידי — הכול סגור.',
+    tasks: 'אין משימות פתוחות.',
+    events: 'אין אירועים עתידיים ביומן.',
+    today: 'אין משימה או פגישה שנותרו פתוחות להיום.',
+    late: 'שום דבר לא נשאר מאחור.',
+    week: 'השבוע הקרוב פנוי.',
+    undated: 'כל פריט פתוח כבר משויך לתאריך.'
+  };
+
+  function openFilter() {
+    var f = Store.data.prefs.openFilter;
+    return OPEN_FILTERS.indexOf(f) === -1 ? 'all' : f;
+  }
+
+  function setOpenFilter(f) {
+    Store.data.prefs.openFilter = OPEN_FILTERS.indexOf(f) === -1 ? 'all' : f;
+    Store.save();
+    renderOpenSheet();
+  }
+
+  /**
+   * One entry per open record, as {collection, rec, on, at}. A task is open
+   * while it is neither הושלם nor בוטל, whatever its date; an event is open
+   * while it has not already happened — a meeting last Tuesday is history, not
+   * an outstanding item, and listing it here would bury the ones that matter.
+   */
+  function openEntries() {
+    var t = todayISO();
+    var out = [];
+
+    pick('tasks').forEach(function (x) {
+      if (isClosed(x.status)) return;
+      out.push({ collection: 'tasks', rec: x, on: x.due || '', at: x.time || '' });
+    });
+
+    pick('events').forEach(function (e) {
+      if (e.date && e.date < t) return;
+      out.push({ collection: 'events', rec: e, on: e.date || '', at: e.start || '' });
+    });
+
+    /* Chronological, undated last — the same ordering rule sortByDate() uses,
+       applied across two collections instead of one. Inside a minute a meeting
+       outranks a self-appointment, exactly as it does on the timeline. */
+    return out.sort(function (a, b) {
+      var da = a.on || '9999-99-99', db = b.on || '9999-99-99';
+      if (da !== db) return da < db ? -1 : 1;
+      var ta = timeToMinutes(a.at), tb = timeToMinutes(b.at);
+      if (ta !== tb) return ta - tb;
+      if (a.collection !== b.collection) return a.collection === 'events' ? -1 : 1;
+      return a.rec.id < b.rec.id ? -1 : (a.rec.id > b.rec.id ? 1 : 0);
+    });
+  }
+
+  function openMatches(entry, filter, today) {
+    if (filter === 'tasks') return entry.collection === 'tasks';
+    if (filter === 'events') return entry.collection === 'events';
+    if (filter === 'today') return entry.on === today;
+    if (filter === 'late') return !!entry.on && entry.on < today;
+    if (filter === 'week') return !!entry.on && entry.on >= today && entry.on <= addDaysISO(today, UPCOMING_DAYS);
+    if (filter === 'undated') return !entry.on;
+    return true;                                   // 'all'
+  }
+
+  /** what the sheet lists under the active filter, in the order it lists it */
+  function openRows(filter) {
+    var t = todayISO();
+    var f = filter || openFilter();
+    return openEntries().filter(function (e) { return openMatches(e, f, t); });
+  }
+
+  function openKeys() {
+    return openRows().map(function (e) { return e.collection + ':' + e.rec.id; });
+  }
+
+  function openRowHTML(entry) {
+    return entry.collection === 'events' ? eventCard(entry.rec) : taskRow(entry.rec, true);
+  }
+
+  function openSheetOpen() {
+    var el = $('#openSheet');
+    return !!el && !el.hidden;
+  }
+
+  function renderOpenSheet(quiet) {
+    if (!openSheetOpen()) return;
+
+    var t = todayISO();
+    var f = openFilter();
+    var all = openEntries();
+    var rows = all.filter(function (e) { return openMatches(e, f, t); });
+
+    $$('#openFilters [data-openfilter]').forEach(function (b) {
+      var key = b.dataset.openfilter;
+      var on = key === f;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+      var count = b.querySelector('.seg-count');
+      if (count) {
+        count.textContent = all.filter(function (e) { return openMatches(e, key, t); }).length;
+      }
+    });
+
+    var tasks = rows.filter(function (e) { return e.collection === 'tasks'; }).length;
+    setText($('#openMeta'), rows.length
+      ? plural(tasks, 'משימה אחת', 'משימות') + ' · ' +
+        plural(rows.length - tasks, 'אירוע אחד', 'אירועים')
+      : 'אין מה להציג בסינון הזה');
+
+    var body = $('#openList');
+    if (quiet || !body) return;
+
+    if (!rows.length) {
+      body.innerHTML = emptyState('אין פריטים פתוחים', OPEN_EMPTY[f] || OPEN_EMPTY.all);
+      return;
+    }
+
+    var band = null;
+    var html = [];
+    rows.forEach(function (entry) {
+      var next = entry.on ? upcomingBand(entry.on, t) : 'ללא תאריך יעד';
+      if (next !== band) {
+        band = next;
+        html.push('<div class="up-band">' + esc(band) + '</div>');
+      }
+      html.push(openRowHTML(entry));
+    });
+    body.innerHTML = html.join('');
+  }
+
+  function openOpenSheet() {
+    $('#typeSheet').hidden = true;
+    $('#formSheet').hidden = true;
+    // unhidden FIRST — renderOpenSheet() declines to paint a closed sheet, so
+    // painting before this would open it empty (the same rule openTrash() keeps)
+    openSheet('openSheet');
+    renderOpenSheet();
+  }
+
+  /* ==========================================================================
+     Task / event detail reader (Sprint 12 · mandate §4)
+
+     Tapping a card used to drop straight into its edit form — every field
+     writable, nothing actually READABLE. A note longer than the two lines a
+     card shows could only be read by opening a form and scrolling a textarea,
+     and the reminders a record carried were not stated anywhere at all.
+
+     This is the reading surface: the whole record laid out, every active
+     reminder listed by name, and the three actions worth having from a reading
+     view — עריכה, סימון כבוצע, מחיקה — at the bottom.
+     ========================================================================== */
+
+  var Detail = {
+    collection: '',
+    id: '',
+
+    rec: function () {
+      return this.collection && this.id ? Store.find(this.collection, this.id) : null;
+    },
+
+    isOpen: function () {
+      var el = $('#detailSheet');
+      return !!el && !el.hidden;
+    },
+
+    open: function (collection, id) {
+      if (TAP_DETAIL.indexOf(collection) === -1) return false;
+      // the caller reports a missing record — saying it twice is not clearer
+      if (!Store.find(collection, id)) return false;
+      this.collection = collection;
+      this.id = id;
+      $('#typeSheet').hidden = true;
+      $('#formSheet').hidden = true;
+      openSheet('detailSheet');
+      this.paint();
+      return true;
+    },
+
+    close: function () {
+      var el = $('#detailSheet');
+      if (el) el.hidden = true;
+      this.collection = '';
+      this.id = '';
+    },
+
+    /** one labelled line of the reader; a blank value draws nothing at all */
+    line: function (label, value) {
+      if (!value) return '';
+      return '<div class="dt-line"><span class="dt-key">' + esc(label) + '</span>' +
+        '<span class="dt-val">' + esc(value) + '</span></div>';
+    },
+
+    /** every reminder this record carries, named — including the custom ones */
+    reminders: function (rec) {
+      var list = remindersOf(rec);
+      if (!list.length) {
+        return '<div class="dt-remind is-muted"><span class="dt-key">התראות</span>' +
+          '<span class="dt-val">' + esc(REMIND_OFF_LABEL) + ' — לא תישלח תזכורת</span></div>';
+      }
+      var lead = Store.data.prefs.notify.lead;
+      var rows = list.map(function (tok) {
+        var text = tok === REMIND_DEFAULT
+          ? REMIND_LABEL[tok] + ' (' + lead + ' דק׳ לפני)'
+          : remindLabelOf(tok);
+        return '<li class="dt-rm rm-' + esc(remindClass(tok)) + '">🔔 ' + esc(text) + '</li>';
+      }).join('');
+      return '<div class="dt-remind"><span class="dt-key">התראות (' + list.length + ')</span>' +
+        '<ul class="dt-rms">' + rows + '</ul></div>';
+    },
+
+    body: function (rec) {
+      var isTask = this.collection === 'tasks';
+      var when = isTask
+        ? (rec.due ? relDay(rec.due) + ' · ' + fmtDayMon(rec.due) + (rec.time ? ' · ' + rec.time : ' · ללא שעה') : 'ללא תאריך יעד (נכנסים)')
+        : (rec.date ? relDay(rec.date) + ' · ' + fmtDayMon(rec.date) +
+          (rec.start ? ' · ' + rec.start + (rec.end ? '–' + rec.end : '') : ' · ללא שעה') : 'ללא תאריך');
+
+      var client = rec.clientId ? Store.find('clients', rec.clientId) : null;
+
+      return '<div class="dt-head"><h3 class="dt-title">' + esc(rec.title || (isTask ? 'משימה' : 'אירוע')) + '</h3>' +
+        catTag(rec.category) + '</div>' +
+        (rec.notes ? '<p class="dt-notes">' + esc(rec.notes) + '</p>' : '') +
+        '<div class="dt-lines">' +
+        this.line('מתי', when) +
+        this.line('קטגוריה', CAT_LABEL[normCat(rec.category)]) +
+        (isTask ? this.line('סטטוס', STATUS_LABEL[normStatus(rec.status)]) : '') +
+        (isTask ? this.line('עדיפות', PRIORITY_LABEL[normPriority(rec.priority)]) : '') +
+        (isTask ? this.line('הפעולה הבאה', rec.nextAction) : this.line('מיקום', rec.location)) +
+        this.line('לקוח מקושר', client ? client.name : '') +
+        '</div>' +
+        this.reminders(rec);
+    },
+
+    paint: function () {
+      var rec = this.rec();
+      if (!rec) { this.close(); return; }
+      var box = $('#detailBody');
+      if (!box) return;              // nothing to paint into — never throw a render
+      setText($('#detailSheetTitle'), this.collection === 'tasks' ? 'פרטי משימה' : 'פרטי אירוע');
+      setHTML(box, this.body(rec));
+      // only a task can be ticked; an event has no status to move
+      var done = $('#detailDone');
+      if (done) {
+        done.hidden = this.collection !== 'tasks';
+        if (this.collection === 'tasks') {
+          done.textContent = normStatus(rec.status) === 'done' ? '↺ בטל סימון' : '✓ סימון כבוצע';
+        }
+      }
+    },
+
+    /** עריכה / סימון כבוצע / מחיקה — the three actions a reading view owes */
+    act: function (what) {
+      var rec = this.rec();
+      if (!rec) { this.close(); toast('הפריט לא נמצא'); return; }
+      var collection = this.collection, id = this.id;
+
+      if (what === 'edit') {
+        this.close();
+        if (!openEdit(collection, id)) toast('הפריט לא נמצא');
+        return;
+      }
+
+      if (what === 'done' && collection === 'tasks') {
+        toggleTaskDone(rec);
+        Store.save();
+        Haptics.done();
+        Patch.apply('tasks', id);
+        this.paint();
+        toast(normStatus(rec.status) === 'done' ? 'המשימה סומנה כבוצעה' : 'הסימון בוטל');
+        return;
+      }
+
+      if (what === 'delete') {
+        this.close();
+        confirmDelete(recSummary(collection, rec), function () {
+          var gone = softDelete(collection, id);
+          if (!gone) return;
+          render();
+          toast(gone.label + ' נמחק', UNDO_LABEL);
+        });
+      }
+    }
+  };
 
   /**
    * The confirmation closes on its own, without taking the sheet or the client
@@ -5426,7 +5940,7 @@
         f('end', 'שעת סיום', '<input class="input" type="time" name="end">') +
         f('location', 'מיקום', '<input class="input" name="location" placeholder="זום / כתובת">') +
         '</div>' +
-        f('remind', 'תזכורת', picker('remind', REMIND_OPTIONS, REMIND_LABEL, REMIND_DEFAULT)) +
+        remindField() +
         f('clientId', 'שיוך ללקוח', clientPicker()) +
         f('notes', 'הערות', '<textarea class="textarea" name="notes" placeholder="פרטים נוספים…"></textarea>');
     },
@@ -5443,7 +5957,7 @@
         f('status', 'סטטוס', picker('status', TASK_STATUSES, STATUS_LABEL, 'new')) +
         f('priority', 'עדיפות', picker('priority', PRIORITIES, PRIORITY_LABEL, 'medium')) +
         '</div>' +
-        f('remind', 'תזכורת', picker('remind', REMIND_OPTIONS, REMIND_LABEL, REMIND_DEFAULT)) +
+        remindField() +
         f('nextAction', 'הפעולה הבאה', '<input class="input" name="nextAction" placeholder="להתקשר ללקוח ולאשר מידות">') +
         f('clientId', 'שיוך ללקוח', clientPicker()) +
         f('subtasks', 'תת־משימות (שורה לכל אחת)', '<textarea class="textarea" name="subtasks" placeholder="לאסוף מידות&#10;לחשב תמחור"></textarea>') +
@@ -5479,6 +5993,222 @@
         f('notes', 'הערה כללית', '<textarea class="textarea" name="notes"></textarea>');
     }
   };
+
+  /* ==========================================================================
+     The reminder panel (Sprint 12 · mandate §1)
+
+     One <select> could only ever express one reminder, so "יום לפני" and
+     "בזמן האירוע" on the same meeting was not a thing the form could say. The
+     panel replaces it with the two questions that were actually being asked:
+
+       1. does this record want reminders at all?  — a plain two-state toggle
+       2. if so, which ones?                       — as many as you like
+
+     Built-in leads are checkboxes, so any combination is one tap away, and any
+     number of absolute wall-clock reminders can be added underneath — those
+     are moments in their own right and need not sit anywhere near the record's
+     own start time.
+
+     The whole thing serialises into one hidden field, `reminders`, so
+     submitForm()'s generic [name] sweep collects it exactly like every other
+     control and the save path needed no special case.
+     ========================================================================== */
+
+  function remindField() {
+    var lead = (Store.data && Store.data.prefs && Store.data.prefs.notify)
+      ? Store.data.prefs.notify.lead : 10;
+
+    var boxes = REMIND_MULTI.map(function (tok) {
+      var text = tok === REMIND_DEFAULT
+        ? REMIND_LABEL[tok] + ' (' + lead + ' דק׳ לפני)'
+        : REMIND_LABEL[tok];
+      return '<label class="rm-opt">' +
+        '<input type="checkbox" class="rm-box" data-remindopt="' + esc(tok) + '">' +
+        '<span>' + esc(text) + '</span></label>';
+    }).join('');
+
+    /* Every node here is addressed by CLASS, never by id. The panel is built
+       fresh into #formFields on every openForm(), so an id would be a promise
+       index.html cannot keep — and the healthcheck rightly refuses to let
+       app.js paint an id the document does not ship. */
+    return '<div class="field rm-field">' +
+      '<label class="field-label">התראות</label>' +
+      '<div class="segmented rm-mode" role="group" aria-label="מצב התראה">' +
+      '<button class="seg is-active" data-remindmode="on" type="button" aria-pressed="true">' +
+      esc(REMIND_ON_LABEL) + '</button>' +
+      '<button class="seg" data-remindmode="off" type="button" aria-pressed="false">' +
+      esc(REMIND_OFF_LABEL) + '</button>' +
+      '</div>' +
+      '<div class="rm-panel">' +
+      '<p class="rm-hint">אפשר לסמן כמה התראות במקביל — למשל גם "יום לפני" וגם "בזמן האירוע".</p>' +
+      '<div class="rm-opts">' + boxes + '</div>' +
+      '<div class="rm-customs"></div>' +
+      '<button class="mini rm-add" data-remindadd="1" type="button">＋ הוסף התראת זמן נוספת</button>' +
+      '</div>' +
+      '<p class="rm-summary block-meta"></p>' +
+      // the one value submitForm()'s generic [name] sweep collects
+      '<input type="hidden" name="reminders" value="' + REMIND_DEFAULT + '">' +
+      '</div>';
+  }
+
+  /** one node of the live reminder panel, or null when no form is open */
+  function rmEl(sel) {
+    var box = $('#formFields');
+    return box ? box.querySelector(sel) : null;
+  }
+
+  function rmAll(sel) {
+    var box = $('#formFields');
+    return box ? Array.prototype.slice.call(box.querySelectorAll(sel)) : [];
+  }
+
+  /**
+   * The panel's state while a form is open. Deliberately a small object rather
+   * than "read it back off the DOM": a half-typed datetime-local is '' for a
+   * while, and re-deriving the list from the inputs on every keystroke would
+   * drop a reminder the user is in the middle of writing.
+   */
+  var FormRemind = {
+    on: true,
+    set: {},          // built-in token → 1
+    customs: [],      // 'YYYY-MM-DDTHH:MM', possibly '' while it is being typed
+
+    /** open the panel on whatever the record (or a blank form) already says */
+    load: function (value) {
+      var list = normRemindList(value);
+      var self = this;
+      this.set = {};
+      this.customs = [];
+      list.forEach(function (tok) {
+        if (isCustomRemind(tok)) self.customs.push(customRemindStamp(tok));
+        else self.set[tok] = 1;
+      });
+      // an EMPTY list is the muted state — the array form of the old 'none'
+      this.on = list.length > 0;
+      this.renderCustoms();
+      this.paint();
+      return this;
+    },
+
+    /** the token list this panel currently stands for */
+    tokens: function () {
+      if (!this.on) return [];
+      var out = Object.keys(this.set);
+      this.customs.forEach(function (stamp) {
+        if (isCustomRemind(REMIND_CUSTOM_PREFIX + stamp)) out.push(REMIND_CUSTOM_PREFIX + stamp);
+      });
+      var clean = normRemindList(out);
+      /* "עם התראה" with nothing ticked is not silence — silence is the other
+         toggle. It is the system default, which is what the app did before a
+         record could hold an opinion at all. */
+      return clean.length ? clean : [REMIND_DEFAULT];
+    },
+
+    /** the value the form submits */
+    value: function () { return remindKey(this.tokens()); },
+
+    setMode: function (mode) {
+      this.on = mode !== 'off';
+      this.paint();
+    },
+
+    toggle: function (tok, wanted) {
+      if (REMIND_MULTI.indexOf(tok) === -1) return;
+      if (wanted) this.set[tok] = 1; else delete this.set[tok];
+      // ticking a reminder is itself the answer to "do you want reminders"
+      if (wanted) this.on = true;
+      this.paint();
+    },
+
+    /** a new custom row starts on the record's own day, one hour from now */
+    addCustom: function () {
+      if (this.customs.length + Object.keys(this.set).length >= REMIND_MAX) {
+        toast('הגעת למספר ההתראות המרבי לפריט אחד');
+        return;
+      }
+      this.on = true;
+      this.customs.push(this.suggest());
+      this.renderCustoms();
+      this.paint();
+    },
+
+    dropCustom: function (index) {
+      if (index < 0 || index >= this.customs.length) return;
+      this.customs.splice(index, 1);
+      this.renderCustoms();
+      this.paint();
+    },
+
+    setCustom: function (index, stamp) {
+      if (index < 0 || index >= this.customs.length) return;
+      this.customs[index] = String(stamp || '').slice(0, 16);
+      this.paint();                      // NOT renderCustoms(): the field is focused
+    },
+
+    /**
+     * A sensible opening value for a fresh custom row: the date and time the
+     * form is already holding, less an hour, so the common case ("also remind
+     * me an hour before, on the day itself") is one tap and no typing.
+     */
+    suggest: function () {
+      var fields = $('#formFields');
+      var pickField = function (name) {
+        var el = fields && fields.querySelector('[name="' + name + '"]');
+        return el && el.value ? el.value : '';
+      };
+      var date = pickField('date') || pickField('due') || todayISO();
+      var time = pickField('start') || pickField('time') || '09:00';
+      // shiftTime() answers '' on anything it cannot read; a blank stamp would
+      // be silently dropped by normRemindList() and the row would look broken
+      return date + 'T' + (shiftTime(time, -60) || '09:00');
+    },
+
+    renderCustoms: function () {
+      var box = rmEl('.rm-customs');
+      if (!box) return;
+      box.innerHTML = this.customs.map(function (stamp, i) {
+        return '<div class="rm-custom">' +
+          '<input class="input rm-when" type="datetime-local" data-remindwhen="' + i + '"' +
+          ' aria-label="מועד התראה מותאם אישית" value="' + esc(stamp) + '">' +
+          '<button class="mini is-danger" data-reminddrop="' + i + '" type="button" ' +
+          'aria-label="הסרת ההתראה">✕</button>' +
+          '</div>';
+      }).join('');
+    },
+
+    paint: function () {
+      var field = rmEl('.rm-field');
+      if (!field) return;
+      var on = this.on;
+      var self = this;
+
+      rmAll('.rm-mode [data-remindmode]').forEach(function (b) {
+        var active = (b.dataset.remindmode === 'on') === on;
+        b.classList.toggle('is-active', active);
+        b.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+
+      var panel = rmEl('.rm-panel');
+      if (panel) panel.hidden = !on;
+      field.classList.toggle('is-muted', !on);
+
+      rmAll('[data-remindopt]').forEach(function (box) {
+        box.checked = !!self.set[box.dataset.remindopt];
+      });
+
+      var held = rmEl('[name="reminders"]');
+      if (held) held.value = this.value();
+      setText(rmEl('.rm-summary'), remindSentence(this.tokens()));
+    }
+  };
+
+  /** "3 התראות: יום לפני · בזמן האירוע · 30 ביולי 09:00" — one honest line */
+  function remindSentence(list) {
+    var clean = normRemindList(list);
+    if (!clean.length) return 'לא תישלח שום תזכורת לפריט הזה.';
+    var names = clean.map(function (tok) { return remindLabelOf(tok); }).join(' · ');
+    return clean.length === 1 ? 'תזכורת אחת: ' + names : clean.length + ' התראות: ' + names;
+  }
 
   /**
    * Optional association. The client drawer's פגישות / משימות / רשימות tabs are
@@ -5553,7 +6283,7 @@
       return {
         title: r.title, date: r.date, start: r.start, end: r.end,
         location: r.location, notes: r.notes, clientId: r.clientId,
-        remind: normRemind(r.remind)
+        reminders: remindColumn(r)
       };
     },
     tasks: function (r) {
@@ -5562,7 +6292,7 @@
         status: normStatus(r.status), priority: normPriority(r.priority),
         nextAction: r.nextAction, clientId: r.clientId,
         subtasks: itemLines(r.subtasks), notes: r.notes,
-        remind: normRemind(r.remind)
+        reminders: remindColumn(r)
       };
     },
     lists: function (r) {
@@ -5613,7 +6343,7 @@
       rec.location = v.location || '';
       rec.notes = v.notes || '';
       rec.clientId = v.clientId || '';
-      rec.remind = normRemind(v.remind);
+      setReminders(rec, v.reminders);
       label = 'האירוע עודכן';
     } else if (collection === 'tasks') {
       if (!v.title) { warn('צריך שם למשימה'); return ''; }
@@ -5624,7 +6354,7 @@
       rec.nextAction = v.nextAction || '';
       rec.notes = v.notes || '';
       rec.clientId = v.clientId || '';
-      rec.remind = normRemind(v.remind);
+      setReminders(rec, v.reminders);
       rec.subtasks = mergeChecklist(rec.subtasks, v.subtasks, 'st');
       setTaskStatus(rec, v.status || rec.status);        // keeps `done` in lockstep
       label = 'המשימה עודכנה';
@@ -5695,8 +6425,16 @@
     $('#formFields').innerHTML = FIELDS[type]();
     setFormCat(UI.formCat);
     if (edit) fillForm(type, edit); else applyPrefill();
+    // after the values are in: the panel's opening state is the record's own
+    // reminder list, and a blank form opens on the system default
+    var held = rmEl('[name="reminders"]');
+    if (held) FormRemind.load(held.value || REMIND_DEFAULT);
 
     $('#typeSheet').hidden = true;
+    // the reader is what "עריכה" was tapped from; it must not stay layered
+    // behind the form it just opened
+    Detail.close();
+    if ($('#openSheet')) $('#openSheet').hidden = true;
     openSheet('formSheet');
 
     var first = $('#formFields input, #formFields textarea');
@@ -5716,6 +6454,12 @@
     var v = {};
     $$('#formFields [name]', form).forEach(function (el) { v[el.name] = (el.value || '').trim(); });
 
+    /* The panel is the authority on its own list, not the hidden mirror of it:
+       a datetime-local that was still focused when שמירה was tapped may not
+       have fired `change` yet, and the reminder the user just typed must not
+       be the one thing the save drops. */
+    if (rmEl('.rm-field')) v.reminders = FormRemind.value();
+
     var type = UI.formType, cat = UI.formCat, label;
 
     // the same sheet edits what it created (Wave 2) — no second form, no drift
@@ -5728,7 +6472,9 @@
         type: 'event', title: v.title, category: cat,
         date: v.date || todayISO(), start: v.start || '', end: v.end || '',
         location: v.location || '', notes: v.notes || '', clientId: v.clientId || '',
-        remind: normRemind(v.remind)
+        // Sprint 12 — a token list, normalised again by migrateEvent() on the
+        // way in, so `remind` (the column's value) can only ever be derived
+        reminders: normRemindList(v.reminders)
       });
       linkLog(v.clientId, 'נקבעה פגישה: ' + v.title);
       label = 'האירוע נוסף';
@@ -5742,7 +6488,7 @@
         status: v.status || 'new', priority: v.priority || 'medium',
         nextAction: v.nextAction || '', subtasks: parseChecklist(v.subtasks, 'st'),
         done: false, notes: v.notes || '', clientId: v.clientId || '',
-        remind: normRemind(v.remind)
+        reminders: normRemindList(v.reminders)
       });
       linkLog(v.clientId, 'נוספה משימה: ' + v.title);
       label = v.due ? 'המשימה נוספה' : 'המשימה נוספה לנכנסים';
@@ -5781,10 +6527,88 @@
     var backTo = (PREFILL && PREFILL.clientId) ? PREFILL.clientId : null;
     var backTab = Drawer.tab;
 
+    // §2 — saved is not the same as visible. Widen whatever is hiding it first,
+    // and only then paint, so ONE render() shows the finished state.
+    var widened = reveal(cat, v.date || v.due || '');
+
     closeSheets();
     render();
     if (backTo) Drawer.open(backTo, backTab);
-    toast(label + ' · ' + CAT_LABEL[cat]);
+    toast(label + ' · ' + CAT_LABEL[cat] + (widened ? ' · ' + widened : ''));
+  }
+
+  /* ==========================================================================
+     Real-time visibility (Sprint 12 · mandate §2)
+
+     The field report was "I create it and it is not there until I refresh".
+     The store was never the problem — every selector returns the new record
+     the instant it is added. Two things in the VIEW layer could still hide it,
+     and a reload cleared both, which is exactly why a refresh "fixed" it:
+
+       1. the global category filter. pick() gates every read path, so a
+          personal task created while the filter reads "עסקי" is counted by the
+          summary and drawn by nothing. That is the same shape as the Sprint 10
+          field report — counted somewhere, listed nowhere.
+
+       2. the calendar anchor. `Cal.anchor` is initialised once, when app.js is
+          parsed. A home-screen PWA is RESUMED rather than reloaded (see the
+          service-worker notes above), so an app left open overnight is still
+          anchored on yesterday: a record created "for today" lands on a day the
+          calendar is not showing, and only a reload re-anchors it.
+
+     reveal() closes both, and says out loud in the toast when it had to.
+     ========================================================================== */
+
+  /** does the active calendar period actually contain this day? */
+  function calShows(iso) {
+    return Cal.rangeDays().indexOf(iso) !== -1;
+  }
+
+  /**
+   * Make a just-saved record reachable. Returns a short Hebrew note about what
+   * had to move, or '' when nothing did — silence is the common case.
+   */
+  function reveal(cat, iso) {
+    var moved = [];
+
+    var filter = filterCat();
+    if (filter !== 'all' && normCat(cat) !== filter) {
+      Store.data.prefs.filter = 'all';
+      Store.save();
+      $$('.topbar .seg').forEach(function (b) {
+        var on = b.dataset.filter === 'all';
+        b.classList.toggle('is-active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      moved.push('התצוגה נפתחה להכל');
+    }
+
+    if (iso && !calShows(iso)) {
+      Cal.anchor = iso;
+      moved.push('היומן עבר ל' + relDay(iso));
+    }
+
+    return moved.join(' · ');
+  }
+
+  /**
+   * The day rolled over under an app that was never reloaded.
+   *
+   * Everything on My Day is derived from todayISO(), which is read fresh on
+   * every paint — but `Cal.anchor` was captured once at parse time, and the
+   * fired-ledger sweep, the is-now timeline row and the "היום" board all read
+   * as yesterday's until something forces a repaint. The scan already runs
+   * every SCAN_MS; this rides along with it and costs one string compare.
+   */
+  var PAINTED_DAY = todayISO();
+
+  function dayGuard() {
+    var t = todayISO();
+    if (t === PAINTED_DAY) return false;
+    if (Cal.anchor === PAINTED_DAY) Cal.anchor = t;   // follow the day, if it was on it
+    PAINTED_DAY = t;
+    render();
+    return true;
   }
 
   /** creating a linked record writes a line into that client's timeline */
@@ -6225,31 +7049,53 @@
         return day * 1440 + timeToMinutes(time) - mins;
       }
 
-      Store.data.events.forEach(function (e) {
-        var window_ = remindLead(e, lead);
-        if (window_ === null) return;                 // this record is muted
-        var gap = gapTo(e.date, e.start);
-        // early is a miss, late-but-inside-the-grace-window is a delivery
-        if (gap === null || gap > window_ || gap < -MISS_GRACE_MIN) return;
-        out.push({
-          id: e.id, on: e.date,
-          title: 'פגישה ' + when(gap),
-          body: e.title + ' · ' + e.start + (e.location ? ' · ' + e.location : '')
+      /**
+       * Sprint 12 — one record, several reminders, one entry each.
+       *
+       * A built-in keeps the Sprint-10/11 window exactly: open from `lead`
+       * minutes before the start until MISS_GRACE_MIN minutes after it. A
+       * custom stamp is an absolute moment and has no lead at all, so its
+       * window is only the grace tail — it fires at the minute it names.
+       *
+       * Every entry carries its OWN ledger key, so "יום לפני" and "בזמן
+       * האירוע" on the same meeting are two deliveries, not one that swallows
+       * the other. The key ends in the date the sweep reads, and for a custom
+       * reminder that date is the reminder's own — a reminder set for next
+       * Tuesday must not be swept tonight.
+       */
+      function collect(rec, kind, clockDate, clockTime, body) {
+        remindPlan(rec, lead).forEach(function (plan) {
+          if (plan.at) {
+            var day = plan.at.slice(0, 10);
+            var gapAbs = gapTo(day, plan.at.slice(11, 16));
+            if (gapAbs === null || gapAbs > 0 || gapAbs < -MISS_GRACE_MIN) return;
+            out.push({
+              id: rec.id, on: day, tok: plan.tok,
+              key: remindMark(plan.tok, rec.id, day),
+              title: 'תזכורת · ' + kind, body: body
+            });
+            return;
+          }
+          var gap = gapTo(clockDate, clockTime);
+          // early is a miss, late-but-inside-the-grace-window is a delivery
+          if (gap === null || gap > plan.minutes || gap < -MISS_GRACE_MIN) return;
+          out.push({
+            id: rec.id, on: clockDate, tok: plan.tok,
+            key: remindMark(plan.tok, rec.id, clockDate),
+            title: kind + ' ' + when(gap), body: body
+          });
         });
+      }
+
+      Store.data.events.forEach(function (e) {
+        collect(e, 'פגישה', e.date, e.start,
+          e.title + ' · ' + e.start + (e.location ? ' · ' + e.location : ''));
       });
 
       Store.data.tasks.forEach(function (x) {
         // הושלם and בוטל are both closed — neither deserves a reminder
         if (isClosed(x.status)) return;
-        var window_ = remindLead(x, lead);
-        if (window_ === null) return;
-        var gap = gapTo(x.due, x.time);
-        if (gap === null || gap > window_ || gap < -MISS_GRACE_MIN) return;
-        out.push({
-          id: x.id, on: x.due,
-          title: 'משימה ' + when(gap),
-          body: x.title + ' · ' + x.time
-        });
+        collect(x, 'משימה', x.due, x.time, x.title + ' · ' + x.time);
       });
 
       return out;
@@ -6273,7 +7119,11 @@
 
       var self = this;
       this.due().forEach(function (item) {
-        var key = item.id + '@' + (item.on || t);
+        /* Sprint 12 — the mark is per REMINDER, not per record. "יום לפני" and
+           "בזמן האירוע" on the same meeting are two separate deliveries, and a
+           single record-wide key would let whichever fired first swallow every
+           other reminder that record carries. */
+        var key = item.key || remindMark(item.tok || REMIND_DEFAULT, item.id, item.on || t);
         if (fired[key]) return;
         fired[key] = 1;
         dirty = true;
@@ -6399,11 +7249,15 @@
       }
 
       clearInterval(this.timer);
-      this.timer = setInterval(function () { self.tick(); }, SCAN_MS);
+      // dayGuard() rides along: the scan is already the one thing in the app
+      // that runs on a clock, and a day that rolled over under a resumed PWA
+      // has to repaint before the next reminder is judged against it
+      this.timer = setInterval(function () { dayGuard(); self.tick(); }, SCAN_MS);
 
       // a phone that wakes from sleep skipped every interval in between
       document.addEventListener('visibilitychange', function () {
         if (document.hidden) return;
+        dayGuard();
         self.paint();
         self.tick();
         // iOS suspends the AudioContext with the app; a resume costs nothing
@@ -6435,6 +7289,9 @@
     if (!target || !target.closest) return '';
     if (Select.on || Confirm.isOpen()) return '';
     if (!$('#typeSheet').hidden || !$('#formSheet').hidden || !$('#trashSheet').hidden) return '';
+    // Sprint 12 — the reader is a card surface of its own; a tap inside it must
+    // not resolve to the card underneath and open a second layer
+    if (Detail.isOpen()) return '';
 
     var card = target.closest('[data-rec]');
     var key = card && card.dataset ? card.dataset.rec : '';
@@ -6442,6 +7299,19 @@
     // a card mid-collapse is on its way out; it is not editable
     if (card.classList && card.classList.contains('is-leaving')) return '';
     return TAP_EDIT.indexOf(String(key).split(':')[0]) === -1 ? '' : key;
+  }
+
+  /**
+   * Where a tap on a card body goes (Sprint 12 · mandate §4).
+   *
+   * A task or an event opens the READER: the record laid out to be read, with
+   * עריכה one tap further in. A list or a note has no reading surface of its
+   * own — its whole content is the checklist or the body the card already
+   * shows — so those still open their form directly, exactly as before.
+   */
+  function openTapped(collection, id) {
+    if (TAP_DETAIL.indexOf(collection) !== -1) return Detail.open(collection, id);
+    return openEdit(collection, id);
   }
 
   /**
@@ -6566,6 +7436,9 @@
       '[data-nav],[data-action],[data-type],[data-filter],[data-cat],[data-toggle],[data-del],' +
       '[data-calview],[data-calnav],[data-calslot],' +
       '[data-tasktab],[data-work],[data-upcoming],' +
+      // Sprint 12 — the reminder panel, the "פתוחות" sheet and the detail reader
+      '[data-remindmode],[data-remindadd],[data-reminddrop],' +
+      '[data-openall],[data-openfilter],[data-detailact],' +
       '[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
       '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
       '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo],' +
@@ -6579,7 +7452,7 @@
       var open = tapEditKey(e.target);
       if (open) {
         Haptics.light();
-        if (!openEdit(open.split(':')[0], open.split(':')[1])) toast('הפריט לא נמצא');
+        if (!openTapped(open.split(':')[0], open.split(':')[1])) toast('הפריט לא נמצא');
       }
       return;
     }
@@ -6658,6 +7531,16 @@
 
     if (el.dataset.work) { setWorkspace(el.dataset.work); return; }
     if (el.dataset.upcoming) { toggleUpcoming(); return; }
+
+    /* ---------- Sprint 12 · reminders panel, "פתוחות" sheet, detail reader ---- */
+
+    if (el.dataset.remindmode) { FormRemind.setMode(el.dataset.remindmode); return; }
+    if (el.dataset.remindadd) { FormRemind.addCustom(); return; }
+    if (el.dataset.reminddrop) { FormRemind.dropCustom(parseInt(el.dataset.reminddrop, 10)); return; }
+
+    if (el.dataset.openall) { openOpenSheet(); return; }
+    if (el.dataset.openfilter) { setOpenFilter(el.dataset.openfilter); return; }
+    if (el.dataset.detailact) { Detail.act(el.dataset.detailact); return; }
 
     /* ---------- client CRM ---------- */
 
@@ -6823,7 +7706,21 @@
   /** the only <select> that mutates the store outside a form submit */
   function onChange(e) {
     var el = e.target;
-    if (!el || !el.dataset || !el.dataset.clientstatus) return;
+    if (!el || !el.dataset) return;
+
+    /* Sprint 12 — the reminder panel answers to `change`, not to the click
+       delegate: a <label> wrapping a checkbox already toggles it, so a click
+       handler on the same element would toggle it straight back. */
+    if (el.dataset.remindopt) {
+      FormRemind.toggle(el.dataset.remindopt, !!el.checked);
+      return;
+    }
+    if (el.dataset.remindwhen) {
+      FormRemind.setCustom(parseInt(el.dataset.remindwhen, 10), el.value);
+      return;
+    }
+
+    if (!el.dataset.clientstatus) return;
     var c = Store.find('clients', el.dataset.clientstatus);
     if (!c) return;
     Haptics.light();
@@ -6987,7 +7884,28 @@
       archiveBarHTML: archiveBarHTML,
       markEntering: markEntering,
       setHTML: setHTML,
-      setText: setText
+      setText: setText,
+
+      /* Sprint 12 — real-time visibility (§2), the open-items sheet (§3) and
+         the detail reader (§4). reveal() and dayGuard() are the two things
+         that stood between "saved" and "on screen"; everything below them is
+         pure selector work the healthcheck drives with no DOM at all. */
+      TAP_DETAIL: TAP_DETAIL,
+      reveal: reveal,
+      calShows: calShows,
+      dayGuard: dayGuard,
+      OPEN_FILTERS: OPEN_FILTERS,
+      OPEN_FILTER_LABEL: OPEN_FILTER_LABEL,
+      OPEN_EMPTY: OPEN_EMPTY,
+      openFilter: openFilter,
+      openEntries: openEntries,
+      openMatches: openMatches,
+      openRows: openRows,
+      openKeys: openKeys,
+      openRowHTML: openRowHTML,
+      renderOpenSheet: renderOpenSheet,
+      Detail: Detail,
+      openTapped: openTapped
     },
 
     // cloud sync engine — schema, serialisers, outbox and merge, all pure
@@ -7080,7 +7998,36 @@
       // Sprint 11 — the grace window and the gesture list, so healthcheck can
       // assert the late-delivery contract rather than pattern-match for it
       GRACE: MISS_GRACE_MIN,
-      GESTURES: CHIME_GESTURES
+      GESTURES: CHIME_GESTURES,
+
+      // Sprint 12 — several reminders per record. The whole vocabulary is pure
+      // string work, so healthcheck.js round-trips a real multi-reminder record
+      // through the store, the column and the scan with no clock and no DOM.
+      BUILTIN: REMIND_BUILTIN,
+      MULTI: REMIND_MULTI,
+      ORDER: REMIND_ORDER,
+      MAX: REMIND_MAX,
+      CUSTOM_PREFIX: REMIND_CUSTOM_PREFIX,
+      ON_LABEL: REMIND_ON_LABEL,
+      OFF_LABEL: REMIND_OFF_LABEL,
+      isCustomRemind: isCustomRemind,
+      customRemindStamp: customRemindStamp,
+      customRemindDate: customRemindDate,
+      customRemindTime: customRemindTime,
+      customRemindText: customRemindText,
+      remindLabelOf: remindLabelOf,
+      remindClass: remindClass,
+      normRemindList: normRemindList,
+      remindersOf: remindersOf,
+      remindKey: remindKey,
+      remindColumn: remindColumn,
+      setReminders: setReminders,
+      remindOn: remindOn,
+      remindPlan: remindPlan,
+      remindMark: remindMark,
+      remindSentence: remindSentence,
+      remindField: remindField,
+      FormRemind: FormRemind
     },
 
     lists: {
