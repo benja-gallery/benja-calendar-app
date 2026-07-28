@@ -43,7 +43,9 @@ export const SCHEMA = {
       // Sprint 6 — appended by migration 0002, so they trail every Sprint-5 column
       'google_event_id', 'etag', 'google_calendar_id',
       // Sprint 10 — appended by migration 0003, so it trails those in turn
-      'remind_key'],
+      'remind_key',
+      // Sprint 13 — appended by migration 0006, trailing that in turn
+      'alert_sound', 'alert_vibe'],
     ints: []
   },
   tasks: {
@@ -51,7 +53,9 @@ export const SCHEMA = {
       'next_action', 'subtasks_json', 'client_id', 'updated_at', 'owner_id',
       'due_time', 'notes', 'created_at', 'deleted_at',
       // Sprint 10 — appended by migration 0003
-      'remind_key'],
+      'remind_key',
+      // Sprint 13 — appended by migration 0006
+      'alert_sound', 'alert_vibe'],
     ints: []
   },
   lists: {
@@ -61,7 +65,9 @@ export const SCHEMA = {
   },
   notes: {
     columns: ['id', 'title', 'body', 'category', 'is_pinned', 'client_id',
-      'updated_at', 'owner_id', 'created_at', 'deleted_at'],
+      'updated_at', 'owner_id', 'created_at', 'deleted_at',
+      // Sprint 13 — appended by migration 0006
+      'alert_sound', 'alert_vibe'],
     ints: ['is_pinned']
   },
   clients: {
@@ -199,10 +205,18 @@ export function sanitize(table, input) {
  * the column on every inbound edit. The client never sends a blank — 'default'
  * is how it says "no opinion" — so a blank here can only ever be a writer that
  * has no opinion to express.
+ *
+ * Sprint 13 adds alert_sound / alert_vibe on the same three tables, for the
+ * same reason and with the same guarantee from the client: the browser writes
+ * 'short' to mean the default and never '', so a blank arriving here can only
+ * be a writer (/api/gcal/sync, an older client) that has nothing to say about
+ * how this record announces itself.
  */
 const PRESERVE_IF_BLANK = {
-  events: ['google_event_id', 'etag', 'google_calendar_id', 'remind_key'],
-  tasks: ['remind_key']
+  events: ['google_event_id', 'etag', 'google_calendar_id', 'remind_key',
+    'alert_sound', 'alert_vibe'],
+  tasks: ['remind_key', 'alert_sound', 'alert_vibe'],
+  notes: ['alert_sound', 'alert_vibe']
 };
 
 /**

@@ -611,6 +611,11 @@ check('selected calendar view persists to localStorage', () => {
  * checks exercise a phone with a vibration motor and one without; `over.document`
  * swaps in a DOM stub, which is how the Sprint 9 checks drive markEntering()
  * against real nodes and watch which of them are granted the entrance.
+ *
+ * Sprint 13 adds `over.AudioContext` and `over.matchMedia` for the same
+ * reason: the dual-sound engine and the theme switch both read them straight
+ * off `window`, and the only honest way to prove a ten-second ringtone
+ * schedules ten seconds of oscillators is to hand it one and count.
  */
 function loadApp(over) {
   const noop = () => {};
@@ -627,6 +632,8 @@ function loadApp(over) {
       body: { style: {} }
     }, (over && over.document) || {})
   };
+  if (over && over.AudioContext) sandbox.AudioContext = over.AudioContext;
+  if (over && over.matchMedia) sandbox.matchMedia = over.matchMedia;
   sandbox.window = sandbox;
   sandbox.self = sandbox;
   vm.createContext(sandbox);
@@ -1388,6 +1395,7 @@ const WORKER_FILES = ['_shared', '_collection'].concat(WORKER_ROUTES)
 const MIGRATION = 'migrations/0001_sprint5_init.sql';
 const MIGRATION_GCAL = 'migrations/0002_sprint6_gcal.sql';
 const MIGRATION_REMIND = 'migrations/0003_sprint10_remind.sql';
+const MIGRATION_ALERTS = 'migrations/0006_sprint13_alerts.sql';
 
 check('Sprint 5 artefacts are present (worker routes, migration, wrangler)', () => {
   const wanted = WORKER_FILES.concat([MIGRATION, MIGRATION_GCAL, MIGRATION_REMIND, 'wrangler.toml']);
@@ -1436,9 +1444,10 @@ check('the six mandated /api routes each export the CRUD handlers', () => {
 const sql = read(MIGRATION);
 const sqlGcal = read(MIGRATION_GCAL);
 const sqlRemind = read(MIGRATION_REMIND);
+const sqlAlerts = read(MIGRATION_ALERTS);
 
 /** every append-only migration after 0001, in the order SQLite would apply them */
-const LATER_MIGRATIONS = [sqlGcal, sqlRemind];
+const LATER_MIGRATIONS = [sqlGcal, sqlRemind, sqlAlerts];
 
 /**
  * Live column order of a table, rebuilt the way SQLite itself builds it:
@@ -5424,11 +5433,25 @@ check('migration 0003 appends the reminder column without editing 0001 or 0002',
   return true;
 });
 
+/**
+ * Columns appended by a migration LATER than 0003. Sprint 10's check used to
+ * assert remind_key was the last column of its table, which was only true
+ * while 0003 was the last migration; Sprint 13's 0006 appends two more behind
+ * it. What the check actually protects is the POSITION — remind_key trails
+ * every 0001/0002 column and leads every column added after it — so that is
+ * what it asserts now.
+ */
+const AFTER_REMIND = ['alert_sound', 'alert_vibe'];
+
 check('remind_key agrees across the SQL, the Worker and the client', () => {
   ['events', 'tasks'].forEach(t => {
     const cols = sqlColumns(t);
-    if (cols[cols.length - 1] !== 'remind_key') {
-      throw new Error(t + ' ends with ' + cols[cols.length - 1] + ', not the appended column');
+    const at = cols.indexOf('remind_key');
+    if (at === -1) throw new Error(t + ' declares no remind_key');
+    const after = cols.slice(at + 1);
+    const stray = after.filter(c => AFTER_REMIND.indexOf(c) === -1);
+    if (stray.length) {
+      throw new Error(t + ' puts [' + stray.join(', ') + '] after remind_key — migration order drifted');
     }
     if (W.SCHEMA[t].columns.join() !== cols.join()) throw new Error(t + ': the Worker drifted from the SQL');
     if (SY.SCHEMA[t].join() !== cols.join()) throw new Error(t + ': the client drifted from the SQL');
@@ -6640,23 +6663,35 @@ check('migration 0005 widens the vocabulary without touching a column', () => {
     if (sql.indexOf(s) === -1) throw new Error('0005 does not document ' + s);
   });
 
-  // the three schema listings still agree, and still end in remind_key
+  // the three schema listings still agree, and remind_key still sits exactly
+  // where migration order puts it — nothing but a LATER migration's columns may
+  // follow it (Sprint 13's 0006 appends two)
   const APP = loadApp();
   ['events', 'tasks'].forEach(t => {
     const cols = APP.sync.SCHEMA[t];
-    if (cols[cols.length - 1] !== 'remind_key') throw new Error(t + ' no longer ends in remind_key');
+    const at = cols.indexOf('remind_key');
+    if (at === -1) throw new Error(t + ' no longer declares remind_key');
+    const stray = cols.slice(at + 1).filter(c => AFTER_REMIND.indexOf(c) === -1);
+    if (stray.length) throw new Error(t + ' puts [' + stray.join(', ') + '] after remind_key');
   });
   return true;
 });
 
 /* ---- 44f. shipped shell and specification ---- */
 
-check('the shell was bumped to v18 for this sprint', () => {
-  const m = sw.match(/CACHE_VERSION\s*=\s*'v(\d+)'/);
+/**
+ * The shell version, and the ONE rule that matters about it: whatever
+ * CACHE_VERSION says, both cache-busted URLs in index.html must say the same
+ * thing, or a phone downloads a new worker and keeps booting the old app.js.
+ * Sprint 12 pinned the literal 'v18', which was true for exactly one sprint —
+ * the floor is kept (never go backwards) and the agreement is now derived.
+ */
+check('the shell was bumped for this sprint, and the ?v= is in step', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'(v(\d+))'/);
   if (!m) return 'no CACHE_VERSION';
-  if (parseInt(m[1], 10) < 18) return 'the cache is still v' + m[1] + ' — returning phones keep the old shell';
-  if (html.indexOf('app.js?v=v18') === -1) return 'app.js is not busted to v18';
-  if (html.indexOf('styles.css?v=v18') === -1) return 'styles.css is not busted to v18';
+  if (parseInt(m[2], 10) < 18) return 'the cache is still ' + m[1] + ' — returning phones keep the old shell';
+  if (html.indexOf('app.js?v=' + m[1]) === -1) return 'app.js is not busted to ' + m[1];
+  if (html.indexOf('styles.css?v=' + m[1]) === -1) return 'styles.css is not busted to ' + m[1];
   return true;
 });
 
@@ -6665,6 +6700,740 @@ check('PROJECT_PLAN documents Sprint 12', () => {
     'Sprint 12', 'normRemindList', 'remindersOf', 'עם התראה', 'ללא התראה',
     'הוסף התראת זמן נוספת', 'openEntries', 'Detail', 'dayGuard', 'reveal',
     '0005_sprint12_multi_remind.sql', 'v18'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ==========================================================================
+   §45 — SPRINT 13
+   the hamburger settings drawer, the header cleanup, the dual-sound engine
+   and the per-record haptics
+   ========================================================================== */
+
+/**
+ * A DOM stub that answers EVERY selector with a live node rather than null.
+ * The Sprint-13 paint paths touch five modules at once (Settings, Notify,
+ * Sync, GCal, the bin), and a stub that answered null would prove only that
+ * they all decline — which is not what the drawer has to do.
+ */
+function domStub() {
+  const nodes = {};
+  const noop = () => {};
+  function node(key) {
+    if (nodes[key]) return nodes[key];
+    const n = {
+      key, hidden: true, disabled: false,
+      textContent: '', innerHTML: '', value: '', className: '', title: '',
+      dataset: {}, style: {}, attrs: {},
+      classList: { add: noop, remove: noop, toggle: noop, contains: () => false },
+      setAttribute(k, v) { this.attrs[k] = v; },
+      getAttribute(k) { return this.attrs[k]; },
+      removeAttribute(k) { delete this.attrs[k]; },
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener: noop, appendChild: noop, scrollIntoView: noop,
+      closest: () => null
+    };
+    nodes[key] = n;
+    return n;
+  }
+  return {
+    node,
+    doc: {
+      readyState: 'loading',
+      addEventListener: noop,
+      documentElement: node('html'),
+      body: { style: {} },
+      querySelector: sel => node(sel),
+      querySelectorAll: () => []
+    }
+  };
+}
+
+/** an AudioContext that schedules nothing and remembers everything */
+function audioStub() {
+  const scheduled = [];
+  function Ctx() {
+    this.state = 'running';
+    this.currentTime = 0;
+    this.destination = {};
+  }
+  Ctx.prototype.resume = function () {};
+  Ctx.prototype.createGain = function () {
+    return {
+      gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} },
+      connect() {}
+    };
+  };
+  Ctx.prototype.createOscillator = function () {
+    const osc = {
+      type: '', frequency: {}, startedAt: null, stoppedAt: null, killed: false,
+      connect() {},
+      start(t) { osc.startedAt = t; scheduled.push(osc); },
+      stop(t) { if (t === undefined) osc.killed = true; else osc.stoppedAt = t; }
+    };
+    return osc;
+  };
+  Ctx.scheduled = scheduled;
+  return Ctx;
+}
+
+/* ---- 45a. header cleanup: what is left, and where the rest went ---- */
+
+const topbarBlock = (html.match(/<header class="topbar"[\s\S]*?<\/header>/) || [''])[0];
+const settingsBlock = (html.match(/<aside class="settings"[\s\S]*?<\/aside>/) || [''])[0];
+
+check('the top bar is down to the title, the cloud badge and ☰', () => {
+  if (!topbarBlock) return 'no <header class="topbar">';
+
+  /* The mandate names them one by one: the bell, the speaker, the calendar,
+     the Google readout and the floating bin. None of them may still be IN the
+     header — and 45b proves each is still in the document, so this can only
+     ever fail as "it was left behind", never as "it was deleted". */
+  const gone = ['id="pushBtn"', 'id="soundBtn"', 'id="gcalBtn"', 'id="gcalSync"', 'id="trashBtn"'];
+  const left = gone.filter(s => topbarBlock.indexOf(s) !== -1);
+  if (left.length) return 'still cluttering the header: ' + left.join(', ');
+
+  // the cloud badge stays — it is a status light, not a menu
+  if (topbarBlock.indexOf('id="syncBtn"') === -1) return 'the cloud badge left the header too';
+  if (topbarBlock.indexOf('id="menuBtn"') === -1) return 'no ☰ in the header';
+  if (topbarBlock.indexOf('☰') === -1) return 'the hamburger has no glyph';
+  return true;
+});
+
+check('☰ is the last item of the header row, so RTL puts it on the left', () => {
+  const row = (topbarBlock.match(/<div class="topbar-row">[\s\S]*?<\/div>\s*<\/div>|<div class="topbar-row">[\s\S]*?\n      <\/div>/) || [''])[0];
+  if (!row) return 'no .topbar-row';
+  const menu = row.indexOf('id="menuBtn"');
+  if (menu === -1) return 'the hamburger is not in the row';
+  // nothing may follow it: the document is dir="rtl", so the LAST flex item is
+  // the one that lands on the visual left edge the mandate asks for
+  const after = row.slice(menu);
+  if (/id="(syncBtn|pushBtn|gcalBtn|soundBtn)"/.test(after)) {
+    return 'another control sits after ☰ — it would no longer be the left-most';
+  }
+  if (!/aria-haspopup="dialog"/.test(row)) return 'the hamburger does not announce it opens a dialog';
+  if (!/aria-controls="settingsDrawer"/.test(row)) return 'the hamburger names no panel';
+  return true;
+});
+
+check('every control the header lost is the SAME element, moved into the drawer', () => {
+  if (!settingsBlock) return 'no settings drawer in the document';
+  ['id="pushBtn"', 'id="pushIco"', 'id="pushLabel"',
+    'id="soundBtn"', 'id="soundIco"', 'id="soundLabel"',
+    'id="gcalBtn"', 'id="gcalIco"', 'id="gcalLabel"',
+    'id="gcalSync"', 'id="gcalSyncText"', 'id="gcalUnlink"',
+    'id="trashBtn"', 'id="trashCount"'].forEach(s => {
+      if (settingsBlock.indexOf(s) === -1) throw new Error(s + ' is not inside the drawer');
+    });
+
+  // ...and every one of them is still bound by the same id in app.js, so the
+  // move rebuilt no wiring and created no second owner of any fact
+  ["$('#pushBtn')", "$('#soundBtn')", "$('#gcalBtn')", "$('#gcalUnlink')", "$('#trashBtn')"]
+    .forEach(sel => {
+      if (js.indexOf(sel) === -1) throw new Error(sel + ' lost its handler in the move');
+    });
+  return true;
+});
+
+check('the drawer carries the five sections the mandate names', () => {
+  ['התראות, צלילים ורטט', 'סנכרון וחשבונות', 'נתונים וארכיון', 'מראה ועיצוב', 'אודות']
+    .forEach(h => {
+      if (settingsBlock.indexOf(h) === -1) throw new Error('no section: ' + h);
+    });
+  // ...and the controls each one is required to hold
+  ['id="setShortSound"', 'id="setLongSound"', 'id="setVibe"', 'id="hapticsBtn"',
+    'data-setsync="now"', 'data-action="archive-log"', 'data-settheme="dark"',
+    'data-settheme="light"', 'data-settheme="system"', 'id="setVersion"', 'id="setHealth"']
+    .forEach(s => {
+      if (settingsBlock.indexOf(s) === -1) throw new Error('the drawer is missing ' + s);
+    });
+  if (settingsBlock.indexOf('סנכרן עכשיו') === -1) return 'no "סנכרן עכשיו" trigger';
+  if (settingsBlock.indexOf('סל מחזור (10 ימים)') === -1) return 'the bin link lost its 10-day promise';
+  if (settingsBlock.indexOf('יומן היסטוריה') === -1) return 'no link to the history log';
+  return true;
+});
+
+/* ---- 45b. the drawer toggle, driven for real ---- */
+
+check('☰ opens the drawer, and every close path shuts it', () => {
+  const dom = domStub();
+  const APP = loadApp({ document: dom.doc });
+  APP.Store.load();
+  const S = APP.settings.Settings;
+  const el = dom.node('#settingsDrawer');
+
+  if (S.isOpen()) return 'the drawer starts open';
+  S.open();
+  if (el.hidden) return 'open() left the panel hidden';
+  if (!S.isOpen()) return 'isOpen() disagrees with the DOM';
+  if (dom.node('#backdrop').hidden) return 'the drawer opened with no scrim behind it';
+  if (dom.node('#menuBtn').getAttribute('aria-expanded') !== 'true') {
+    return 'the hamburger does not report that it is expanded';
+  }
+
+  // toggle() closes through closeSheets(), which owns the scrim for every layer
+  S.toggle();
+  if (!el.hidden) return 'toggling an open drawer did not close it';
+  if (dom.node('#menuBtn').getAttribute('aria-expanded') !== 'false') {
+    return 'the hamburger still reports expanded after closing';
+  }
+
+  // ...and so does Escape / the ✕ / a tap on the scrim, all one function
+  S.open();
+  APP.settings.closeSheets();
+  if (!el.hidden) return 'closeSheets() leaves the drawer open behind the app';
+  return true;
+});
+
+check('the drawer counts as a layer, so a long press cannot select through it', () => {
+  const tap = bodyOf(js, 'tap: function (target)');
+  if (!tap) return 'no Select.tap()';
+  if (tap.indexOf('.settings') === -1) return 'a tap inside the drawer is read as a card selection';
+  const press = (js.match(/bindLongPress: function[\s\S]*?\n    \}/) || [''])[0];
+  if (press.indexOf('.settings') === -1) return 'a long press inside the drawer enters selection mode';
+  // anySheetOpen() is what the rest of the app asks before layering anything
+  const any = (js.match(/function anySheetOpen\(\)[\s\S]*?\n  \}/) || [''])[0];
+  if (any.indexOf('Settings.isOpen()') === -1) return 'anySheetOpen() does not count the drawer';
+  return true;
+});
+
+/* ---- 45c. the dual-sound engine ---- */
+
+check('two sound families ship, both synthesised, neither a binary asset', () => {
+  const S = loadApp().settings;
+
+  const shortNames = Object.keys(S.SHORT_SOUNDS);
+  const longNames = Object.keys(S.LONG_RINGS);
+  if (shortNames.length < 2) return 'only ' + shortNames.length + ' short preset(s) — nothing to choose between';
+  if (longNames.length < 2) return 'only ' + longNames.length + ' long preset(s)';
+  if (!S.SHORT_SOUNDS[S.SHORT_DEFAULT]) return 'the default short preset does not exist';
+  if (!S.LONG_RINGS[S.LONG_DEFAULT]) return 'the default long ringtone does not exist';
+
+  // every voice must be renderable: real tones, a real spacing, a real decay
+  shortNames.concat(longNames).forEach(k => {
+    const spec = S.SHORT_SOUNDS[k] || S.LONG_RINGS[k];
+    if (!Array.isArray(spec.tones) || !spec.tones.length) throw new Error(k + ' has no tones');
+    if (spec.tones.some(f => !(f > 0))) throw new Error(k + ' carries a non-positive frequency');
+    if (!(spec.step > 0) || !(spec.tail > 0)) throw new Error(k + ' has no envelope');
+    if (!spec.label) throw new Error(k + ' has no Hebrew label — the picker would show a key');
+  });
+  longNames.forEach(k => {
+    if (!(S.LONG_RINGS[k].cycle > 0)) throw new Error(k + ' never repeats — it is not a ringtone');
+  });
+
+  // an .mp3 would be a tenth asset in the shell and a 404 away from silence
+  if (/CORE_ASSETS[\s\S]*?\.(mp3|wav|ogg|m4a)/.test(sw)) return 'a sound ships as a cached audio file';
+  if (/new Audio\(/.test(js)) return 'the engine falls back to an <audio> element';
+  return true;
+});
+
+check('the long ringtone really rings for about ten seconds', () => {
+  const Ctx = audioStub();
+  const APP = loadApp({ AudioContext: Ctx });
+  APP.Store.load();
+  const S = APP.settings, Chime = S.Chime;
+
+  if (!Chime.supported()) return 'the stubbed AudioContext was not detected';
+  if (S.LONG_MS < 8000 || S.LONG_MS > 12000) return 'LONG_MS is ' + S.LONG_MS + 'ms, not the mandated ~10s';
+
+  if (Chime.playLong(S.LONG_DEFAULT) !== true) return 'the ringtone declined to play';
+  const spec = S.LONG_RINGS[S.LONG_DEFAULT];
+  const seconds = S.LONG_MS / 1000;
+  const cycles = Math.max(1, Math.floor(seconds / spec.cycle));
+
+  if (Ctx.scheduled.length !== cycles * spec.tones.length) {
+    return 'scheduled ' + Ctx.scheduled.length + ' notes, expected ' + cycles * spec.tones.length;
+  }
+  const last = Ctx.scheduled[Ctx.scheduled.length - 1];
+  if (!(last.startedAt > seconds * 0.6)) {
+    return 'the last note starts at ' + last.startedAt + 's — the ring dies out early';
+  }
+  if (last.startedAt > seconds) return 'the ring overruns its own ceiling';
+
+  // ...and it can be cut short, or auditioning one in the drawer would outlive
+  // the drawer by ten seconds
+  const before = Ctx.scheduled.length;
+  if (Chime.stop() !== true) return 'stop() reported nothing to stop';
+  if (Ctx.scheduled.slice(0, before).filter(o => o.killed).length !== before) {
+    return 'stop() left oscillators running';
+  }
+  if (Chime.stop() !== false) return 'a second stop() claimed to stop something';
+  return true;
+});
+
+check('a short tone is short, and the record chooses the family', () => {
+  const Ctx = audioStub();
+  const APP = loadApp({ AudioContext: Ctx });
+  APP.Store.load();
+  const S = APP.settings, Chime = S.Chime;
+
+  if (Chime.playShort(S.SHORT_DEFAULT) !== true) return 'the short tone declined to play';
+  const spec = S.SHORT_SOUNDS[S.SHORT_DEFAULT];
+  if (Ctx.scheduled.length !== spec.tones.length) return 'a short tone scheduled a ringtone';
+  const last = Ctx.scheduled[Ctx.scheduled.length - 1];
+  if (!(last.startedAt < 1)) return 'the "short" tone starts a note after a full second';
+
+  // an unknown preset falls back rather than going silent — a store written by
+  // a build that shipped a preset this one does not must still make a sound
+  Chime.stop();
+  Ctx.scheduled.length = 0;
+  if (Chime.playShort('a-preset-that-never-existed') !== true) return 'an unknown preset is silence';
+  if (!Ctx.scheduled.length) return 'the fallback preset scheduled nothing';
+
+  // playAlert() reads the RECORD's family and the STORE's preset
+  Chime.stop();
+  Ctx.scheduled.length = 0;
+  if (Chime.playAlert('none') !== false) return "'ללא' still made a sound";
+  if (Ctx.scheduled.length) return "'ללא' scheduled " + Ctx.scheduled.length + ' notes';
+
+  Ctx.scheduled.length = 0;
+  Chime.playAlert('short');
+  const shortCount = Ctx.scheduled.length;
+  Chime.stop();
+  Ctx.scheduled.length = 0;
+  Chime.playAlert('long');
+  if (!(Ctx.scheduled.length > shortCount)) {
+    return 'the long family scheduled ' + Ctx.scheduled.length + ' notes, no more than the short one';
+  }
+  return true;
+});
+
+check('the chime toggle still outranks everything — silence means silence', () => {
+  const Ctx = audioStub();
+  const APP = loadApp({ AudioContext: Ctx });
+  APP.Store.load();
+  APP.Store.data.prefs.notify.sound = false;
+  const Chime = APP.settings.Chime;
+
+  if (Chime.playShort('bell') !== false) return 'a muted chime still played a short tone';
+  if (Chime.playLong('classic') !== false) return 'a muted chime still rang for ten seconds';
+  if (Chime.playAlert('long') !== false) return 'a record overrode the global mute';
+  if (Ctx.scheduled.length) return 'a muted chime scheduled ' + Ctx.scheduled.length + ' notes';
+  return true;
+});
+
+/* ---- 45d. the vibration patterns and the touch-feedback toggle ---- */
+
+check('the four mandated vibration kinds exist and are really distinct', () => {
+  const S = loadApp().settings;
+  if (S.VIBE_KINDS.join(',') !== 'none,short,long,repeat') {
+    return 'the vocabulary is ' + S.VIBE_KINDS.join(',');
+  }
+  if (S.VIBE_PATTERN.none !== null) return "'ללא' carries a pattern";
+  ['short', 'long', 'repeat'].forEach(k => {
+    const p = S.VIBE_PATTERN[k];
+    if (!Array.isArray(p) || !p.length) throw new Error(k + ' has no pattern');
+    if (p.some(ms => !(ms > 0))) throw new Error(k + ' carries a non-positive interval');
+    if (!S.VIBE_LABEL[k]) throw new Error(k + ' has no Hebrew label');
+  });
+  const sum = a => a.reduce((n, x) => n + x, 0);
+  if (!(sum(S.VIBE_PATTERN.long) > sum(S.VIBE_PATTERN.short))) {
+    return 'the "long" pulse is not longer than the "short" one';
+  }
+  if (!(S.VIBE_PATTERN.repeat.length > S.VIBE_PATTERN.long.length)) {
+    return 'the "repeating" pulse does not repeat';
+  }
+  return true;
+});
+
+check('a reminder vibrates with the pattern its record asked for', () => {
+  const calls = [];
+  const APP = loadApp({ navigator: { vibrate: p => { calls.push(p); return true; } } });
+  APP.Store.load();
+  const H = APP.settings.Haptics, S = APP.settings;
+
+  if (H.pattern('none') !== false) return "'ללא' still buzzed";
+  if (calls.length) return "'ללא' reached the motor";
+
+  ['short', 'long', 'repeat'].forEach(k => {
+    calls.length = 0;
+    if (H.pattern(k) !== true) throw new Error(k + ' did not fire');
+    if (String(calls[0]) !== String(S.VIBE_PATTERN[k])) {
+      throw new Error(k + ' fired [' + calls[0] + '] instead of [' + S.VIBE_PATTERN[k] + ']');
+    }
+  });
+
+  // an unknown kind from a future build falls back rather than going silent
+  calls.length = 0;
+  H.pattern('someday');
+  if (String(calls[0]) !== String(S.VIBE_PATTERN[S.VIBE_DEFAULT])) {
+    return 'an unknown vibration kind was read as silence';
+  }
+  return true;
+});
+
+check('“רטט במגע” silences taps and NEVER silences a reminder', () => {
+  const calls = [];
+  const APP = loadApp({ navigator: { vibrate: p => { calls.push(p); return true; } } });
+  APP.Store.load();
+  const H = APP.settings.Haptics;
+
+  if (APP.Store.data.prefs.haptics !== true) return 'touch feedback does not default on';
+  if (H.light() !== true) return 'a tap does not buzz with the default settings';
+
+  APP.Store.data.prefs.haptics = false;
+  calls.length = 0;
+  if (H.light() !== false) return 'a tap still buzzed with touch feedback off';
+  if (H.check() !== false) return 'the ✓ still buzzed with touch feedback off';
+  if (H.done() !== false) return 'a completion still buzzed with touch feedback off';
+  if (calls.length) return 'the motor was reached ' + calls.length + ' times with the switch off';
+
+  /* The whole point of the separation: turning off the INTERFACE's buzz must
+     not turn off the NOTIFICATION's. A user who finds tap feedback annoying
+     has not asked to stop being told about meetings. */
+  if (H.pattern('long') !== true) return 'a reminder was silenced by the touch-feedback switch';
+
+  // ...and with no motor at all, every path answers false rather than throwing
+  const bare = loadApp();
+  bare.Store.load();
+  if (bare.settings.Haptics.pattern('repeat') !== false) return 'a device with no motor claimed to buzz';
+  return true;
+});
+
+/* ---- 45e. the per-record schema, end to end ---- */
+
+check('sound and vibration are stored ON THE RECORD, with honest defaults', () => {
+  const S = loadApp().settings;
+
+  if (S.ALERT_SOUNDS.join(',') !== 'none,short,long') {
+    return 'the sound vocabulary is ' + S.ALERT_SOUNDS.join(',');
+  }
+  ['none', 'short', 'long'].forEach(k => {
+    if (!S.ALERT_SOUND_LABEL[k]) throw new Error(k + ' has no Hebrew label');
+  });
+  // the mandate's own wording, so the form says what the mandate asked for
+  if (S.ALERT_SOUND_LABEL.long.indexOf('10') === -1) {
+    return 'the long option does not say how long it is';
+  }
+
+  // every unknown, absent or malformed value normalises to the default
+  [undefined, null, '', 'loud', 42, {}].forEach(bad => {
+    if (S.normAlertSound(bad) !== S.ALERT_SOUND_DEFAULT) {
+      throw new Error(JSON.stringify(bad) + ' did not normalise to the default sound');
+    }
+    if (S.normVibe(bad) !== S.VIBE_DEFAULT) {
+      throw new Error(JSON.stringify(bad) + ' did not normalise to the default vibration');
+    }
+  });
+  // 'none' is a real choice and must survive normalisation
+  if (S.normAlertSound('none') !== 'none') return "'ללא' is normalised away";
+  if (S.normVibe('none') !== 'none') return "'ללא רטט' is normalised away";
+
+  // a record written before this sprint carries neither key and still reads
+  const legacy = S.alertOf({ id: 'x', title: 'ישן' });
+  if (legacy.sound !== 'short' || legacy.vibe !== 'short') {
+    return 'a pre-Sprint-13 record reads as ' + JSON.stringify(legacy);
+  }
+  if (!S.alertSentence({ alertSound: 'long', alertVibe: 'repeat' })) {
+    return 'the pair has no human sentence — the reader would print a token';
+  }
+  return true;
+});
+
+check('the pair survives the store, the D1 row and the trip back', () => {
+  const APP = loadApp();
+  const Store = APP.Store, SY = APP.sync, S = APP.settings;
+  Store.load();
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.notes.length = 0;
+
+  const meeting = Store.add('events', {
+    type: 'event', title: 'שיחת לקוח', category: 'business',
+    date: '2026-08-02', start: '10:00', end: '', location: '', notes: '', clientId: '',
+    alertSound: 'long', alertVibe: 'repeat'
+  });
+  if (meeting.alertSound !== 'long' || meeting.alertVibe !== 'repeat') {
+    return 'the store dropped the choice on the way in';
+  }
+
+  ['events', 'tasks', 'notes'].forEach(t => {
+    const cols = SY.SCHEMA[t];
+    ['alert_sound', 'alert_vibe'].forEach(c => {
+      if (cols.indexOf(c) === -1) throw new Error(t + ' declares no ' + c);
+    });
+  });
+
+  const row = SY.toRow('events', meeting);
+  if (row.alert_sound !== 'long' || row.alert_vibe !== 'repeat') return 'the row lost the pair';
+  if (!SY.validRow('events', row)) return 'the emitted row is rejected by the payload guard';
+  const back = SY.fromRow('events', row);
+  if (back.alertSound !== 'long' || back.alertVibe !== 'repeat') return 'the pull lost the pair';
+
+  // the column is NEVER '' — it is preserve-if-blank on the Worker side, so a
+  // blank could never clear a choice, and a silent record says 'none' instead
+  const muted = SY.toRow('tasks', Store.add('tasks', {
+    type: 'task', title: 'בשקט', category: 'personal', due: '', time: '',
+    status: 'new', priority: 'medium', nextAction: '', subtasks: [], done: false,
+    notes: '', clientId: '', alertSound: 'none', alertVibe: 'none'
+  }));
+  if (muted.alert_sound !== 'none' || muted.alert_vibe !== 'none') return 'a muted record does not round-trip';
+  ['events', 'tasks', 'notes'].forEach(t => {
+    const r = SY.toRow(t, { id: 'x', title: 'y', body: 'y', updatedAt: 1, createdAt: 1 });
+    if (r.alert_sound === '' || r.alert_vibe === '') throw new Error(t + ' emits a blank alert column');
+  });
+
+  // an unknown value from a future build normalises rather than corrupts
+  const odd = SY.fromRow('events', Object.assign({}, row, { alert_sound: 'siren', alert_vibe: '' }));
+  if (odd.alertSound !== S.ALERT_SOUND_DEFAULT || odd.alertVibe !== S.VIBE_DEFAULT) {
+    return 'an unknown value survived a pull as ' + odd.alertSound + '/' + odd.alertVibe;
+  }
+  return true;
+});
+
+check('migration 0006 appends the two columns without editing 0001–0005', () => {
+  const alerts = read(MIGRATION_ALERTS);
+  ['events', 'tasks', 'notes'].forEach(t => {
+    ['alert_sound', 'alert_vibe'].forEach(c => {
+      if (!new RegExp('ALTER TABLE ' + t + '\\s+ADD COLUMN\\s+' + c + '\\b').test(alerts)) {
+        throw new Error(t + '.' + c + ' is never added');
+      }
+      if (!new RegExp('UPDATE\\s+' + t + '\\s+SET\\s+' + c + "\\s*=\\s*'short'").test(alerts)) {
+        throw new Error(t + '.' + c + ' rows are not backfilled');
+      }
+    });
+  });
+  // append-only: no earlier migration may mention the new columns
+  [sql, sqlGcal, sqlRemind, read('migrations/0005_sprint12_multi_remind.sql')].forEach((src, i) => {
+    if (src.indexOf('alert_sound') !== -1) throw new Error('migration ' + (i + 1) + ' was edited');
+  });
+  if (/DROP|DELETE\s+FROM/i.test(alerts)) return 'migration 0006 destroys data';
+
+  // ...and SQL, Worker and client still agree, with the pair trailing everything
+  ['events', 'tasks', 'notes'].forEach(t => {
+    const cols = sqlColumns(t);
+    if (cols.slice(-2).join(',') !== 'alert_sound,alert_vibe') {
+      return void (() => { throw new Error(t + ' ends with [' + cols.slice(-2).join(', ') + ']'); })();
+    }
+    if (W.SCHEMA[t].columns.join() !== cols.join()) throw new Error(t + ': the Worker drifted from the SQL');
+    if (SY.SCHEMA[t].join() !== cols.join()) throw new Error(t + ': the client drifted from the SQL');
+  });
+  return true;
+});
+
+check('a blank alert column can never erase a stored choice', () => {
+  const shared = read('functions/api/_shared.js');
+  const block = (shared.match(/const PRESERVE_IF_BLANK = \{[\s\S]*?\n\};/) || [''])[0];
+  if (!block) return 'no PRESERVE_IF_BLANK map';
+  ['events', 'tasks', 'notes'].forEach(t => {
+    const line = (block.match(new RegExp(t + ':[\\s\\S]*?\\]')) || [''])[0];
+    if (line.indexOf('alert_sound') === -1) throw new Error(t + '.alert_sound is not preserved');
+    if (line.indexOf('alert_vibe') === -1) throw new Error(t + '.alert_vibe is not preserved');
+  });
+  // /api/gcal/sync writes whole event rows built from a Google payload, which
+  // knows nothing about this vocabulary — the guard is what stops every
+  // inbound Google edit from nulling the choice
+  const gsync = read('functions/api/gcal/sync.js');
+  if (/alert_sound\s*=\s*(NULL|'')/.test(gsync)) return 'the Google cycle clears the column directly';
+  return true;
+});
+
+/* ---- 45f. the picker in the form ---- */
+
+check('task, event and note forms all carry the alert picker', () => {
+  const APP = loadApp();
+  APP.Store.load();
+  const S = APP.settings;
+
+  const markup = S.alertField();
+  S.ALERT_SOUNDS.forEach(k => {
+    if (markup.indexOf('data-alertsound="' + k + '"') === -1) throw new Error('no sound option ' + k);
+  });
+  S.VIBE_KINDS.forEach(k => {
+    if (markup.indexOf('data-alertvibe="' + k + '"') === -1) throw new Error('no vibration option ' + k);
+  });
+  if (markup.indexOf('name="alertSound"') === -1 || markup.indexOf('name="alertVibe"') === -1) {
+    return 'the picker does not serialise into the form';
+  }
+
+  // the three types the mandate names build it; the two it does not, do not
+  const fields = (js.match(/var FIELDS = \{[\s\S]*?\n  \};/) || [''])[0];
+  if (!fields) return 'no FIELDS map';
+  ['event', 'task', 'note'].forEach(t => {
+    const block = (fields.match(new RegExp(t + ': function \\(\\) \\{[\\s\\S]*?\\n    \\},?')) || [''])[0];
+    if (block.indexOf('alertField()') === -1) throw new Error('the ' + t + ' form has no alert picker');
+  });
+
+  // the delegate has to reach both rows, or the buttons are decoration
+  if (js.indexOf('[data-alertsound]') === -1 || js.indexOf('[data-alertvibe]') === -1) {
+    return 'the picker rows are not delegated';
+  }
+  if (js.indexOf("FormAlert.set('sound'") === -1 || js.indexOf("FormAlert.set('vibe'") === -1) {
+    return 'a tap on the picker changes nothing';
+  }
+  return true;
+});
+
+check('the picker round-trips a real record through the form', () => {
+  const APP = loadApp();
+  const Store = APP.Store, U = APP.ui, S = APP.settings;
+  Store.load();
+  Store.data.tasks.length = 0;
+
+  const task = Store.add('tasks', {
+    type: 'task', title: 'להתקשר', category: 'business', due: '2026-08-03', time: '09:00',
+    status: 'todo', priority: 'high', nextAction: '', subtasks: [], done: false,
+    notes: '', clientId: '', alertSound: 'long', alertVibe: 'repeat'
+  });
+
+  // TO_FORM is what pre-fills an edit; it must carry the pair or every edit
+  // silently resets the record to the defaults
+  const form = U.TO_FORM.tasks(task);
+  if (form.alertSound !== 'long' || form.alertVibe !== 'repeat') {
+    return 'the edit form opens on ' + form.alertSound + '/' + form.alertVibe;
+  }
+
+  // ...and applyEdit writes an actual change back
+  const label = U.applyEdit('tasks', task.id,
+    { title: 'להתקשר', due: '2026-08-03', time: '09:00', status: 'todo', priority: 'high',
+      nextAction: '', notes: '', clientId: '', subtasks: '',
+      alertSound: 'none', alertVibe: 'long' }, 'business');
+  if (!label) return 'the edit was refused';
+  const after = Store.find('tasks', task.id);
+  if (after.alertSound !== 'none' || after.alertVibe !== 'long') {
+    return 'the edit did not land: ' + after.alertSound + '/' + after.alertVibe;
+  }
+
+  // a form with NO picker (a list, a client) must leave the record's own pair
+  // alone rather than resetting it
+  const kept = S.setAlertFrom({ alertSound: 'long', alertVibe: 'repeat' }, { title: 'x' });
+  if (kept.alertSound !== 'long' || kept.alertVibe !== 'repeat') {
+    return 'a form with no picker reset the record to the defaults';
+  }
+  return true;
+});
+
+check('the reminder that fires carries the record’s own sound and vibration', () => {
+  const APP = loadApp();
+  const Store = APP.Store, D = APP.dates;
+  Store.load();
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.fired = {};
+  Store.data.prefs.notify.lead = 10;
+
+  const now = clockNow();
+  const today = APP.isoDate(new Date());
+
+  // starting this very minute, with "בזמן האירוע" — a zero-lead reminder whose
+  // window is open right now, so the scan has to hand it over
+  const loud = Store.add('events', {
+    type: 'event', title: 'פגישה רועשת', category: 'business',
+    date: today, start: hhmm(now), end: '', location: '', notes: '', clientId: '',
+    reminders: ['at'], alertSound: 'long', alertVibe: 'repeat'
+  });
+
+  const due = APP.Notify.due().filter(d => d.id === loud.id);
+  if (!due.length) return 'a reminder due at this very minute was not raised';
+  if (!due[0].alert) return 'the due entry carries no alert options';
+  if (due[0].alert.sound !== 'long' || due[0].alert.vibe !== 'repeat') {
+    return 'the entry carries ' + JSON.stringify(due[0].alert);
+  }
+
+  // and show() is what turns them into a real notification
+  const show = bodyOf(js, 'show: function (tag, title, body, alert)');
+  if (!show) return 'Notify.show() no longer takes the record’s alert options';
+  if (show.indexOf('Chime.playAlert(') === -1) return 'the sound is not chosen per record';
+  if (show.indexOf('VIBE_PATTERN[a.vibe]') === -1) return 'the notification carries a fixed vibration';
+  if (js.indexOf('self.show(key, item.title, item.body, item.alert)') === -1) {
+    return 'the scan drops the alert options before delivery';
+  }
+  return true;
+});
+
+/* ---- 45g. theme, system preferences and אודות ---- */
+
+check('the theme switch resolves “לפי המערכת” instead of storing it on the DOM', () => {
+  const S0 = loadApp().settings;
+  if (S0.THEMES.join(',') !== 'dark,light,system') return 'the vocabulary is ' + S0.THEMES.join(',');
+  if (S0.THEME_DEFAULT !== 'dark') return 'the mandated dark palette is no longer the default';
+
+  function drive(systemIsLight) {
+    const dom = domStub();
+    const APP = loadApp({
+      document: dom.doc,
+      matchMedia: q => ({ matches: q.indexOf('light') !== -1 ? systemIsLight : false, addEventListener() {} })
+    });
+    APP.Store.load();
+    return { APP, dom };
+  }
+
+  const lightOS = drive(true);
+  lightOS.APP.settings.Settings.setTheme('system');
+  if (lightOS.APP.settings.Settings.resolvedTheme() !== 'light') {
+    return '"לפי המערכת" ignored an OS asking for light';
+  }
+  if (lightOS.dom.node('html').getAttribute('data-theme') !== 'light') {
+    return 'the resolved palette never reached <html>';
+  }
+
+  const darkOS = drive(false);
+  darkOS.APP.settings.Settings.setTheme('system');
+  if (darkOS.dom.node('html').getAttribute('data-theme') !== 'dark') {
+    return 'an OS asking for dark resolved to ' + darkOS.dom.node('html').getAttribute('data-theme');
+  }
+
+  // an explicit choice overrides the OS in both directions
+  darkOS.APP.settings.Settings.setTheme('light');
+  if (darkOS.dom.node('html').getAttribute('data-theme') !== 'light') {
+    return 'an explicit light choice was overridden by the OS';
+  }
+  // 'system' is a question, never a value the stylesheet has to understand
+  if (['dark', 'light'].indexOf(darkOS.APP.settings.Settings.resolvedTheme()) === -1) {
+    return 'an unresolved theme reached the DOM';
+  }
+  return true;
+});
+
+check('the light palette is a real palette, and still declares no literal outside :root', () => {
+  const block = (css.match(/html\[data-theme="light"\]\s*\{[\s\S]*?\n\}/) || [''])[0];
+  if (!block) return 'no [data-theme="light"] override block';
+
+  // the whole point of the --l-* indirection: the override is var()-to-var(),
+  // so check 4's "no colour literal outside :root" keeps holding
+  if (/#[0-9a-f]{3,8}\b/i.test(block)) return 'the light theme declares a raw hex outside :root';
+  if (/rgba?\(/i.test(block)) return 'the light theme declares a raw rgb/rgba outside :root';
+
+  // it has to re-tint the surfaces, or "בהיר" is dark with lighter text
+  ['--surface', '--card', '--ink', '--muted', '--line', '--gold', '--scrim', '--shadow']
+    .forEach(t => {
+      if (block.indexOf(t + ':') === -1) throw new Error('the light theme never overrides ' + t);
+    });
+
+  // the dark palette is still the mandated one (PROJECT_PLAN §7.0)
+  if (!/--gold:\s*#e4c278/.test(rootBlock)) return 'the mandated gold was overwritten in :root';
+  // ...and the light accent is NOT the same gold, because #e4c278 on paper is
+  // roughly 1.8:1 and would fail the 4.5:1 floor on every gold label
+  if (/--l-gold:\s*#e4c278/i.test(rootBlock)) return 'the light theme reuses an unreadable gold';
+  return true;
+});
+
+check('אודות states the shipped version and a live health readout', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'(v\d+)'/);
+  const S = loadApp().settings;
+  if (S.APP_VERSION !== m[1]) {
+    return 'app.js says ' + S.APP_VERSION + ' and sw.js says ' + m[1];
+  }
+
+  const dom = domStub();
+  const APP = loadApp({ document: dom.doc });
+  APP.Store.load();
+  const line = APP.settings.Settings.health();
+  if (!line) return 'the health readout is empty';
+  // it reports on the INSTALL, which is the half a repo-local suite cannot see
+  ['אחסון מקומי', 'התראות', 'צליל', 'רטט', 'פריטים'].forEach(w => {
+    if (line.indexOf(w) === -1) throw new Error('the readout never mentions ' + w);
+  });
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 13', () => {
+  const required = [
+    'Sprint 13', 'settingsDrawer', 'menuBtn', 'הגדרות', 'צלצול',
+    'רטט חוזר', 'alert_sound', 'alert_vibe', 'data-theme',
+    '0006_sprint13_alerts.sql', 'v19'
   ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;

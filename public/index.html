@@ -26,7 +26,7 @@
 <!-- ?v= MUST match CACHE_VERSION in sw.js. GitHub Pages serves these with
      max-age=600 and no content hash, so without the query an installed phone
      can keep serving the previous build out of its own HTTP cache. -->
-<link rel="stylesheet" href="styles.css?v=v18">
+<link rel="stylesheet" href="styles.css?v=v19">
 </head>
 <body>
 
@@ -58,6 +58,15 @@
   <main class="main">
 
     <header class="topbar">
+      <!-- Sprint 13 — THE HEADER IS TWO CONTROLS.
+           Until now this row carried four pills (🔔 / 🔊 / 📅 / ☁), a Google
+           readout line under them and a 🗑 pill in the filter strip below —
+           six competing affordances above a screen whose actual job is to
+           answer "what do I owe today". Every one of them still exists, and
+           every one of them is still the SAME element with the same id and the
+           same handler: they were MOVED into the settings drawer, not rebuilt.
+           What is left here is the title, the cloud badge (a status light, not
+           a menu) and ☰. -->
       <div class="topbar-row">
         <div class="topbar-title">
           <h1 id="viewTitle">היום שלי</h1>
@@ -69,32 +78,14 @@
           <span class="sync-ico" id="syncIco" aria-hidden="true">🔴</span>
           <span class="sync-label" id="syncLabel">אופליין</span>
         </button>
-        <button class="push-btn" id="pushBtn" type="button" aria-pressed="false">
-          <span class="push-ico" id="pushIco" aria-hidden="true">🔔</span>
-          <span class="push-label" id="pushLabel">הפעל התראות פוש</span>
+        <!-- ☰ — LAST in the row on purpose: the document is RTL, so the last
+             flex item is the one that lands on the visual LEFT edge. -->
+        <button class="menu-btn" id="menuBtn" data-action="settings" type="button"
+                aria-haspopup="dialog" aria-expanded="false" aria-controls="settingsDrawer"
+                aria-label="הגדרות" title="הגדרות">
+          <span class="menu-ico" aria-hidden="true">☰</span>
         </button>
-        <!-- צליל תזכורת — a separate vote from the notifications themselves: a
-             phone on a desk that only vibrates has not been notified. Tapping
-             it is also the gesture that unlocks the AudioContext. -->
-        <button class="push-btn sound-btn is-on" id="soundBtn" type="button" aria-pressed="true">
-          <span class="push-ico" id="soundIco" aria-hidden="true">🔊</span>
-          <span class="push-label" id="soundLabel">צליל תזכורת פעיל</span>
-        </button>
-        <!-- Google Calendar two-way sync — connect, then tap to run a cycle -->
-        <button class="gcal-btn is-off" id="gcalBtn" type="button"
-                data-gcalstate="off" aria-pressed="false" title="התחבר ל-Google Calendar">
-          <span class="gcal-ico" id="gcalIco" aria-hidden="true">📅</span>
-          <span class="gcal-label" id="gcalLabel">התחבר ל-Google Calendar</span>
-        </button>
-        <span class="avatar avatar-sm topbar-avatar" aria-hidden="true">ב</span>
       </div>
-
-      <!-- "סונכרן לאחרונה מול גוגל: HH:MM" — cached locally, so it still reads
-           correctly with no network -->
-      <p class="gcal-sync" id="gcalSync" aria-live="polite" hidden>
-        <span id="gcalSyncText"></span>
-        <button class="gcal-unlink" id="gcalUnlink" type="button" hidden>ניתוק</button>
-      </p>
 
       <!-- Global category filter · shares its row with the multi-select gate -->
       <div class="filter-row">
@@ -107,13 +98,6 @@
         <button class="select-btn" id="selectBtn" data-action="select-mode" type="button" aria-pressed="false">
           <span class="select-ico" aria-hidden="true">☑</span>
           <span class="select-label" id="selectLabel">בחירה מרובה</span>
-        </button>
-        <!-- סל מחזור — every deletion waits here 10 days before it is final -->
-        <button class="trash-btn" id="trashBtn" data-action="trash" type="button"
-                aria-haspopup="dialog" aria-label="סל מחזור">
-          <span class="trash-ico" aria-hidden="true">🗑</span>
-          <span class="trash-label">סל מחזור</span>
-          <b class="trash-count" id="trashCount" hidden>0</b>
         </button>
       </div>
     </header>
@@ -543,6 +527,138 @@
   <div class="sheet-tail"></div>
 </aside>
 
+<!-- ============ הגדרות — THE SETTINGS DRAWER (Sprint 13 · mandate §1–§2) ====
+     Slides in from the LEFT (the far edge in an RTL document) behind the ☰ in
+     the header. Everything that used to be a pill in the top bar lives here —
+     the SAME elements, moved: #pushBtn, #soundBtn, #gcalBtn, #gcalSync and
+     #trashBtn kept their ids and their handlers, so no wiring was rebuilt and
+     nothing in the app has two places that can disagree about one fact. -->
+<aside class="settings" id="settingsDrawer" role="dialog" aria-modal="true"
+       aria-labelledby="settingsTitle" hidden>
+  <div class="st-head">
+    <h2 id="settingsTitle">☰ הגדרות</h2>
+    <button class="sheet-x" data-action="close-settings" type="button" aria-label="סגירת ההגדרות">✕</button>
+  </div>
+
+  <!-- ---------- 1. התראות, צלילים ורטט ---------- -->
+  <section class="st-sec" aria-labelledby="stSecAlerts">
+    <h3 class="st-sec-title" id="stSecAlerts">🔔 התראות, צלילים ורטט</h3>
+
+    <div class="st-rows">
+      <button class="push-btn st-pill" id="pushBtn" type="button" aria-pressed="false">
+        <span class="push-ico" id="pushIco" aria-hidden="true">🔔</span>
+        <span class="push-label" id="pushLabel">הפעל התראות פוש</span>
+      </button>
+      <!-- צליל תזכורת — a separate vote from the notifications themselves: a
+           phone on a desk that only vibrates has not been notified. Tapping
+           it is also the gesture that unlocks the AudioContext. -->
+      <button class="push-btn sound-btn st-pill is-on" id="soundBtn" type="button" aria-pressed="true">
+        <span class="push-ico" id="soundIco" aria-hidden="true">🔊</span>
+        <span class="push-label" id="soundLabel">צליל תזכורת פעיל</span>
+      </button>
+    </div>
+
+    <!-- צליל התראה (קצר) -->
+    <div class="st-field">
+      <label class="field-label" for="setShortSound">צליל התראה (קצר)</label>
+      <select class="select" id="setShortSound" data-setpick="shortSound"></select>
+      <div class="st-acts">
+        <button class="mini" data-setplay="short" type="button">▶ נגן</button>
+        <button class="mini" data-setdefault="shortSound" type="button">↺ ברירת מחדל</button>
+      </div>
+    </div>
+
+    <!-- צלצול (ארוך, ~10 שניות) -->
+    <div class="st-field">
+      <label class="field-label" for="setLongSound">צלצול ארוך (כ־10 שניות)</label>
+      <select class="select" id="setLongSound" data-setpick="longSound"></select>
+      <div class="st-acts">
+        <button class="mini" data-setplay="long" type="button">▶ נגן</button>
+        <button class="mini" data-setplay="stop" type="button">■ עצור</button>
+        <button class="mini" data-setdefault="longSound" type="button">↺ ברירת מחדל</button>
+      </div>
+    </div>
+
+    <!-- סוג הרטט -->
+    <div class="st-field">
+      <label class="field-label" for="setVibe">סוג רטט בהתראה</label>
+      <select class="select" id="setVibe" data-setpick="vibe"></select>
+      <div class="st-acts">
+        <button class="mini" data-setplay="vibe" type="button">▶ נסה</button>
+        <button class="mini" data-setdefault="vibe" type="button">↺ ברירת מחדל</button>
+      </div>
+    </div>
+
+    <!-- רטט במגע — the V check and every button tap -->
+    <button class="st-toggle" id="hapticsBtn" data-settoggle="haptics" type="button" aria-pressed="true">
+      <span class="st-toggle-text">
+        <b>רטט במגע</b>
+        <small id="hapticsHint">רטט קצר בכל לחיצה ובכל סימון V</small>
+      </span>
+      <span class="st-switch" aria-hidden="true"></span>
+    </button>
+  </section>
+
+  <!-- ---------- 2. סנכרון וחשבונות ---------- -->
+  <section class="st-sec" aria-labelledby="stSecSync">
+    <h3 class="st-sec-title" id="stSecSync">☁ סנכרון וחשבונות</h3>
+
+    <!-- Google Calendar two-way sync — connect, then tap to run a cycle -->
+    <button class="gcal-btn st-pill is-off" id="gcalBtn" type="button"
+            data-gcalstate="off" aria-pressed="false" title="התחבר ל-Google Calendar">
+      <span class="gcal-ico" id="gcalIco" aria-hidden="true">📅</span>
+      <span class="gcal-label" id="gcalLabel">התחבר ל-Google Calendar</span>
+    </button>
+
+    <!-- "סונכרן לאחרונה מול גוגל: HH:MM" — cached locally, so it still reads
+         correctly with no network -->
+    <p class="gcal-sync" id="gcalSync" aria-live="polite" hidden>
+      <span id="gcalSyncText"></span>
+      <button class="gcal-unlink" id="gcalUnlink" type="button" hidden>ניתוק</button>
+    </p>
+
+    <p class="st-status" id="setSyncState" aria-live="polite"></p>
+    <button class="mini st-wide" data-setsync="now" type="button">☁ סנכרן עכשיו</button>
+  </section>
+
+  <!-- ---------- 3. נתונים וארכיון ---------- -->
+  <section class="st-sec" aria-labelledby="stSecData">
+    <h3 class="st-sec-title" id="stSecData">🗂 נתונים וארכיון</h3>
+    <!-- סל מחזור — every deletion waits here 10 days before it is final -->
+    <button class="trash-btn st-pill" id="trashBtn" data-action="trash" type="button"
+            aria-haspopup="dialog" aria-label="סל מחזור (10 ימים)">
+      <span class="trash-ico" aria-hidden="true">🗑</span>
+      <span class="trash-label">סל מחזור (10 ימים)</span>
+      <b class="trash-count" id="trashCount" hidden>0</b>
+    </button>
+    <button class="trash-btn st-pill" data-action="archive-log" type="button">
+      <span class="trash-ico" aria-hidden="true">✓</span>
+      <span class="trash-label">יומן היסטוריה</span>
+    </button>
+  </section>
+
+  <!-- ---------- 4. מראה ועיצוב ---------- -->
+  <section class="st-sec" aria-labelledby="stSecLook">
+    <h3 class="st-sec-title" id="stSecLook">🎨 מראה ועיצוב</h3>
+    <div class="segmented st-themes" role="group" aria-label="ערכת נושא">
+      <button class="seg is-active" data-settheme="dark"   type="button" aria-pressed="true">🌙 כהה</button>
+      <button class="seg"           data-settheme="light"  type="button" aria-pressed="false">☀ בהיר</button>
+      <button class="seg"           data-settheme="system" type="button" aria-pressed="false">⚙ מערכת</button>
+    </div>
+    <p class="st-status" id="setThemeHint" aria-live="polite"></p>
+    <p class="st-status" id="setMotionHint"></p>
+  </section>
+
+  <!-- ---------- 5. אודות ---------- -->
+  <section class="st-sec" aria-labelledby="stSecAbout">
+    <h3 class="st-sec-title" id="stSecAbout">ℹ אודות</h3>
+    <p class="st-status" id="setVersion"></p>
+    <p class="st-status" id="setHealth" aria-live="polite"></p>
+  </section>
+
+  <div class="sheet-tail"></div>
+</aside>
+
 <!-- ============ BATCH ACTION BAR (multi-select) ============
      Sits above the bottom bar and only exists while a selection does. -->
 <div class="batchbar" id="batchBar" role="toolbar" aria-label="פעולות על הפריטים שנבחרו" hidden>
@@ -559,6 +675,6 @@
   <button class="toast-undo" id="toastUndo" data-undo="1" type="button" hidden>אחזר</button>
 </div>
 
-<script src="app.js?v=v18"></script>
+<script src="app.js?v=v19"></script>
 </body>
 </html>

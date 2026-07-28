@@ -1,6 +1,14 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Field wave shipped (§7.4l) — **the PWA update path**: `controllerchange` now
+> **Status:** Sprint 13 shipped (§7.4o) — **the hamburger settings drawer**: the top bar is
+> down to a title, the cloud badge and `☰`; every pill it carried (`#pushBtn`, `#soundBtn`,
+> `#gcalBtn`, `#gcalSync`, `#trashBtn`) is the same element moved into `#settingsDrawer`;
+> reminders now carry their own `alert_sound` / `alert_vibe` (a short tone or a ~10-second
+> `צלצול`, and `רטט קצר / ארוך / חוזר`); `רטט במגע` silences taps and never a reminder; and
+> `data-theme` on `<html>` carries a resolved כהה / בהיר / לפי המערכת palette. v19.
+> Sprint 12 before it (§7.4n) — multiple reminders per record, the "פתוחות" sheet and the
+> detail reader, v18.
+> Field wave before that (§7.4l) — **the PWA update path**: `controllerchange` now
 > reloads the page onto new code, a waiting worker is adopted, a resumed app re-checks for a
 > version, cache reads are scoped to `CACHE_NAME`, and `index.html` busts `app.js`/`styles.css`
 > against `CACHE_VERSION`. This is why the phone kept showing v13 with v14 deployed, v0.9.2.
@@ -1627,6 +1635,134 @@ asserted for each thing the mandate lists; `Detail.act('done')` driven through t
 dispatcher's parser proven identical to the client's over twelve inputs and its per-reminder ledger
 keys proven distinct; and migration 0005 proven append-only with `remind_key` still trailing all
 three schema listings.
+
+### 7.4o The hamburger settings drawer, the header cleanup, dual sounds & custom haptics (shipped — Sprint 13)
+
+Field mandate, after using the app on a phone for a week: *"the top bar is a wall of icons; I
+want one menu; and a reminder for a client call should be able to RING for ten seconds, not
+tick like a shopping list."* Everything below is pinned by execution in `healthcheck.js` §45
+rather than by inspection, and the shell ships as **v19** on both cache-busted URLs.
+
+#### §1 The header is two controls
+
+The top bar had grown to four pills (🔔 / 🔊 / 📅 / ☁), a Google readout line beneath them and
+a 🗑 pill in the filter strip — six affordances competing with the one question "היום שלי"
+exists to answer. Every one of them was reachable and none of them was findable.
+
+What is left is the **title**, the **cloud badge** (a status light, not a menu) and **☰
+הגדרות** (`#menuBtn`). The hamburger is the LAST child of `.topbar-row` on purpose: the
+document is `dir="rtl"`, so the last flex item is the one that lands on the visual left edge
+the mandate asks for. It carries `aria-haspopup="dialog"` and `aria-controls="settingsDrawer"`,
+so the panel behind it is announced rather than merely present.
+
+**Nothing was deleted and nothing was rebuilt.** `#pushBtn`, `#soundBtn`, `#gcalBtn`,
+`#gcalSync` and `#trashBtn` are the SAME elements with the same ids inside `#settingsDrawer`,
+so `Notify.paint()`, `GCal.paint()` and `renderTrash()` still own exactly the state they owned
+before and no fact in the app gained a second owner. §45a asserts both halves at once: the
+five ids are absent from `<header class="topbar">` **and** present inside the drawer, with
+their handlers still bound by the same selectors in `app.js`.
+
+#### §2 The drawer
+
+`.settings` — a bottom sheet under 900px, a real **left-anchored** side panel above it (the
+anchor is written physically, because "slide out from the left" is a direction on the glass,
+not a direction in the text). Five sections:
+
+| Section | Holds |
+|---|---|
+| 🔔 התראות, צלילים ורטט | the push toggle, the chime toggle, **צליל התראה** (short-tone picker), **צלצול ארוך (כ־10 שניות)** (ringtone picker), the vibration-pattern picker, each with ▶ נגן and ↺ ברירת מחדל, and the **רטט במגע** switch |
+| ☁ סנכרון וחשבונות | the Google Calendar button and its last-sync readout, the cloud state spelled out, and **סנכרן עכשיו** |
+| 🗂 נתונים וארכיון | **סל מחזור (10 ימים)** and **יומן היסטוריה** |
+| 🎨 מראה ועיצוב | כהה / בהיר / לפי המערכת, plus what the OS is currently asking for |
+| ℹ אודות | the shipped version and a live health readout |
+
+`Settings.paint()` only paints what is genuinely its own. The drawer counts as a layer:
+`Select.tap()` and the long-press binder both decline `.settings`, `anySheetOpen()` counts it,
+and `closeSheets()` — the one door every layer in the app closes through — shuts it, which is
+also what stops a ten-second ringtone auditioned in the panel from outliving the panel.
+
+#### §3 The dual-sound engine
+
+Two families, because they answer two different questions:
+
+- **a short tone** — *something wants you*. Under a second, so it can land mid-sentence.
+- **a long ring** — *answer me*. `LONG_MS = 10000`, a motif re-scheduled every `cycle`
+  seconds until the ceiling is used up.
+
+Both are **synthesised**, for the same reason the Sprint-10 chime was: an `.mp3` would be a
+tenth asset in the service-worker shell, a second thing to cache-bust, and a 404 away from
+silence. A voice is a small declarative spec — the frequencies, the spacing, the decay — and
+`Chime.voice()` renders any of them through the one oscillator path that already existed.
+Four short presets (`bell` · `chime` · `ping` · `soft`) and three ringtones
+(`classic` · `pulse` · `rise`).
+
+The whole 10 seconds is scheduled in **one pass** rather than on a timer, so a backgrounded
+tab — where timers are throttled to seconds — still rings on the beat, and `Chime.stop()` can
+cut every oscillator at once because it holds them all.
+
+#### §4 What the record carries, and what the drawer carries
+
+The split is deliberate:
+
+- **the record** names a **family** — `alert_sound` ∈ `none | short | long`,
+  `alert_vibe` ∈ `none | short | long | repeat`.
+- **the drawer** names **which preset** each family plays.
+
+So a record can never point at a preset a later build stops shipping, and "the client call
+rings, the shopping reminder ticks" is a property of the thing being reminded about rather
+than a mode the whole app is in. The task, event and note forms all grow an
+**אפשרויות התראה** panel with the two rows the mandate spells out, and choosing an option
+**previews** it — the tap is a real gesture, so the autoplay policy allows it, and hearing the
+difference is the only way to choose without saving first. The detail reader states the pair
+by name, because two records that ring completely differently look identical on a card.
+
+`migrations/0006_sprint13_alerts.sql` is append-only and adds `alert_sound` / `alert_vibe` to
+`events`, `tasks` and `notes`, trailing every column the five migrations before it declared.
+Both are **preserve-if-blank** on the Worker side and the client never emits `''` — a muted
+record says `'none'` — so `/api/gcal/sync`, which writes whole event rows built from a Google
+payload that knows nothing about this vocabulary, cannot null the choice on an inbound edit.
+An unknown value normalises back to the default on every read path on both ends, because a
+forward-compatible vocabulary that muted a record it could not parse would drop reminders
+invisibly.
+
+#### §5 Custom haptics
+
+`VIBE_PATTERN` gives each kind a real `navigator.vibrate` pattern — **רטט קצר** `[140]`,
+**רטט ארוך** `[650]`, **רטט חוזר** `[180,120,…]` — and `Haptics.pattern()` is the one new
+caller of the one guarded call site established in Sprint 7.
+
+**רטט במגע** governs the app's own touch feel and *nothing else*: `Haptics.light()`,
+`.done()` and `.check()` consult it, `Haptics.pattern()` deliberately does not. Silencing the
+interface must never silence the notification — a user who finds tap feedback annoying has
+not asked to stop being told about meetings. It defaults ON, and defaults ON with no store at
+all, because a pulse fired before `Store.load()` must not be swallowed.
+
+#### §6 Theme
+
+`data-theme` is written onto `<html>` and only ever holds a **resolved** palette: *לפי המערכת*
+is a question the app asks `prefers-color-scheme` and re-asks when the OS flips, never a third
+value the stylesheet has to understand. The light palette lives in `:root` as a second
+`--l-*` set and the override block is pure `var()`-to-`var()`, so §4's *no colour literal
+outside `:root`* keeps holding. The accent is **deepened rather than reused**: `#e4c278` on
+paper is roughly 1.8:1, so a light theme that kept the mandated gold would fail the 4.5:1
+floor on every gold label in the app.
+
+#### §7 Verification
+
+`healthcheck.js` §45 adds 24 checks and drives the sprint head-lessly. The two that matter
+most are executed rather than pattern-matched: a **stub `AudioContext` counts the oscillators
+a ten-second ringtone schedules** and asserts the last note starts inside the ceiling and that
+`stop()` kills every one of them; and a **stub motor records the exact pattern** each
+vibration kind fires, including that the touch-feedback switch silences `light()`/`check()`/
+`done()` and leaves `pattern()` alone. Around them: the header asserted empty of all five
+moved ids and the drawer asserted full of them, the ☰ proven to be the last item in its row,
+the drawer opened and closed through `Settings.toggle()` and `closeSheets()` against a live
+DOM stub, the five sections and their controls, the record pair round-tripped through the
+store → `toRow` → `validRow` → `fromRow`, migration 0006 proven append-only with the pair
+trailing all three schema listings, `PRESERVE_IF_BLANK` proven to cover it on all three
+tables, `TO_FORM`/`applyEdit` proven to carry an edit and a picker-less form proven NOT to
+reset one, `Notify.due()` proven to hand the record's own pair to `show()`, and the theme
+resolved in both directions against a stubbed `matchMedia`.
 
 ### 7.4 General layout
 

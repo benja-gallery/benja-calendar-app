@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v18';  // Sprint 12 — multi-reminders, open-items sheet, detail reader
+var CACHE_VERSION = 'v19';  // Sprint 13 — settings drawer, header cleanup, dual sounds, haptics
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */

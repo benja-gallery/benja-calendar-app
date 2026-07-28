@@ -62,11 +62,112 @@
 
   --rail-w: 244px;
   --drawer-w: 460px;              /* client file — full-width sheet on mobile */
+  --set-w: 400px;                 /* settings — full-width sheet on mobile too */
   --bar-h: 68px;
   --hour-h: 56px;                 /* day-view hour row — mirrors HOUR_PX in app.js */
   --safe-b: env(safe-area-inset-bottom, 0px);
 
   --ff: "Assistant", "Rubik", "Heebo", "Segoe UI", system-ui, -apple-system, sans-serif;
+
+  /* --- מראה ועיצוב · the light palette (Sprint 13) -------------------------
+     Every literal in this file still lives in :root, so the theme override
+     below is nothing but var() plumbing. The dark palette above is untouched
+     and is still the mandated one (PROJECT_PLAN §7.0) — this is a SECOND set,
+     named --l-*, that the [data-theme="light"] block swaps in wholesale.
+
+     The accent is deepened rather than reused: #e4c278 on paper is roughly
+     1.8:1, so a light theme that kept it would fail the 4.5:1 floor on every
+     piece of gold text in the app. The hue is the same champagne, taken down
+     until it clears the bar. */
+  --l-surface:       #f5f2ea;
+  --l-card:          #ffffff;
+  --l-card-2:        #efeade;
+  --l-ink:           #1b2130;
+  --l-muted:         #4f5a70;
+  --l-faint:         #6f7a8d;
+  --l-gold:          #86651a;
+  --l-business:      #2b66b4;
+  --l-personal:      #23794a;
+  --l-danger:        #b23a24;
+  --l-waiting:       #9c6b07;
+  --l-progress:      #3a67a4;
+
+  --l-line:          rgba(134,101,26,.26);
+  --l-line-soft:     rgba(27,33,48,.10);
+  --l-gold-soft:     rgba(134,101,26,.12);
+  --l-gold-edge:     rgba(134,101,26,.34);
+  --l-business-soft: rgba(43,102,180,.12);
+  --l-personal-soft: rgba(35,121,74,.12);
+  --l-danger-soft:   rgba(178,58,36,.12);
+  --l-waiting-soft:  rgba(156,107,7,.14);
+  --l-waiting-edge:  rgba(156,107,7,.45);
+  --l-waiting-glow:  0 0 0 3px rgba(156,107,7,.12);
+  --l-progress-soft: rgba(58,103,164,.14);
+  --l-muted-soft:    rgba(79,90,112,.12);
+  --l-personal-edge: rgba(35,121,74,.42);
+  --l-business-edge: rgba(43,102,180,.42);
+  --l-danger-edge:   rgba(178,58,36,.45);
+  --l-danger-glow:   0 0 0 3px rgba(178,58,36,.12);
+
+  --l-shadow:        0 18px 40px rgba(27,33,48,.16);
+  --l-shadow-sm:     0 8px 20px rgba(27,33,48,.10);
+  --l-glow-gold:     0 10px 22px rgba(134,101,26,.20);
+  --l-glow-fab:      0 14px 30px rgba(134,101,26,.20);
+  --l-bar-bg:        rgba(245,242,234,.94);
+  --l-scrim:         rgba(27,33,48,.38);
+}
+
+/* ==========================================================================
+   מראה ועיצוב — the theme switch (Sprint 13 · mandate §2d)
+
+   `data-theme` is written onto <html> by APP.settings.Settings.applyTheme().
+   It only ever holds a RESOLVED palette: "לפי המערכת" is a question the app
+   asks prefers-color-scheme and re-asks when the OS flips, never a third value
+   that reaches the DOM. Every rule below is var()-to-var(), so no colour
+   literal exists outside :root and the whole app re-tints from one attribute.
+   ========================================================================== */
+
+html[data-theme="light"]{
+  --surface:       var(--l-surface);
+  --card:          var(--l-card);
+  --card-2:        var(--l-card-2);
+  --ink:           var(--l-ink);
+  --muted:         var(--l-muted);
+  --faint:         var(--l-faint);
+  --gold:          var(--l-gold);
+  --business:      var(--l-business);
+  --personal:      var(--l-personal);
+  --danger:        var(--l-danger);
+  --waiting:       var(--l-waiting);
+  --progress:      var(--l-progress);
+
+  --line:          var(--l-line);
+  --line-soft:     var(--l-line-soft);
+  --gold-soft:     var(--l-gold-soft);
+  --gold-edge:     var(--l-gold-edge);
+  --business-soft: var(--l-business-soft);
+  --personal-soft: var(--l-personal-soft);
+  --danger-soft:   var(--l-danger-soft);
+  --waiting-soft:  var(--l-waiting-soft);
+  --waiting-edge:  var(--l-waiting-edge);
+  --waiting-glow:  var(--l-waiting-glow);
+  --progress-soft: var(--l-progress-soft);
+  --muted-soft:    var(--l-muted-soft);
+  --personal-edge: var(--l-personal-edge);
+  --business-edge: var(--l-business-edge);
+  --danger-edge:   var(--l-danger-edge);
+  --danger-glow:   var(--l-danger-glow);
+
+  --shadow:        var(--l-shadow);
+  --shadow-sm:     var(--l-shadow-sm);
+  --glow-gold:     var(--l-glow-gold);
+  --glow-fab:      var(--l-glow-fab);
+  --bar-bg:        var(--l-bar-bg);
+  --scrim:         var(--l-scrim);
+
+  /* finished work still recedes, but paper needs less of a drop than ink does
+     to read as "done" without falling under the contrast floor */
+  --dim-done: .62;
 }
 
 *,*::before,*::after{ box-sizing:border-box; }
@@ -163,7 +264,9 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
   background:var(--card-2); border:1px solid var(--gold-edge);
   color:var(--gold); font-weight:700;
 }
-.avatar-sm{ width:36px; height:36px; flex-basis:36px; font-size:14px; }
+/* Sprint 13 removed the header's own avatar with the rest of the top-bar
+   clutter; the rail still carries the identity, and .avatar-sm / .topbar-avatar
+   went with the element they styled. */
 
 /* ==========================================================================
    Top bar
@@ -178,7 +281,6 @@ button, .tap{ min-height:var(--tap); min-width:var(--tap); }
 .topbar-title{ min-width:0; flex:1 1 auto; }
 .topbar-title h1{ font-size:22px; font-weight:800; letter-spacing:-.2px; }
 .topbar-sub{ color:var(--faint); font-size:13px; margin-top:2px; }
-.topbar-avatar{ flex:0 0 auto; }
 
 /* ---------- push notification toggle ---------- */
 .push-btn{
@@ -1946,6 +2048,127 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
 }
 
 /* ==========================================================================
+   ☰ הגדרות — the settings drawer (Sprint 13 · mandate §1–§2)
+
+   The header used to carry four pills, a Google readout and a 🗑. All of them
+   are still the same elements with the same ids — they were moved in here and
+   given .st-pill, which strips the margin the header stack gave them and lets
+   them fill a row instead of competing for one.
+   ========================================================================== */
+
+.menu-btn{
+  flex:0 0 auto;
+  display:inline-grid; place-items:center;
+  width:var(--tap); min-width:var(--tap);
+  height:var(--tap); min-height:var(--tap);
+  background:var(--card-2); border:1px solid var(--line-soft);
+  border-radius:var(--r-md);
+  color:var(--muted);
+  transition:color .18s, background .18s, border-color .18s;
+}
+.menu-btn:hover{ color:var(--gold); border-color:var(--gold-edge); }
+.menu-btn[aria-expanded="true"]{
+  color:var(--gold); background:var(--gold-soft); border-color:var(--gold-edge);
+}
+.menu-ico{ font-size:19px; line-height:1; }
+
+.settings{
+  position:fixed; z-index:58;
+  inset-inline:0; bottom:0;
+  max-height:92vh; overflow-y:auto;
+  padding:8px 16px calc(18px + var(--safe-b));
+  background:var(--card);
+  border-top:1px solid var(--line);
+  border-radius:var(--r-xl) var(--r-xl) 0 0;
+  box-shadow:var(--shadow);
+  animation:slideUp .26s cubic-bezier(.2,.8,.25,1) both;
+}
+.settings[hidden]{ display:none; }
+
+.st-head{
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  margin:4px 0 14px;
+}
+.st-head h2{ font-size:19px; font-weight:800; }
+
+.st-sec{
+  padding:14px; margin-bottom:12px;
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:var(--r-md);
+}
+.st-sec-title{ margin-bottom:12px; font-size:14px; font-weight:800; color:var(--gold); }
+
+/* the moved header pills: no header margin, one per row, label-first */
+.st-rows{ display:flex; flex-direction:column; gap:8px; margin-bottom:12px; }
+/* the narrow-phone breakpoint squares these pills and drops their labels so
+   they survive a 320px header — inside the drawer there is a whole row each,
+   so every one of those compactions is undone here (later in the file, so it
+   wins at equal specificity) */
+.st-pill{
+  margin-top:0;
+  width:100%; min-width:0;
+  padding:0 14px;
+  justify-content:flex-start;
+}
+.st-sec .gcal-btn.st-pill{ margin-bottom:8px; }
+.st-sec .trash-btn.st-pill + .trash-btn.st-pill{ margin-top:8px; }
+/* the pill labels never collapse in here — there is room, and a bare glyph in
+   a settings list is a riddle rather than a control */
+.st-pill .push-label, .st-pill .gcal-label, .st-pill .trash-label{ display:inline; }
+
+.st-field{ margin-bottom:14px; }
+.st-field:last-child{ margin-bottom:0; }
+.st-acts{ display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+.st-wide{ width:100%; margin-top:10px; }
+.st-status{ margin-top:8px; color:var(--faint); font-size:12.5px; line-height:1.6; }
+
+/* ---------- רטט במגע — the one real switch in the app ---------- */
+.st-toggle{
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  width:100%; padding:10px 12px; min-height:var(--tap);
+  background:var(--card-2); border:1px solid var(--line-soft);
+  border-radius:var(--r-md);
+  color:var(--muted); text-align:start;
+  transition:color .18s, border-color .18s;
+}
+.st-toggle:hover{ border-color:var(--gold-edge); }
+.st-toggle.is-on{ color:var(--ink); border-color:var(--gold-edge); }
+.st-toggle-text{ display:flex; flex-direction:column; gap:3px; min-width:0; }
+.st-toggle-text b{ font-size:13.5px; font-weight:800; }
+.st-toggle-text small{ font-size:11.5px; color:var(--faint); line-height:1.5; }
+
+.st-switch{
+  position:relative; flex:0 0 auto;
+  width:46px; height:26px;
+  border-radius:999px;
+  background:var(--muted-soft); border:1px solid var(--line-soft);
+  transition:background .18s, border-color .18s;
+}
+.st-switch::after{
+  content:""; position:absolute; top:3px; inset-inline-start:3px;
+  width:18px; height:18px; border-radius:50%;
+  background:var(--faint);
+  transition:transform .18s, background .18s;
+}
+.st-toggle.is-on .st-switch{ background:var(--gold-soft); border-color:var(--gold-edge); }
+/* the anchor is logical (inline-start) but the travel is physical, and the
+   document is always dir="rtl" — so "on" moves the knob leftward */
+.st-toggle.is-on .st-switch::after{ background:var(--gold); transform:translateX(-20px); }
+
+.st-themes{ margin-top:0; }
+
+/* ==========================================================================
+   Alert options — the dual-sound & vibration picker inside the form (§3)
+   ========================================================================== */
+
+.al-hint{ margin-bottom:10px; color:var(--faint); font-size:12px; line-height:1.6; }
+.al-row{ display:flex; align-items:center; gap:10px; margin-bottom:8px; }
+.al-cap{ flex:0 0 32px; color:var(--muted); font-size:12px; font-weight:700; }
+.al-row .segmented{ flex:1 1 auto; min-width:0; margin-top:0; }
+.al-row .seg{ padding:9px 5px; font-size:12px; }
+.al-summary{ margin-top:6px; }
+
+/* ==========================================================================
    Desktop
    ========================================================================== */
 
@@ -1963,7 +2186,6 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
 
   .main{ padding:0 28px 80px; }
   .tabbar{ display:none; }
-  .topbar-avatar{ display:none; }
 
   .fab{
     inset-inline-start:auto; inset-inline-end:34px;
@@ -1994,6 +2216,20 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
     animation:slideIn .26s cubic-bezier(.2,.8,.25,1) both;
   }
   @keyframes slideIn{ from{ transform:translateX(-100%); } to{ transform:none; } }
+
+  /* ...and the settings drawer becomes a real LEFT side panel. The anchor is
+     written physically on purpose: the mandate asks for "a slide-out from the
+     left", which is a direction on the glass, not a direction in the text. */
+  .settings{
+    left:0; right:auto; top:0; bottom:0;
+    inset-inline:auto;
+    width:var(--set-w); max-width:92vw; max-height:none;
+    padding:18px 22px 40px;
+    border-radius:0;
+    border-top:0; border-right:1px solid var(--line);
+    animation:slideLeft .26s cubic-bezier(.2,.8,.25,1) both;
+  }
+  @keyframes slideLeft{ from{ transform:translateX(-100%); } to{ transform:none; } }
 
   .client-cards{ display:grid; grid-template-columns:repeat(2,1fr); gap:14px; }
   .client-tabs .seg{ flex:1 1 0; font-size:13.5px; }

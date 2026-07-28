@@ -150,6 +150,82 @@
      autoplay policy — the AudioContext is unlocked from the first of them */
   var CHIME_GESTURES = ['pointerdown', 'touchstart', 'mousedown', 'keydown', 'click'];
 
+  /* ==========================================================================
+     The dual-sound engine (Sprint 13 · mandate §3–§4)
+
+     Two families, because they answer two different questions:
+
+       a SHORT tone   — "something wants you" (a task, a heads-up). Under a
+                        second, so it can fire while you are mid-sentence.
+       a LONG ring    — "answer me" (~10 seconds, a phone ringing on a desk).
+                        It repeats a motif until the ceiling and can be stopped.
+
+     Both are SYNTHESISED, for the same reason the Sprint-10 chime was: an .mp3
+     would be a binary in the service-worker shell, a second thing to
+     cache-bust, and a 404 away from silence. A voice is a small declarative
+     spec — the frequencies, the spacing, the decay — and Chime.voice() renders
+     any of them through the one oscillator path that already exists.
+     ========================================================================== */
+
+  /** the SHORT presets. `bell` is the Sprint-10 two-note chime, unchanged. */
+  var SHORT_SOUNDS = {
+    bell:  { label: 'פעמון (ברירת מחדל)', tones: CHIME_TONES,                     step: CHIME_STEP, tail: CHIME_TAIL, peak: 0.22 },
+    chime: { label: 'ג׳ינגל עולה',        tones: [659.25, 783.99, 987.77],        step: 0.12,       tail: 0.42,       peak: 0.20 },
+    ping:  { label: 'נקישה קצרה',          tones: [1318.51],                       step: 0.10,       tail: 0.22,       peak: 0.18 },
+    soft:  { label: 'רך ונמוך',            tones: [392, 523.25],                   step: 0.20,       tail: 0.70,       peak: 0.24 }
+  };
+  var SHORT_DEFAULT = 'bell';
+
+  /** the LONG presets — one motif, repeated on `cycle` seconds until LONG_MS */
+  var LONG_RINGS = {
+    classic: { label: 'צלצול קלאסי (ברירת מחדל)', tones: [880, 1174.66],                  step: 0.16, tail: 0.50, cycle: 1.25, peak: 0.26 },
+    pulse:   { label: 'פעימות',                     tones: [740],                           step: 0.18, tail: 0.30, cycle: 0.75, peak: 0.24 },
+    rise:    { label: 'סולם עולה',                   tones: [523.25, 659.25, 783.99, 1046.5], step: 0.13, tail: 0.40, cycle: 1.60, peak: 0.22 }
+  };
+  var LONG_DEFAULT = 'classic';
+  /** "~10 שניות" from the mandate, as a number both the engine and the copy use */
+  var LONG_MS = 10000;
+  /** ceiling on the live-oscillator list — well past one full long ring (≤24) */
+  var CHIME_LIVE_MAX = 64;
+
+  /* --- haptic patterns the user can choose between (mandate §2, §3) ---
+     Distinct from the Sprint-7 HAPTIC_* constants: those are the app's own
+     touch feel and are not configurable per record. These are what a REMINDER
+     does to the phone, and every one of them is a real navigator.vibrate
+     pattern — a single buzz, one long buzz, or a repeating burst. */
+  var VIBE_KINDS = ['none', 'short', 'long', 'repeat'];
+  var VIBE_LABEL = {
+    none: 'ללא רטט', short: 'רטט קצר', long: 'רטט ארוך', repeat: 'רטט חוזר'
+  };
+  var VIBE_PATTERN = {
+    none: null,
+    short: [140],
+    long: [650],
+    repeat: [180, 120, 180, 120, 180, 120, 180]
+  };
+  var VIBE_DEFAULT = 'short';
+
+  /* --- the per-record sound choice (mandate §3) ---
+     [ללא] | [צליל קצר] | [צלצול ארוך (~10 שניות)] — which FAMILY this record
+     announces itself with. WHICH tone inside the family is a global preference
+     (the settings drawer), so a record never has to name a preset that a later
+     version might not ship. */
+  var ALERT_SOUNDS = ['none', 'short', 'long'];
+  var ALERT_SOUND_LABEL = {
+    none: 'ללא', short: 'צליל קצר', long: 'צלצול ארוך (כ־10 שניות)'
+  };
+  var ALERT_SOUND_DEFAULT = 'short';
+
+  /* --- מראה ועיצוב (mandate §2d) ---
+     'system' is not a third palette: it is "ask the OS", resolved through
+     prefers-color-scheme at paint time and re-resolved when the OS flips. */
+  var THEMES = ['dark', 'light', 'system'];
+  var THEME_LABEL = { dark: '🌙 כהה', light: '☀ בהיר', system: '⚙ לפי המערכת' };
+  var THEME_DEFAULT = 'dark';
+
+  /** the shell version — MUST match CACHE_VERSION in sw.js and the ?v= in index.html */
+  var APP_VERSION = 'v19';
+
   /* --- client CRM (Sprint 4) --- */
   var CLIENT_STATUSES = ['lead', 'contacted', 'interested', 'quoted',
     'awaiting', 'meeting', 'won', 'irrelevant', 'past'];
@@ -221,16 +297,22 @@
       // and the Worker refuses to let a blank echo erase them.
       'google_event_id', 'etag', 'google_calendar_id',
       // Sprint 10 — the per-record reminder lead, appended by migration 0003
-      'remind_key'],
+      'remind_key',
+      // Sprint 13 — how this record announces itself, appended by migration 0006
+      'alert_sound', 'alert_vibe'],
     tasks: ['id', 'title', 'category', 'status', 'priority', 'due_date',
       'next_action', 'subtasks_json', 'client_id', 'updated_at', 'owner_id',
       'due_time', 'notes', 'created_at', 'deleted_at',
       // Sprint 10 — appended by migration 0003, so it trails every older column
-      'remind_key'],
+      'remind_key',
+      // Sprint 13 — appended by migration 0006, trailing that in turn
+      'alert_sound', 'alert_vibe'],
     lists: ['id', 'title', 'category', 'items_json', 'client_id',
       'updated_at', 'owner_id', 'list_date', 'created_at', 'deleted_at'],
     notes: ['id', 'title', 'body', 'category', 'is_pinned', 'client_id',
-      'updated_at', 'owner_id', 'created_at', 'deleted_at'],
+      'updated_at', 'owner_id', 'created_at', 'deleted_at',
+      // Sprint 13 — a note carries the pair too (mandate §3 names all three types)
+      'alert_sound', 'alert_vibe'],
     clients: ['id', 'name', 'phone', 'email', 'status', 'next_action',
       'initial_interest', 'updated_at', 'owner_id', 'category', 'budget',
       'next_action_at', 'follow_up_at', 'last_contact_at', 'general_notes',
@@ -401,18 +483,47 @@
       try { return navigator.vibrate(pattern) !== false; } catch (e) { return false; }
     },
 
+    /**
+     * Sprint 13 — "רטט במגע" from the settings drawer.
+     *
+     * This governs the app's own TOUCH feel (every tap, every ✓) and nothing
+     * else: a reminder still buzzes with whatever the record asked for, because
+     * silencing the interface must never silence the notification. Defaults ON,
+     * and defaults ON with no store at all — the store is loaded by init(), and
+     * a pulse fired before that must not be swallowed.
+     */
+    touchOn: function () {
+      var d = Store.data;
+      return !d || !d.prefs || d.prefs.haptics !== false;
+    },
+
     /** every button tap, tab switch and status toggle */
-    light: function () { return Haptics.fire(HAPTIC_LIGHT); },
+    light: function () {
+      return Haptics.touchOn() ? Haptics.fire(HAPTIC_LIGHT) : false;
+    },
 
     /** something completed — a task closed, a checklist filled up */
-    done: function () { return Haptics.fire(HAPTIC_DONE); },
+    done: function () {
+      return Haptics.touchOn() ? Haptics.fire(HAPTIC_DONE) : false;
+    },
 
     /**
      * The check circle specifically (Sprint 8): a dual pulse fired at the
      * START of the gesture, so the buzz lands with the ✓ being drawn rather
      * than after the card has already moved.
      */
-    check: function () { return Haptics.fire(HAPTIC_CHECK); }
+    check: function () {
+      return Haptics.touchOn() ? Haptics.fire(HAPTIC_CHECK) : false;
+    },
+
+    /**
+     * A REMINDER's pulse (mandate §2, §3): קצר / ארוך / חוזר, or nothing.
+     * Deliberately NOT gated on touchOn() — see above.
+     */
+    pattern: function (kind) {
+      var p = VIBE_PATTERN[normVibe(kind)];
+      return p ? Haptics.fire(p) : false;
+    }
   };
 
   /* ==========================================================================
@@ -524,6 +635,108 @@
         });
       } catch (e) { return false; }
       return true;
+    },
+
+    /* ======================================================================
+       Sprint 13 — the dual-sound engine (mandate §3–§4)
+       ====================================================================== */
+
+    /**
+     * Every oscillator currently scheduled, so a 10-second ring can be cut
+     * short. Bounded: an oscillator that has already finished is garbage the
+     * browser has collected, and a session that plays a hundred short tones
+     * must not hold a hundred dead handles. The cap comfortably exceeds one
+     * full long ring, which is the only thing stop() ever has to reach.
+     */
+    live: [],
+
+    /**
+     * Render ONE voice spec at `offset` seconds from now. Pure scheduling — it
+     * touches no preference and asks no permission, so both play paths and the
+     * settings preview go through exactly the same code.
+     */
+    voice: function (spec, offset) {
+      var ctx = Chime.context();
+      if (!ctx || !spec || !spec.tones || !spec.tones.length) return false;
+      var t0 = ctx.currentTime + (offset || 0);
+      var peak = spec.peak || 0.22;
+      spec.tones.forEach(function (freq, i) {
+        var osc = ctx.createOscillator();
+        var gain = ctx.createGain();
+        var at = t0 + i * spec.step;
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, at);
+        gain.gain.exponentialRampToValueAtTime(peak, at + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, at + spec.tail);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(at);
+        osc.stop(at + spec.tail + 0.02);
+        Chime.live.push(osc);
+      });
+      if (Chime.live.length > CHIME_LIVE_MAX) {
+        Chime.live.splice(0, Chime.live.length - CHIME_LIVE_MAX);
+      }
+      return true;
+    },
+
+    /** stop everything already scheduled — the ■ next to the long ringtone */
+    stop: function () {
+      var list = Chime.live;
+      Chime.live = [];
+      list.forEach(function (osc) {
+        try { osc.stop(); } catch (e) { /* already finished */ }
+      });
+      return list.length > 0;
+    },
+
+    /** one short tone, by preset name; falls back to the default preset */
+    playShort: function (name) {
+      if (!Chime.armed()) return false;
+      var ctx = Chime.context();
+      if (!ctx) return false;
+      try {
+        if (ctx.state === 'suspended' && typeof ctx.resume === 'function') ctx.resume();
+        return Chime.voice(SHORT_SOUNDS[normShortSound(name)], 0);
+      } catch (e) { return false; }
+    },
+
+    /**
+     * The ~10-second ringtone: the preset's motif, scheduled again every
+     * `cycle` seconds until LONG_MS is used up. Everything is scheduled in ONE
+     * pass rather than on a timer, so a backgrounded tab (where timers are
+     * throttled to seconds) still rings on the beat — and stop() can cut every
+     * oscillator at once because it holds them all.
+     */
+    playLong: function (name) {
+      if (!Chime.armed()) return false;
+      var ctx = Chime.context();
+      if (!ctx) return false;
+      try {
+        if (ctx.state === 'suspended' && typeof ctx.resume === 'function') ctx.resume();
+        Chime.stop();
+        var spec = LONG_RINGS[normLongSound(name)];
+        var seconds = LONG_MS / 1000;
+        var n = Math.max(1, Math.floor(seconds / spec.cycle));
+        for (var i = 0; i < n; i++) Chime.voice(spec, i * spec.cycle);
+      } catch (e) { return false; }
+      return true;
+    },
+
+    /**
+     * What a RECORD asked for. 'none' is a real answer and makes no sound at
+     * all — which is not the same as the global chime being off, and is why
+     * both votes are read here rather than merged somewhere upstream.
+     */
+    playAlert: function (kind) {
+      var want = normAlertSound(kind);
+      if (want === 'none') return false;
+      var prefs = (Store.data && Store.data.prefs) || null;
+      var chosen = prefs && prefs.sound ? prefs.sound : null;
+      return want === 'long'
+        ? Chime.playLong(chosen ? chosen.long : LONG_DEFAULT)
+        : Chime.playShort(chosen ? chosen.short : SHORT_DEFAULT);
     }
   };
 
@@ -813,6 +1026,7 @@
     t.subtasks = normItems(t.subtasks, 'st');
     t.done = t.status === 'done';
     setReminders(t, remindersOf(t));                         // Sprint 10 → 12
+    setAlert(t);                                             // Sprint 13
     return t;
   }
 
@@ -824,6 +1038,7 @@
   function migrateEvent(e) {
     if (!e || typeof e !== 'object') return e;
     setReminders(e, remindersOf(e));
+    setAlert(e);                                             // Sprint 13
     return e;
   }
 
@@ -838,7 +1053,68 @@
     if (!n || typeof n !== 'object') return n;
     n.pinned = !!n.pinned;
     n.body = typeof n.body === 'string' ? n.body : '';
+    setAlert(n);
     return n;
+  }
+
+  /* ------------------------------------ per-record alert options (Sprint 13) */
+
+  /**
+   * Sound and vibration are stored ON THE RECORD (mandate §3), so "the client
+   * call rings for ten seconds, the shopping reminder just ticks" is a property
+   * of the thing being reminded about rather than a mode the whole app is in.
+   *
+   * Every value is normalised on every read path, exactly like `category`: a
+   * store written before this sprint carries neither key, an unknown value can
+   * never crash a render, and the D1 column is preserve-if-blank so the
+   * serialiser never emits ''.
+   */
+  function normAlertSound(v) {
+    return ALERT_SOUNDS.indexOf(v) === -1 ? ALERT_SOUND_DEFAULT : v;
+  }
+
+  function normVibe(v) {
+    return VIBE_KINDS.indexOf(v) === -1 ? VIBE_DEFAULT : v;
+  }
+
+  /** which short preset the app plays — a global choice, not a per-record one */
+  function normShortSound(v) {
+    return SHORT_SOUNDS[v] ? v : SHORT_DEFAULT;
+  }
+
+  function normLongSound(v) {
+    return LONG_RINGS[v] ? v : LONG_DEFAULT;
+  }
+
+  /** the migrator every event / task / note goes through on load and on sync */
+  function setAlert(rec) {
+    if (!rec || typeof rec !== 'object') return rec;
+    rec.alertSound = normAlertSound(rec.alertSound);
+    rec.alertVibe = normVibe(rec.alertVibe);
+    return rec;
+  }
+
+  /**
+   * Write an edited form's pair back onto a record. A form that carries no
+   * alert picker (a list, a client) leaves the record's own pair alone rather
+   * than resetting it to the default — the same rule the reminder panel follows.
+   */
+  function setAlertFrom(rec, v) {
+    if (!rec || !v) return rec;
+    if (v.alertSound !== undefined) rec.alertSound = normAlertSound(v.alertSound);
+    if (v.alertVibe !== undefined) rec.alertVibe = normVibe(v.alertVibe);
+    return rec;
+  }
+
+  /** the pair, as the delivery path wants to read it */
+  function alertOf(rec) {
+    return { sound: normAlertSound(rec && rec.alertSound), vibe: normVibe(rec && rec.alertVibe) };
+  }
+
+  /** "צליל קצר · רטט חוזר" — one line for the detail reader and the form summary */
+  function alertSentence(rec) {
+    var a = alertOf(rec);
+    return ALERT_SOUND_LABEL[a.sound] + ' · ' + VIBE_LABEL[a.vibe];
   }
 
   /* ------------------------------------------------- reminders (Sprint 10) */
@@ -1381,7 +1657,13 @@
           notify: { on: false, lead: 10, sound: true, serverAt: '' }, fired: {},
           // Sprint 10 — "משימות קרובות" on My Day starts open: the whole point
           // of the widget is that nothing can hide inside it
-          upcomingOpen: true
+          upcomingOpen: true,
+          // Sprint 13 — the settings drawer. `sound` names WHICH preset each
+          // family plays; the record names WHICH FAMILY (mandate §3).
+          sound: { short: SHORT_DEFAULT, long: LONG_DEFAULT },
+          vibe: VIBE_DEFAULT,
+          haptics: true,
+          theme: THEME_DEFAULT
         },
         events: [], tasks: [], lists: [], notes: [], clients: [],
         // סל מחזור (Sprint 8) — deleted records wait here for ten days
@@ -1466,6 +1748,16 @@
       if (typeof d.prefs.notify.serverAt !== 'string') d.prefs.notify.serverAt = '';
       if (!d.prefs.fired || typeof d.prefs.fired !== 'object') d.prefs.fired = {};
       d.prefs.upcomingOpen = d.prefs.upcomingOpen !== false;
+
+      // Sprint 13 — the settings drawer's block, absent in every store written
+      // before it existed. Every value is normalised rather than trusted, so a
+      // preset this build no longer ships falls back instead of going silent.
+      if (!d.prefs.sound || typeof d.prefs.sound !== 'object') d.prefs.sound = {};
+      d.prefs.sound.short = normShortSound(d.prefs.sound.short);
+      d.prefs.sound.long = normLongSound(d.prefs.sound.long);
+      d.prefs.vibe = normVibe(d.prefs.vibe);
+      d.prefs.haptics = d.prefs.haptics !== false;      // touch feedback defaults ON
+      if (THEMES.indexOf(d.prefs.theme) === -1) d.prefs.theme = THEME_DEFAULT;
 
       // Sprint 5: the cloud block is absent in every pre-D1 store, and its
       // outbox is replayed from disk — a queued mutation survives a reload
@@ -1705,7 +1997,9 @@
         google_calendar_id: str(r.googleCalendarId),
         // Sprint 12 — a comma-joined token list, not a single key. 'none' when
         // muted, so the column is never '' and preserve-if-blank still holds.
-        remind_key: remindColumn(r)
+        remind_key: remindColumn(r),
+        // Sprint 13 — never '', for the same preserve-if-blank reason
+        alert_sound: normAlertSound(r.alertSound), alert_vibe: normVibe(r.alertVibe)
       };
     },
     tasks: function (r) {
@@ -1717,7 +2011,8 @@
         updated_at: toISOStamp(r.updatedAt), owner_id: str(r.ownerId) || OWNER.id,
         due_time: str(r.time), notes: str(r.notes),
         created_at: toISOStamp(r.createdAt), deleted_at: null,
-        remind_key: remindColumn(r)
+        remind_key: remindColumn(r),
+        alert_sound: normAlertSound(r.alertSound), alert_vibe: normVibe(r.alertVibe)
       };
     },
     lists: function (r) {
@@ -1733,7 +2028,8 @@
         id: r.id, title: str(r.title), body: str(r.body), category: normCat(r.category),
         is_pinned: r.pinned ? 1 : 0, client_id: str(r.clientId),
         updated_at: toISOStamp(r.updatedAt), owner_id: str(r.ownerId) || OWNER.id,
-        created_at: toISOStamp(r.createdAt), deleted_at: null
+        created_at: toISOStamp(r.createdAt), deleted_at: null,
+        alert_sound: normAlertSound(r.alertSound), alert_vibe: normVibe(r.alertVibe)
       };
     },
     clients: function (r) {
@@ -1763,7 +2059,8 @@
         clientId: str(row.client_id),
         googleEventId: str(row.google_event_id), googleEtag: str(row.etag),
         googleCalendarId: str(row.google_calendar_id),
-        remind: str(row.remind_key)
+        remind: str(row.remind_key),
+        alertSound: str(row.alert_sound), alertVibe: str(row.alert_vibe)
       });
     },
     tasks: function (row) {
@@ -1773,7 +2070,8 @@
         due: str(row.due_date), time: str(row.due_time),
         nextAction: str(row.next_action), subtasks: jsonIn(row.subtasks_json),
         notes: str(row.notes), clientId: str(row.client_id),
-        remind: str(row.remind_key)
+        remind: str(row.remind_key),
+        alertSound: str(row.alert_sound), alertVibe: str(row.alert_vibe)
       });
     },
     lists: function (row) {
@@ -1787,7 +2085,8 @@
       return migrateNote({
         type: 'note', id: row.id, title: str(row.title), body: str(row.body),
         category: normCat(row.category), pinned: !!Number(row.is_pinned),
-        clientId: str(row.client_id)
+        clientId: str(row.client_id),
+        alertSound: str(row.alert_sound), alertVibe: str(row.alert_vibe)
       });
     },
     clients: function (row) {
@@ -4148,6 +4447,7 @@
     renderArchiveBar();
     renderOpenSheet();
     if (Detail.isOpen()) Detail.paint();
+    if (Settings.isOpen()) Settings.paint();
     Sync.paint();
     $('#todayLabel').textContent = hebDate(todayISO());
     $('#railUserName').textContent = OWNER.name;
@@ -5155,7 +5455,7 @@
     tap: function (target) {
       if (!Select.on || !target || !target.closest) return false;
       if (Select.swallow) { Select.swallow = false; return true; }   // the long press itself
-      if (target.closest('#batchBar,.sheet,.drawer,.topbar,.tabbar,.rail,.toast')) return false;
+      if (target.closest('#batchBar,.sheet,.drawer,.topbar,.tabbar,.rail,.toast,.settings')) return false;
 
       var node = target.closest('[data-rec]');
       var key = node && node.dataset ? node.dataset.rec : '';
@@ -5236,7 +5536,7 @@
         if (Select.on || !e.touches || e.touches.length !== 1) return;
         var t = e.target;
         if (!t || !t.closest) return;
-        if (t.closest('#batchBar,.sheet,.drawer,.topbar,.tabbar,.rail,.toast')) return;
+        if (t.closest('#batchBar,.sheet,.drawer,.topbar,.tabbar,.rail,.toast,.settings')) return;
 
         var node = t.closest('[data-rec]');
         var k = node && node.dataset ? node.dataset.rec : '';
@@ -5521,6 +5821,7 @@
     $('#trashSheet').hidden = true;
     if ($('#openSheet')) $('#openSheet').hidden = true;
     Detail.close();
+    Settings.close();
     // a selection belongs to the bin that is open — closing it ends the mode,
     // or the next visit would open holding picks on rows nobody can see
     TrashSel.exit();
@@ -5534,7 +5835,8 @@
   /** is anything else still layered over the app? */
   function anySheetOpen() {
     return !$('#typeSheet').hidden || !$('#formSheet').hidden ||
-      !$('#trashSheet').hidden || openSheetOpen() || Detail.isOpen() || Drawer.isOpen();
+      !$('#trashSheet').hidden || openSheetOpen() || Detail.isOpen() ||
+      Drawer.isOpen() || Settings.isOpen();
   }
 
   /** סל מחזור — opened from the header pill, painted fresh every time */
@@ -5549,6 +5851,30 @@
     // is open (Sprint 9), so painting before this would open an empty bin
     openSheet('trashSheet');
     renderTrash();
+  }
+
+  /**
+   * "יומן היסטוריה" from נתונים וארכיון (Sprint 13 · mandate §2c).
+   *
+   * The completed-tasks log has lived at the bottom of the משימות workspace
+   * since Sprint 9 and could only be reached by scrolling past the whole task
+   * list to find it. It is not a sheet and deliberately does not become one —
+   * it belongs to that screen. So the link is a real navigation: close the
+   * drawer, land on the workspace it lives in, and scroll it into view.
+   */
+  function openArchiveLog() {
+    closeSheets();
+    setWorkspace('tasks');
+    if (UI.view !== 'tasks') setView('tasks');
+    var box = $('#archiveList');
+    if (box && box.scrollIntoView) {
+      // after the repaint setWorkspace() just queued, or the node is still hidden
+      setTimeout(function () {
+        try { box.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+        catch (e) { box.scrollIntoView(); }
+      }, 60);
+    }
+    return true;
   }
 
   /* ==========================================================================
@@ -5798,6 +6124,10 @@
         (isTask ? this.line('עדיפות', PRIORITY_LABEL[normPriority(rec.priority)]) : '') +
         (isTask ? this.line('הפעולה הבאה', rec.nextAction) : this.line('מיקום', rec.location)) +
         this.line('לקוח מקושר', client ? client.name : '') +
+        // Sprint 13 — the reader states HOW as well as WHEN: a record that
+        // rings for ten seconds and one that only ticks look identical on a
+        // card, and this is the only surface that says which is which
+        this.line('צליל ורטט', alertSentence(rec)) +
         '</div>' +
         this.reminders(rec);
     },
@@ -5941,6 +6271,7 @@
         f('location', 'מיקום', '<input class="input" name="location" placeholder="זום / כתובת">') +
         '</div>' +
         remindField() +
+        alertField() +
         f('clientId', 'שיוך ללקוח', clientPicker()) +
         f('notes', 'הערות', '<textarea class="textarea" name="notes" placeholder="פרטים נוספים…"></textarea>');
     },
@@ -5958,6 +6289,7 @@
         f('priority', 'עדיפות', picker('priority', PRIORITIES, PRIORITY_LABEL, 'medium')) +
         '</div>' +
         remindField() +
+        alertField() +
         f('nextAction', 'הפעולה הבאה', '<input class="input" name="nextAction" placeholder="להתקשר ללקוח ולאשר מידות">') +
         f('clientId', 'שיוך ללקוח', clientPicker()) +
         f('subtasks', 'תת־משימות (שורה לכל אחת)', '<textarea class="textarea" name="subtasks" placeholder="לאסוף מידות&#10;לחשב תמחור"></textarea>') +
@@ -5974,7 +6306,10 @@
         f('body', 'תוכן הפתק', '<textarea class="textarea" name="body" placeholder="כתוב כאן…" required></textarea>') +
         // mandate §2c — a note is the one thing that could not be filed under a
         // client, even though the column has existed in D1 since Sprint 5
-        f('clientId', 'שיוך ללקוח', clientPicker());
+        f('clientId', 'שיוך ללקוח', clientPicker()) +
+        // Sprint 13 §3 names all three types; a note carries the pair so that
+        // converting it into a task or an event keeps the choice
+        alertField();
     },
     client: function () {
       return f('name', 'שם הלקוח', '<input class="input" name="name" placeholder="שם מלא / שם העסק" required>') +
@@ -6210,6 +6545,107 @@
     return clean.length === 1 ? 'תזכורת אחת: ' + names : clean.length + ' התראות: ' + names;
   }
 
+  /* ==========================================================================
+     Alert options — the dual-sound & vibration picker (Sprint 13 · mandate §3)
+
+     The reminder panel above answers WHEN. This answers HOW, and it is a
+     separate question: "remind me an hour before" and "ring for ten seconds
+     when you do" are two independent choices, and folding them into one
+     control would mean a record could not say the second without restating
+     the first.
+
+     Two rows, both plain segmented pickers, both stored on the record:
+
+       צליל   [ללא] [צליל קצר] [צלצול ארוך (~10 שניות)]
+       רטט    [ללא] [רטט קצר] [רטט ארוך] [רטט חוזר]
+
+     Each row serialises into its own hidden field, so submitForm()'s generic
+     [name] sweep collects them exactly like every other control.
+     ========================================================================== */
+
+  function alertField() {
+    function row(attr, kinds, labels, current) {
+      return kinds.map(function (k) {
+        var on = k === current;
+        return '<button class="seg' + (on ? ' is-active' : '') + '" type="button" ' +
+          'data-' + attr + '="' + esc(k) + '" aria-pressed="' + (on ? 'true' : 'false') + '">' +
+          esc(labels[k]) + '</button>';
+      }).join('');
+    }
+
+    return '<div class="field al-field">' +
+      '<label class="field-label">אפשרויות התראה</label>' +
+      '<p class="al-hint">איך הפריט הזה יישמע וירטוט כשהתזכורת שלו תגיע.</p>' +
+      '<div class="al-row">' +
+      '<span class="al-cap">צליל</span>' +
+      '<div class="segmented al-sound" role="group" aria-label="סוג צליל">' +
+      row('alertsound', ALERT_SOUNDS, ALERT_SOUND_LABEL, ALERT_SOUND_DEFAULT) +
+      '</div></div>' +
+      '<div class="al-row">' +
+      '<span class="al-cap">רטט</span>' +
+      '<div class="segmented al-vibe" role="group" aria-label="סוג רטט">' +
+      row('alertvibe', VIBE_KINDS, VIBE_LABEL, VIBE_DEFAULT) +
+      '</div></div>' +
+      '<p class="al-summary block-meta"></p>' +
+      '<input type="hidden" name="alertSound" value="' + esc(ALERT_SOUND_DEFAULT) + '">' +
+      '<input type="hidden" name="alertVibe" value="' + esc(VIBE_DEFAULT) + '">' +
+      '</div>';
+  }
+
+  /** the picker's state while a form is open — same shape as FormRemind */
+  var FormAlert = {
+    sound: ALERT_SOUND_DEFAULT,
+    vibe: VIBE_DEFAULT,
+
+    load: function (sound, vibe) {
+      this.sound = normAlertSound(sound);
+      this.vibe = normVibe(vibe);
+      this.paint();
+      return this;
+    },
+
+    /**
+     * A tap on either row. Choosing a sound PREVIEWS it — the tap is a real
+     * gesture, so the autoplay policy allows it, and hearing the difference is
+     * the only way to choose between "קצר" and "ארוך" without saving first.
+     */
+    set: function (kind, value) {
+      if (kind === 'sound') {
+        this.sound = normAlertSound(value);
+        Chime.stop();
+        Chime.playAlert(this.sound);
+      } else {
+        this.vibe = normVibe(value);
+        Haptics.pattern(this.vibe);
+      }
+      this.paint();
+    },
+
+    paint: function () {
+      var box = $('#formFields');
+      if (!box || !box.querySelector('.al-field')) return;
+      var self = this;
+
+      $$('[data-alertsound]', box).forEach(function (b) {
+        var on = b.dataset.alertsound === self.sound;
+        b.classList.toggle('is-active', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+      $$('[data-alertvibe]', box).forEach(function (b) {
+        var on = b.dataset.alertvibe === self.vibe;
+        b.classList.toggle('is-active', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+
+      var s = box.querySelector('[name="alertSound"]');
+      var v = box.querySelector('[name="alertVibe"]');
+      if (s) s.value = this.sound;
+      if (v) v.value = this.vibe;
+      setText(box.querySelector('.al-summary'),
+        alertSentence({ alertSound: this.sound, alertVibe: this.vibe }));
+    }
+  };
+
   /**
    * Optional association. The client drawer's פגישות / משימות / רשימות tabs are
    * only as good as this select, so every creatable type that can belong to a
@@ -6283,7 +6719,8 @@
       return {
         title: r.title, date: r.date, start: r.start, end: r.end,
         location: r.location, notes: r.notes, clientId: r.clientId,
-        reminders: remindColumn(r)
+        reminders: remindColumn(r),
+        alertSound: normAlertSound(r.alertSound), alertVibe: normVibe(r.alertVibe)
       };
     },
     tasks: function (r) {
@@ -6292,13 +6729,19 @@
         status: normStatus(r.status), priority: normPriority(r.priority),
         nextAction: r.nextAction, clientId: r.clientId,
         subtasks: itemLines(r.subtasks), notes: r.notes,
-        reminders: remindColumn(r)
+        reminders: remindColumn(r),
+        alertSound: normAlertSound(r.alertSound), alertVibe: normVibe(r.alertVibe)
       };
     },
     lists: function (r) {
       return { title: r.title, date: r.date, clientId: r.clientId, items: itemLines(r.items) };
     },
-    notes: function (r) { return { title: r.title, body: r.body, clientId: r.clientId }; },
+    notes: function (r) {
+      return {
+        title: r.title, body: r.body, clientId: r.clientId,
+        alertSound: normAlertSound(r.alertSound), alertVibe: normVibe(r.alertVibe)
+      };
+    },
     clients: function (r) {
       return {
         name: r.name, phone: r.phone, email: r.email,
@@ -6344,6 +6787,7 @@
       rec.notes = v.notes || '';
       rec.clientId = v.clientId || '';
       setReminders(rec, v.reminders);
+      setAlertFrom(rec, v);
       label = 'האירוע עודכן';
     } else if (collection === 'tasks') {
       if (!v.title) { warn('צריך שם למשימה'); return ''; }
@@ -6355,6 +6799,7 @@
       rec.notes = v.notes || '';
       rec.clientId = v.clientId || '';
       setReminders(rec, v.reminders);
+      setAlertFrom(rec, v);
       rec.subtasks = mergeChecklist(rec.subtasks, v.subtasks, 'st');
       setTaskStatus(rec, v.status || rec.status);        // keeps `done` in lockstep
       label = 'המשימה עודכנה';
@@ -6370,6 +6815,7 @@
       rec.title = v.title || 'פתק';
       rec.body = v.body;
       rec.clientId = v.clientId || '';
+      setAlertFrom(rec, v);
       label = 'הפתק עודכן';
     } else if (collection === 'clients') {
       if (!v.name) { warn('צריך שם ללקוח'); return ''; }
@@ -6430,6 +6876,15 @@
     var held = rmEl('[name="reminders"]');
     if (held) FormRemind.load(held.value || REMIND_DEFAULT);
 
+    // ...and the same for the alert picker: fillForm() has already written the
+    // record's own pair into the two hidden fields, so the panel opens on them
+    var heldSound = rmEl('[name="alertSound"]');
+    var heldVibe = rmEl('[name="alertVibe"]');
+    if (heldSound || heldVibe) {
+      FormAlert.load(heldSound ? heldSound.value : ALERT_SOUND_DEFAULT,
+        heldVibe ? heldVibe.value : VIBE_DEFAULT);
+    }
+
     $('#typeSheet').hidden = true;
     // the reader is what "עריכה" was tapped from; it must not stay layered
     // behind the form it just opened
@@ -6460,6 +6915,13 @@
        be the one thing the save drops. */
     if (rmEl('.rm-field')) v.reminders = FormRemind.value();
 
+    // same rule for the alert picker — the module is the authority, the two
+    // hidden fields are only its mirror
+    if (rmEl('.al-field')) {
+      v.alertSound = FormAlert.sound;
+      v.alertVibe = FormAlert.vibe;
+    }
+
     var type = UI.formType, cat = UI.formCat, label;
 
     // the same sheet edits what it created (Wave 2) — no second form, no drift
@@ -6474,7 +6936,9 @@
         location: v.location || '', notes: v.notes || '', clientId: v.clientId || '',
         // Sprint 12 — a token list, normalised again by migrateEvent() on the
         // way in, so `remind` (the column's value) can only ever be derived
-        reminders: normRemindList(v.reminders)
+        reminders: normRemindList(v.reminders),
+        // Sprint 13 — how it announces itself, normalised again by the migrator
+        alertSound: normAlertSound(v.alertSound), alertVibe: normVibe(v.alertVibe)
       });
       linkLog(v.clientId, 'נקבעה פגישה: ' + v.title);
       label = 'האירוע נוסף';
@@ -6488,7 +6952,8 @@
         status: v.status || 'new', priority: v.priority || 'medium',
         nextAction: v.nextAction || '', subtasks: parseChecklist(v.subtasks, 'st'),
         done: false, notes: v.notes || '', clientId: v.clientId || '',
-        reminders: normRemindList(v.reminders)
+        reminders: normRemindList(v.reminders),
+        alertSound: normAlertSound(v.alertSound), alertVibe: normVibe(v.alertVibe)
       });
       linkLog(v.clientId, 'נוספה משימה: ' + v.title);
       label = v.due ? 'המשימה נוספה' : 'המשימה נוספה לנכנסים';
@@ -6504,7 +6969,8 @@
       if (!v.body) return warn('הפתק ריק');
       Store.add('notes', {
         type: 'note', title: v.title || 'פתק', category: cat, body: v.body,
-        pinned: false, clientId: v.clientId || ''
+        pinned: false, clientId: v.clientId || '',
+        alertSound: normAlertSound(v.alertSound), alertVibe: normVibe(v.alertVibe)
       });
       linkLog(v.clientId, 'נוסף פתק: ' + (v.title || 'פתק'));
       label = 'הפתק נשמר';
@@ -6957,8 +7423,17 @@
       }
     },
 
-    /** one notification, service-worker first so it shows with the tab hidden */
-    show: function (tag, title, body) {
+    /**
+     * One notification, service-worker first so it shows with the tab hidden.
+     *
+     * Sprint 13 — `alert` is the RECORD's own pair (mandate §3). The vibration
+     * pattern rides on the notification itself so it still fires when the OS
+     * raises it, and the sound is played by the app, because a platform-level
+     * profile can silence the notification's tone and the whole point of the
+     * chime is that it is not subject to that.
+     */
+    show: function (tag, title, body, alert) {
+      var a = alertOf(alert || {});
       var opts = {
         body: body,
         icon: NOTIFY_ICON,
@@ -6969,7 +7444,7 @@
         // the OS may silence its own tone; the chime below is ours and is not
         // subject to that, which is the whole reason it exists
         silent: false,
-        vibrate: [110, 60, 110],
+        vibrate: VIBE_PATTERN[a.vibe] || [],
         data: { url: './index.html' }
       };
 
@@ -6977,7 +7452,12 @@
         try { new window.Notification(title, opts); } catch (e) { /* mobile blocks this ctor */ }
       }
 
-      Chime.play();               // guarded to a no-op wherever audio is not available
+      // guarded to a no-op wherever audio is not available, and to silence
+      // where the record itself asked for [ללא]
+      Chime.playAlert(a.sound);
+      // ...and the pulse, in case the notification is raised by a path that
+      // drops the vibrate hint (the desktop fallback constructor does)
+      Haptics.pattern(a.vibe);
 
       if (navigator.serviceWorker && navigator.serviceWorker.ready) {
         navigator.serviceWorker.ready
@@ -7072,6 +7552,8 @@
             out.push({
               id: rec.id, on: day, tok: plan.tok,
               key: remindMark(plan.tok, rec.id, day),
+              // Sprint 13 — the record's own sound & vibration ride with it
+              alert: alertOf(rec),
               title: 'תזכורת · ' + kind, body: body
             });
             return;
@@ -7082,6 +7564,7 @@
           out.push({
             id: rec.id, on: clockDate, tok: plan.tok,
             key: remindMark(plan.tok, rec.id, clockDate),
+            alert: alertOf(rec),
             title: kind + ' ' + when(gap), body: body
           });
         });
@@ -7127,7 +7610,7 @@
         if (fired[key]) return;
         fired[key] = 1;
         dirty = true;
-        self.show(key, item.title, item.body);
+        self.show(key, item.title, item.body, item.alert);
       });
 
       if (dirty) Store.save();
@@ -7439,6 +7922,9 @@
       // Sprint 12 — the reminder panel, the "פתוחות" sheet and the detail reader
       '[data-remindmode],[data-remindadd],[data-reminddrop],' +
       '[data-openall],[data-openfilter],[data-detailact],' +
+      // Sprint 13 — the settings drawer and the per-record alert picker
+      '[data-settoggle],[data-setplay],[data-setdefault],[data-settheme],[data-setsync],' +
+      '[data-alertsound],[data-alertvibe],' +
       '[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
       '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
       '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo],' +
@@ -7541,6 +8027,21 @@
     if (el.dataset.openall) { openOpenSheet(); return; }
     if (el.dataset.openfilter) { setOpenFilter(el.dataset.openfilter); return; }
     if (el.dataset.detailact) { Detail.act(el.dataset.detailact); return; }
+
+    /* ---------- Sprint 13 · the settings drawer and the alert picker ------- */
+
+    if (el.dataset.action === 'settings') { Settings.toggle(); return; }
+    if (el.dataset.action === 'close-settings') { closeSheets(); return; }
+    if (el.dataset.action === 'archive-log') { openArchiveLog(); return; }
+
+    if (el.dataset.settoggle === 'haptics') { Settings.toggleHaptics(); return; }
+    if (el.dataset.setplay) { Settings.preview(el.dataset.setplay); return; }
+    if (el.dataset.setdefault) { Settings.reset(el.dataset.setdefault); return; }
+    if (el.dataset.settheme) { Settings.setTheme(el.dataset.settheme); return; }
+    if (el.dataset.setsync) { Sync.flush(); toast('מסנכרן מול הענן…'); return; }
+
+    if (el.dataset.alertsound) { FormAlert.set('sound', el.dataset.alertsound); return; }
+    if (el.dataset.alertvibe) { FormAlert.set('vibe', el.dataset.alertvibe); return; }
 
     /* ---------- client CRM ---------- */
 
@@ -7720,6 +8221,15 @@
       return;
     }
 
+    /* Sprint 13 — the settings drawer's three <select> pickers. Same reason as
+       above: a <select> answers `change`, and the click delegate never sees the
+       value the user landed on. */
+    if (el.dataset.setpick) {
+      Haptics.light();
+      Settings.pick(el.dataset.setpick, el.value);
+      return;
+    }
+
     if (!el.dataset.clientstatus) return;
     var c = Store.find('clients', el.dataset.clientstatus);
     if (!c) return;
@@ -7729,6 +8239,281 @@
     Patch.apply('clients', c.id);
     toast('סטטוס: ' + CLIENT_STATUS_LABEL[normClientStatus(c.status)]);
   }
+
+  /* ==========================================================================
+     הגדרות — the settings drawer (Sprint 13 · mandate §1–§2)
+
+     WHY A DRAWER AND NOT MORE PILLS
+
+     The top bar had grown to four pills, a Google readout line and a 🗑 in the
+     filter strip: six controls competing with the one question "היום שלי"
+     exists to answer. Every one of them was reachable and none of them was
+     findable. They are all still here — the SAME elements, the same ids, the
+     same handlers, moved rather than rebuilt — grouped under the five headings
+     the mandate names, behind one ☰.
+
+     Nothing in this module owns state that lives elsewhere: #pushBtn is still
+     painted by Notify.paintSound()/paint(), #gcalBtn by GCal.paint(), #trashBtn
+     by renderTrash(). Settings.paint() only paints what is genuinely its own —
+     the two sound pickers, the vibration picker, the touch-feedback switch, the
+     theme choice and the two read-only lines under אודות.
+     ========================================================================== */
+
+  var Settings = {
+    isOpen: function () {
+      var el = $('#settingsDrawer');
+      return !!el && !el.hidden;
+    },
+
+    open: function () {
+      var el = $('#settingsDrawer');
+      if (!el) return false;
+      var backdrop = $('#backdrop');
+      if (backdrop) backdrop.hidden = false;
+      el.hidden = false;
+      if (document.body && document.body.style) document.body.style.overflow = 'hidden';
+      var btn = $('#menuBtn');
+      if (btn) btn.setAttribute('aria-expanded', 'true');
+      // the drawer is the one surface that shows the cloud, Google and bin
+      // state together, so it is repainted on the way in rather than on a timer
+      Settings.paint();
+      Notify.paint();
+      Sync.paint();
+      GCal.paint();
+      renderTrash();                 // paints the bin's badge, not the bin itself
+      return true;
+    },
+
+    /**
+     * Hide the panel and nothing else. The backdrop and the body scroll lock
+     * belong to closeSheets(), which owns them for every layer in the app — a
+     * second owner here is how a sheet ends up open behind a live scrim.
+     */
+    close: function () {
+      var el = $('#settingsDrawer');
+      if (!el || el.hidden) return false;
+      el.hidden = true;
+      var btn = $('#menuBtn');
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+      // a ten-second ringtone must not outlive the panel it was auditioned in
+      Chime.stop();
+      return true;
+    },
+
+    toggle: function () {
+      if (Settings.isOpen()) { closeSheets(); return false; }
+      return Settings.open();
+    },
+
+    /* ---- the two sound pickers and the vibration picker ---- */
+
+    /** <option> list for one picker, marking the value the store currently holds */
+    options: function (map, current) {
+      return Object.keys(map).map(function (k) {
+        var label = map[k].label !== undefined ? map[k].label : map[k];
+        return '<option value="' + esc(k) + '"' + (k === current ? ' selected' : '') + '>' +
+          esc(label) + '</option>';
+      }).join('');
+    },
+
+    pick: function (which, value) {
+      var prefs = Store.data.prefs;
+      if (which === 'shortSound') prefs.sound.short = normShortSound(value);
+      else if (which === 'longSound') prefs.sound.long = normLongSound(value);
+      else if (which === 'vibe') prefs.vibe = normVibe(value);
+      else return false;
+      Store.save();
+      Settings.paint();
+      // hearing (or feeling) the choice is the point of making it — and this
+      // tap is the gesture the autoplay policy wants
+      Settings.preview(which === 'vibe' ? 'vibe' : (which === 'longSound' ? 'long' : 'short'));
+      return true;
+    },
+
+    reset: function (which) {
+      var prefs = Store.data.prefs;
+      if (which === 'shortSound') prefs.sound.short = SHORT_DEFAULT;
+      else if (which === 'longSound') prefs.sound.long = LONG_DEFAULT;
+      else if (which === 'vibe') prefs.vibe = VIBE_DEFAULT;
+      else return false;
+      Store.save();
+      Settings.paint();
+      toast('הוחזר לברירת המחדל');
+      return true;
+    },
+
+    /** ▶ / ■ — auditioning is never gated on the record, only on the chime toggle */
+    preview: function (what) {
+      var prefs = Store.data.prefs;
+      if (what === 'stop') { Chime.stop(); return true; }
+      if (what === 'vibe') {
+        if (!Haptics.supported()) { toast('המכשיר הזה לא תומך ברטט'); return false; }
+        return Haptics.pattern(prefs.vibe);
+      }
+      Chime.unlock();
+      if (!Chime.armed()) { toast('צליל התזכורת כבוי — אפשר להפעיל אותו כאן למעלה'); return false; }
+      Chime.stop();
+      return what === 'long' ? Chime.playLong(prefs.sound.long) : Chime.playShort(prefs.sound.short);
+    },
+
+    /* ---- רטט במגע ---- */
+
+    toggleHaptics: function () {
+      if (!Haptics.supported()) { toast('המכשיר הזה לא תומך ברטט'); return false; }
+      var on = !Haptics.touchOn();
+      Store.data.prefs.haptics = on;
+      Store.save();
+      if (on) Haptics.fire(HAPTIC_CHECK);        // the switch answers itself
+      Settings.paint();
+      toast(on ? 'רטט במגע הופעל' : 'רטט במגע כובה');
+      return true;
+    },
+
+    /* ---- מראה ועיצוב ---- */
+
+    /** what the OS is asking for, when the choice is "לפי המערכת" */
+    systemTheme: function () {
+      try {
+        return (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches)
+          ? 'light' : 'dark';
+      } catch (e) { return 'dark'; }
+    },
+
+    /** the palette actually in force — 'system' is a question, never an answer */
+    resolvedTheme: function () {
+      var t = (Store.data && Store.data.prefs) ? Store.data.prefs.theme : THEME_DEFAULT;
+      if (THEMES.indexOf(t) === -1) t = THEME_DEFAULT;
+      return t === 'system' ? Settings.systemTheme() : t;
+    },
+
+    /** does the OS ask for less movement? Stated rather than silently obeyed */
+    reducedMotion: function () {
+      try {
+        return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      } catch (e) { return false; }
+    },
+
+    applyTheme: function () {
+      var root = document.documentElement;
+      if (root && root.setAttribute) root.setAttribute('data-theme', Settings.resolvedTheme());
+      return true;
+    },
+
+    setTheme: function (theme) {
+      if (THEMES.indexOf(theme) === -1) return false;
+      Store.data.prefs.theme = theme;
+      Store.save();
+      Settings.applyTheme();
+      Settings.paint();
+      toast('ערכת הנושא: ' + THEME_LABEL[theme]);
+      return true;
+    },
+
+    /* ---- אודות ---- */
+
+    /**
+     * The in-app half of `node healthcheck.js`: the suite proves the ARTEFACTS
+     * are right before a deploy, and this proves the INSTALL is right on the
+     * phone holding it — which is the half a repo-local script can never see.
+     */
+    health: function () {
+      var parts = [];
+      var storeOk = false;
+      try {
+        window.localStorage.setItem(STORE_KEY + '.probe', '1');
+        window.localStorage.removeItem(STORE_KEY + '.probe');
+        storeOk = true;
+      } catch (e) { storeOk = false; }
+      parts.push((storeOk ? '✓' : '✕') + ' אחסון מקומי');
+
+      var swOk = !!(navigator.serviceWorker && navigator.serviceWorker.controller);
+      parts.push((swOk ? '✓' : '…') + ' עבודה במצב לא־מקוון');
+      parts.push((Notify.armed() ? '✓' : '✕') + ' התראות');
+      parts.push((Chime.supported() ? '✓' : '✕') + ' צליל');
+      parts.push((Haptics.supported() ? '✓' : '✕') + ' רטט');
+
+      var d = Store.data;
+      var n = d ? (d.events.length + d.tasks.length + d.lists.length +
+        d.notes.length + d.clients.length) : 0;
+      parts.push(n + ' פריטים בזיכרון');
+      return parts.join(' · ');
+    },
+
+    /* ---- paint ---- */
+
+    paint: function () {
+      var box = $('#settingsDrawer');
+      if (!box || !Store.data) return;
+      var prefs = Store.data.prefs;
+
+      var shortSel = $('#setShortSound');
+      if (shortSel) {
+        setHTML(shortSel, Settings.options(SHORT_SOUNDS, prefs.sound.short));
+        shortSel.value = prefs.sound.short;
+      }
+      var longSel = $('#setLongSound');
+      if (longSel) {
+        setHTML(longSel, Settings.options(LONG_RINGS, prefs.sound.long));
+        longSel.value = prefs.sound.long;
+      }
+      var vibeSel = $('#setVibe');
+      if (vibeSel) {
+        setHTML(vibeSel, Settings.options(VIBE_LABEL, prefs.vibe));
+        vibeSel.value = prefs.vibe;
+      }
+
+      var hap = $('#hapticsBtn');
+      if (hap) {
+        var on = Haptics.touchOn() && Haptics.supported();
+        hap.classList.toggle('is-on', on);
+        hap.setAttribute('aria-pressed', on ? 'true' : 'false');
+        setText($('#hapticsHint'), Haptics.supported()
+          ? (on ? 'רטט קצר בכל לחיצה ובכל סימון V' : 'המסך לא ירטוט בלחיצות — תזכורות ירטטו כרגיל')
+          : 'המכשיר הזה לא תומך ברטט (באייפון אין API כזה בדפדפן)');
+      }
+
+      // ☁ — the same three states the header badge carries, spelled out
+      var st = Sync.state();
+      var cfg = Sync.cfg();
+      var q = cfg ? cfg.queue.length : 0;
+      var line = SYNC_LABEL[st].ico + ' ' + SYNC_LABEL[st].text;
+      if (q) line += ' · ' + q + ' שינויים ממתינים';
+      else if (st === 'synced' && cfg && cfg.lastSyncAt) line += ' · ' + hhmm(cfg.lastSyncAt);
+      setText($('#setSyncState'), line);
+
+      $$('[data-settheme]', box).forEach(function (b) {
+        var active = b.dataset.settheme === prefs.theme;
+        b.classList.toggle('is-active', active);
+        b.setAttribute('aria-pressed', active ? 'true' : 'false');
+      });
+      setText($('#setThemeHint'), prefs.theme === 'system'
+        ? 'לפי המערכת — כרגע ' + (Settings.resolvedTheme() === 'light' ? 'בהיר' : 'כהה')
+        : 'ערכת הנושא נבחרה ידנית: ' + THEME_LABEL[prefs.theme]);
+      setText($('#setMotionHint'), Settings.reducedMotion()
+        ? 'המערכת מבקשת פחות תנועה — האנימציות באפליקציה מושבתות בהתאם.'
+        : 'אנימציות פעילות. אפשר לכבות אותן בהגדרות הנגישות של המכשיר.');
+
+      setText($('#setVersion'), 'מה הלו״ז — Benja · גרסה ' + APP_VERSION);
+      setText($('#setHealth'), Settings.health());
+    },
+
+    init: function () {
+      Settings.applyTheme();
+
+      // the OS can flip while the app is open; 'system' means "follow it", so
+      // it has to be followed rather than sampled once at boot
+      try {
+        var mq = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)');
+        if (mq && mq.addEventListener) {
+          mq.addEventListener('change', function () {
+            if (Store.data.prefs.theme === 'system') { Settings.applyTheme(); Settings.paint(); }
+          });
+        }
+      } catch (e) { /* older engine — the choice still applies, it just cannot follow */ }
+
+      Settings.paint();
+    }
+  };
 
   /* -------------------------------------------------------------- bootstrap */
 
@@ -7753,6 +8538,7 @@
     Notify.init();
     Sync.init();
     GCal.init();
+    Settings.init();                  // applies the stored theme and follows the OS
   }
 
   if (document.readyState === 'loading') {
@@ -8028,6 +8814,47 @@
       remindSentence: remindSentence,
       remindField: remindField,
       FormRemind: FormRemind
+    },
+
+    /**
+     * Sprint 13 — the settings drawer, the dual-sound engine and the per-record
+     * alert pair. Every normaliser and every voice spec is pure data or pure
+     * string work, so healthcheck.js drives the whole layer head-lessly: no
+     * AudioContext, no vibration motor, no DOM.
+     */
+    settings: {
+      APP_VERSION: APP_VERSION,
+      SHORT_SOUNDS: SHORT_SOUNDS,
+      SHORT_DEFAULT: SHORT_DEFAULT,
+      LONG_RINGS: LONG_RINGS,
+      LONG_DEFAULT: LONG_DEFAULT,
+      LONG_MS: LONG_MS,
+      VIBE_KINDS: VIBE_KINDS,
+      VIBE_LABEL: VIBE_LABEL,
+      VIBE_PATTERN: VIBE_PATTERN,
+      VIBE_DEFAULT: VIBE_DEFAULT,
+      ALERT_SOUNDS: ALERT_SOUNDS,
+      ALERT_SOUND_LABEL: ALERT_SOUND_LABEL,
+      ALERT_SOUND_DEFAULT: ALERT_SOUND_DEFAULT,
+      THEMES: THEMES,
+      THEME_LABEL: THEME_LABEL,
+      THEME_DEFAULT: THEME_DEFAULT,
+      normAlertSound: normAlertSound,
+      normVibe: normVibe,
+      normShortSound: normShortSound,
+      normLongSound: normLongSound,
+      setAlert: setAlert,
+      setAlertFrom: setAlertFrom,
+      alertOf: alertOf,
+      alertSentence: alertSentence,
+      alertField: alertField,
+      FormAlert: FormAlert,
+      Settings: Settings,
+      Chime: Chime,
+      Haptics: Haptics,
+      // the one door every layer in the app closes through — exported so the
+      // suite can prove the drawer goes down with the rest of them
+      closeSheets: closeSheets
     },
 
     lists: {
