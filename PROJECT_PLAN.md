@@ -1,6 +1,8 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Sprint 9 shipped (§7.4i) — in-place strikethrough completion, the manual
+> **Status:** Field wave shipped (§7.4j) — בחירה מרובה inside סל המחזור: long press or the
+> bin's own pill, batch שחזור / מחיקה לצמיתות, and a struck-through `בוצע` row, v0.9.1.
+> Sprint 9 before it (§7.4i) — in-place strikethrough completion, the manual
 > `העבר משימות שבוצעו להיסטוריה` batch archive with a 10-day היסטוריה log, and the end of the
 > UI shake (the entrance animation is now opt-in via `.is-entering`), v0.9.0. Sprint 8 before
 > it (§7.4h) — the 400ms completion gesture, the 10-day סל מחזור, universal tap-to-edit.
@@ -1096,6 +1098,111 @@ through a live task between two filed ones, the ten-day countdown across seven p
 guard in both directions, the two drawers proven separate, `markEntering()` executed against a
 stub DOM in four staged paints, `setHTML` / `setText` counted for real writes, and a CSS parse
 that fails the build on any ungated hover transform.
+
+### 7.4j Field wave — בחירה מרובה בסל המחזור (shipped)
+
+A field report arrived as a sketch of the bin's row: a long press, a checkbox on every item,
+a struck-through title on anything already finished, and `סל המחזור ריק` under an empty one.
+The bin had none of it — every binned record could only be restored or destroyed **one at a
+time**, so clearing thirty expired rows was thirty presses and thirty confirmations.
+
+**Why the bin gets its OWN selection**
+
+Wave 3's `Select` (§7.4g) cannot reach it, by design: both `Select.tap()` and its long press
+decline every touch that lands on `.sheet`, because opening the app-wide batch bar behind a
+modal would offer `סמן כהושלם` and `מחיקה` on records that are not on screen — and `#batchBar`
+is `z-index:45` under a sheet at `60`, so the bar would not even be visible. `TrashSel` is
+therefore a second, scoped selection layer: **the same gesture, the same checkbox, the same
+bar**, keyed to trash entry ids and offering only the two things that can still be done to a
+binned record.
+
+| | |
+|---|---|
+| Enter | the `בחירה מרובה` pill in the bin's own sheet head (`data-trashbatch="mode"`), or a **500ms long press** on any row — the same `LONG_PRESS_MS` / `LONG_PRESS_SLOP` the cards use, scoped to `#trashList` and declining a press that started on one of the row buttons |
+| Pick | `TrashSel.tap()` claims every tap inside `#trashList` before any control branch runs, and the click that follows the press is swallowed so it cannot un-pick the row under the finger |
+| Act | `.trash-batchbar` — **↺ שחזור · בחר הכל · 🗑 מחיקה לצמיתות · סיום בחירה** |
+| Leave | the bar's `סיום בחירה`, the pill again, closing the sheet, or the bin going empty |
+
+- **`TrashSel.restore()` order is the whole correctness of the batch.** An entry's `index` was
+  recorded against the collection *as it stood when that one record left it*, so the only
+  sequence that reproduces the original list is the deletions run **backwards — newest first**.
+  Deleting A (slot 0) and then C (slot 1 of what was left) and restoring in that order lands C
+  one place too early. The bin is appended to in deletion order, so the bin's own order is the
+  clock, and the restore reads it in reverse.
+- **`TrashSel.purge()` asks first.** Nothing in the app deletes without `confirmDelete()`
+  (§7.4h), and the batch is no exception: it names the count on the same `--danger-edge` panel
+  under the same `האם אתה בטוח שברצונך למחוק?` before it destroys the last copy of anything.
+- **The row is the control while a selection is live.** In selection mode `trashRow()` grows the
+  shared `.sel-box` checkbox and **drops** the per-row `שחזר` / `מחק לצמיתות` buttons — leaving
+  them in would let one finger restore a record it meant to tick.
+- **A binned task that was already finished still reads as finished** — `trashDone()` marks the
+  row `.is-done`, which strikes the title through in CSS, *and* prints the `בוצע` badge beside
+  it, because a struck line is a colourless signal and must never be the only carrier. `בוטל` is
+  not `בוצע`: the check reads the single `done` status, not the whole closed set.
+- **The bar is `position:sticky` inside the scrolling sheet**, never `fixed` to the shell, for
+  the z-index reason above. It reuses `.batchbar` / `.batch-btn`, so it inherits the 44px floor
+  (§7.2) and the `[hidden]` display reset without a second set of rules.
+- Closing the bin (`closeSheets()`) and opening it (`openTrash()`) both call `TrashSel.exit()`:
+  a selection belongs to the bin that is open, and a bin that re-opened holding picks on rows
+  nobody can see is a data trap.
+
+**Shipped shell** — `sw.js` is bumped to `v13`.
+
+**Verification** — `healthcheck.js` §26 adds 9 checks driven against a real seeded store: the
+layer proven distinct from `Select`, pick / un-pick / empty-id state transitions, `בחר הכל`
+cross-checked against exactly what `trashList()` renders and in that order, a two-record batch
+restore that proves the slots (deleting the 1st and 3rd task and getting the original list back
+verbatim), a batch purge that takes exactly the picked rows and leaves the unpicked one, the
+confirmation door and all four bar actions read off the module, the long press proven 500ms,
+slop-guarded, passive and scoped to `#trashList`, the delegate proven to ask the bin layer
+before it acts, the bar proven to live inside the sheet and be sticky, and `trashRow()` executed
+in both modes — checkbox and no buttons while picked, buttons and no checkbox while idle, with
+`is-done` + `בוצע` + the `line-through` rule on a task that was completed before it was deleted.
+
+### 7.4k Field wave — ריקון סל המחזור (shipped)
+
+§7.4j made clearing thirty rows *one* selection instead of thirty presses, but it is still a
+selection: enter the mode, `בחר הכל`, purge. The field asked for the shorter road — **one tap
+that empties the bin** — so the bin's own sheet now carries it, under the `10 ימים` hint and
+above the list.
+
+| | |
+|---|---|
+| Control | `#trashEmptyBtn` — **🗑 ריקון סל המחזור**, `data-trash="empty"`, inside `#trashTools` |
+| Asks | the one door (§7.4h), reworded: **האם אתה בטוח שברצונך למחוק את סל המחזור?** with **אישור** / **ביטול** |
+| Destroys | `emptyTrash()` — `d.trash = []`, one `Store.save()` |
+| Hidden when | the bin is empty, or `TrashSel.on` |
+
+- **One door, reworded — never a second one.** `Confirm.ask()` took a fixed question and a fixed
+  accept label; it now takes an optional `{ title, yes }`. Emptying a whole *surface* is not the
+  same sentence as deleting a row, so it names the surface inside the question — but every field
+  is reset on **every** ask (`o.title || CONFIRM_QUESTION`, `o.yes || CONFIRM_YES`), so a
+  reworded question can never leak into the next deletion anywhere in the app. `index.html`
+  still ships `אישור מחיקה` as the standing label.
+- **The control hides while `בחירה מרובה` is live.** That layer already owns a
+  `🗑 מחיקה לצמיתות` for exactly the rows the finger picked; two destructive buttons on one
+  screen, one scoped and one total, is how the wrong one gets pressed. `renderTrash()` sets
+  `tools.hidden = !rows.length || TrashSel.on`, and `.trash-tools[hidden]{display:none}` keeps
+  the display rule from defeating the attribute — the same trap `.trash-count` was pinned for.
+- **An empty bin never offers to be emptied.** The row ships `hidden` in the markup, and
+  `askEmptyTrash()` counts before it asks: nothing in the bin, nothing to confirm, just
+  `סל המחזור ריק`.
+- **The count is in the question.** `plural(n, 'פריט אחד', 'פריטים') — לצמיתות, ללא שחזור` sits
+  under it, so the answer is never given blind. This is the only tap in the app that destroys a
+  whole surface, and the only one with nothing behind it: a binned record's tombstone is already
+  queued, so dropping the entries **is** the permanent deletion.
+- `runTrashAction()` answers `empty` **before** it resolves `id` — the control carries no entry
+  id, and the row lookup would have turned it into `הפריט כבר לא בסל המחזור`.
+
+**Shipped shell** — `sw.js` is bumped to `v14`.
+
+**Verification** — `healthcheck.js` §27 adds 6 checks: the control proven to live inside the bin
+sheet, labelled, wired and shipping hidden with its `[hidden]` display reset; the hide rule read
+off `renderTrash()`; the `empty` action proven to resolve before the row lookup; the question
+proven to name the bin, the accept button proven to read `אישור`, both defaults proven to reset
+per ask and no second confirmation surface added; and `emptyTrash()` executed against a real
+seeded store — three binned tasks destroyed, the live list and every other collection untouched,
+the purged records unable to return, and a second call on an empty bin reporting nothing.
 
 ### 7.4 General layout
 

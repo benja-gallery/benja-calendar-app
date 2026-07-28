@@ -185,6 +185,10 @@
   /* --- Wave 2: confirmation before a destructive tap --- */
 
   var CONFIRM_QUESTION = 'האם אתה בטוח שברצונך למחוק?';
+  /** the accept button's standing label — index.html ships with exactly this */
+  var CONFIRM_YES = 'אישור מחיקה';
+  /** ריקון הסל names the thing it destroys inside the question itself */
+  var CONFIRM_EMPTY_TRASH = 'האם אתה בטוח שברצונך למחוק את סל המחזור?';
 
   /* --- Wave 3: multi-select, batch actions and the wider undo window --- */
 
@@ -3249,12 +3253,16 @@
       '" aria-label="עריכה">✎</button>';
   }
 
+  /** the checkbox itself — one shape, wherever a selection is live */
+  function selBoxHTML(picked) {
+    return '<span class="sel-box' + (picked ? ' is-picked' : '') + '" aria-hidden="true">' +
+      (picked ? '✓' : '') + '</span>';
+  }
+
   /** the checkbox a card grows while selection mode is live (Wave 3) */
   function selBox(collection, id) {
     if (!Select.on) return '';
-    var picked = Select.has(collection + ':' + id);
-    return '<span class="sel-box' + (picked ? ' is-picked' : '') + '" aria-hidden="true">' +
-      (picked ? '✓' : '') + '</span>';
+    return selBoxHTML(Select.has(collection + ':' + id));
   }
 
   /** ...and the classes that go with it, so the whole card reads as picked */
@@ -3278,20 +3286,33 @@
   function trashRow(entry, now) {
     var days = trashDaysLeft(entry, now);
     var title = recTitle(entry.collection, entry.rec) || 'ללא כותרת';
+    var done = trashDone(entry);
+    var picked = TrashSel.on && TrashSel.has(entry.id);
 
-    return '<div class="trash-row" data-trashid="' + entry.id + '">' +
+    return '<div class="trash-row' + (done ? ' is-done' : '') +
+      (TrashSel.on ? ' is-pickable' : '') + (picked ? ' is-picked' : '') +
+      '" data-trashid="' + entry.id + '">' +
+      (TrashSel.on ? selBoxHTML(picked) : '') +
       '<div class="trash-body">' +
       '<div class="trash-title">' + esc(title) + '</div>' +
       '<div class="trash-meta">' +
       '<span class="badge">' + esc(TRASH_LABEL[entry.collection] || 'פריט') + '</span>' +
+      // a task that was already finished when it was deleted still reads as
+      // finished — the struck title is never the only carrier of that
+      (done ? '<span class="badge st-done">בוצע</span>' : '') +
       '<span class="badge ' + (days <= 2 ? 'pr-high' : 'timeless') + '">' +
       esc(retentionCountdown(days)) + '</span>' +
       '</div></div>' +
-      '<div class="trash-acts">' +
-      '<button type="button" class="mini" data-trash="restore:' + entry.id + '">↺ שחזר</button>' +
-      '<button type="button" class="mini is-danger" data-trash="purge:' + entry.id +
-      '">🗑 מחק לצמיתות</button>' +
-      '</div></div>';
+      // while a selection is live the ROW is the control: leaving the two
+      // per-row buttons in would let one finger restore a record it meant
+      // to tick, in a list where every tap is supposed to be a pick
+      (TrashSel.on ? '' :
+        '<div class="trash-acts">' +
+        '<button type="button" class="mini" data-trash="restore:' + entry.id + '">↺ שחזר</button>' +
+        '<button type="button" class="mini is-danger" data-trash="purge:' + entry.id +
+        '">🗑 מחק לצמיתות</button>' +
+        '</div>') +
+      '</div>';
   }
 
   /**
@@ -3320,6 +3341,16 @@
         : emptyState('סל המחזור ריק',
           'כל פריט שתמחק ימתין כאן ' + TRASH_DAYS + ' ימים לפני שיימחק לצמיתות.');
     }
+    // an empty bin has nothing to select: the mode closes with the last row
+    if (TrashSel.on && !rows.length) TrashSel.exit();
+
+    // ריקון הסל is offered only when there is a bin to empty and no selection
+    // narrowing the target — while בחירה מרובה is live the batch bar's
+    // מחיקה לצמיתות is the one destructive button on screen
+    var tools = $('#trashTools');
+    if (tools) tools.hidden = !rows.length || TrashSel.on;
+
+    TrashSel.paint();
     return rows.length;
   }
 
@@ -3784,6 +3815,32 @@
     return entry;
   }
 
+  /**
+   * ריקון סל המחזור — every entry at once. Each record left its collection
+   * when it was binned and its tombstone is already queued, so emptying the
+   * bin is exactly trashPurge() over the whole list: dropping the entries IS
+   * the permanent deletion. Returns how many went, so the caller can say it.
+   */
+  function emptyTrash() {
+    var d = Store.data;
+    if (!d || !Array.isArray(d.trash) || !d.trash.length) return 0;
+    var gone = d.trash.length;
+    d.trash = [];
+    Store.save();
+    return gone;
+  }
+
+  /**
+   * A binned task that was already finished when it was deleted. `בוטל` is not
+   * `בוצע` — a cancelled task was abandoned, not completed — so this reads the
+   * one status rather than the whole closed set.
+   */
+  function trashDone(entry) {
+    if (!entry || entry.collection !== 'tasks' || !entry.rec) return false;
+    return normStatus(entry.rec.status) === 'done' || entry.rec.done === true;
+  }
+
+
   /* ==========================================================================
      היסטוריה — the completed-tasks log (Sprint 9)
 
@@ -4191,14 +4248,23 @@
 
     isOpen: function () { return Confirm.pending !== null; },
 
-    ask: function (what, run) {
+    /**
+     * `opts` lets one caller reword the door without opening a second one:
+     * ריקון הסל destroys a whole surface rather than a row, so it names that
+     * surface in the question itself. Every field is reset on every ask, so a
+     * reworded question can never leak into the next one.
+     */
+    ask: function (what, run, opts) {
       if (typeof run !== 'function') return null;
+      var o = opts || {};
       Confirm.pending = { what: String(what == null ? '' : what), run: run };
 
       var title = $('#confirmTitle');
       var line = $('#confirmWhat');
-      if (title) title.textContent = CONFIRM_QUESTION;
+      var yes = $('#confirmYes');
+      if (title) title.textContent = o.title || CONFIRM_QUESTION;
       if (line) line.textContent = Confirm.pending.what;
+      if (yes) yes.textContent = o.yes || CONFIRM_YES;
       openSheet('confirmSheet');
       return Confirm.pending;
     },
@@ -4234,7 +4300,7 @@
   }
 
   /** the ONE door every destructive tap in the app goes through */
-  function confirmDelete(what, run) { return Confirm.ask(what, run); }
+  function confirmDelete(what, run, opts) { return Confirm.ask(what, run, opts); }
 
   /* ==========================================================================
      Multi-select & batch actions (Wave 3)
@@ -4487,6 +4553,240 @@
     }
   };
 
+  /* ==========================================================================
+     בחירה מרובה בסל המחזור — the bin's own selection layer
+
+     The bin is the one list in the app Wave 3's Select cannot reach: it lives
+     inside a modal sheet, and both the long press and Select.tap() decline
+     every touch that lands on `.sheet` on purpose — opening the app-wide batch
+     bar behind an open dialog would offer סמן כהושלם and מחיקה on records that
+     are not on screen. A bin holding thirty expired rows still has to be
+     emptied in one pass, so it carries its OWN selection: the same 500ms long
+     press, the same checkbox, the same bar — scoped to trash entry ids, and to
+     the only two things that can still be done to a binned record.
+
+     Every state transition here is pure (no DOM, no toast), exactly like
+     Select: the delegate is what repaints, which is what lets healthcheck.js
+     drive a whole enter → pick → בחר הכל → restore/purge cycle head-lessly.
+     ========================================================================== */
+
+  var TrashSel = {
+    on: false,
+    picked: {},                  // { '<trash entry id>': 1 }
+    swallow: false,              // the click that follows a long press is not a tap
+
+    /* ---- pure state ---- */
+
+    has: function (id) { return !!TrashSel.picked[id]; },
+    keys: function () { return Object.keys(TrashSel.picked); },
+    count: function () { return TrashSel.keys().length; },
+
+    toggle: function (id) {
+      if (!id) return false;
+      if (TrashSel.picked[id]) delete TrashSel.picked[id];
+      else TrashSel.picked[id] = 1;
+      return TrashSel.has(id);
+    },
+
+    enter: function (id) {
+      TrashSel.on = true;
+      TrashSel.picked = {};
+      if (id) TrashSel.picked[id] = 1;
+      return TrashSel.on;
+    },
+
+    exit: function () {
+      TrashSel.on = false;
+      TrashSel.picked = {};
+      return TrashSel.on;
+    },
+
+    /** every entry the bin is showing, in the order it shows them */
+    visibleKeys: function () {
+      return trashList().map(function (e) { return e.id; });
+    },
+
+    all: function () {
+      TrashSel.visibleKeys().forEach(function (id) { TrashSel.picked[id] = 1; });
+      return TrashSel.count();
+    },
+
+    /**
+     * Pure batch restore: every picked entry goes back into the collection and
+     * the slot it left.
+     *
+     * The order is the whole correctness of this function. An entry's `index`
+     * was recorded against the list AS IT STOOD when that one record left it,
+     * so the only sequence that reproduces the original list is the deletions
+     * run backwards — newest first. Deleting A (slot 0) then C (slot 1 of what
+     * was left) and restoring in that same order lands C one place too early;
+     * restoring C first puts every earlier slot back under it. The bin is
+     * appended to in deletion order, so its own order is the clock.
+     */
+    restore: function (ids) {
+      var binned = trashRows();
+      var order = (Array.isArray(ids) ? ids : [])
+        .map(function (id) { return trashFind(id); })
+        .filter(Boolean)
+        .map(function (e) { return { entry: e, at: binned.indexOf(e) }; })
+        .sort(function (a, b) { return b.at - a.at; });
+
+      var n = 0;
+      order.forEach(function (o) { if (trashRestore(o.entry.id)) n++; });
+      return n;
+    },
+
+    /** ...and the batch with nothing behind it. The caller asks first. */
+    purge: function (ids) {
+      var n = 0;
+      (Array.isArray(ids) ? ids : []).forEach(function (id) {
+        if (trashPurge(id)) n++;
+      });
+      return n;
+    },
+
+    /* ---- painting ---- */
+
+    paint: function () {
+      var n = TrashSel.count();
+      var bar = $('#trashBatchBar');
+      var count = $('#trashBatchCount');
+      var btn = $('#trashSelectBtn');
+      var label = $('#trashSelectLabel');
+
+      if (bar) bar.hidden = !TrashSel.on;
+      if (count) count.textContent = n ? n + ' נבחרו' : 'בחר פריטים';
+      if (btn) {
+        btn.classList.toggle('is-on', TrashSel.on);
+        btn.setAttribute('aria-pressed', TrashSel.on ? 'true' : 'false');
+      }
+      if (label) label.textContent = TrashSel.on ? SELECT_LABEL.on : SELECT_LABEL.off;
+      return n;
+    },
+
+    /** state + a repaint of the bin only: nothing outside the sheet moved */
+    setMode: function (on, id) {
+      if (on) TrashSel.enter(id); else TrashSel.exit();
+      renderTrash();
+      return TrashSel.on;
+    },
+
+    toggleMode: function () { return TrashSel.setMode(!TrashSel.on); },
+
+    /* ---- input ---- */
+
+    /** selection mode owns every tap that lands on a row inside the bin */
+    tap: function (target) {
+      if (!TrashSel.on || !target || !target.closest) return false;
+      if (TrashSel.swallow) { TrashSel.swallow = false; return true; }   // the press itself
+      if (!target.closest('#trashList')) return false;
+
+      var node = target.closest('[data-trashid]');
+      var id = node && node.dataset ? node.dataset.trashid : '';
+      if (!id) return false;
+
+      Haptics.light();
+      TrashSel.toggle(id);
+      renderTrash();
+      return true;
+    },
+
+    /** the bin's bar: שחזור · בחר הכל · מחיקה לצמיתות · סיום בחירה */
+    run: function (action) {
+      if (action === 'mode') { TrashSel.toggleMode(); return; }
+
+      if (action === 'exit') {
+        TrashSel.setMode(false);
+        toast('הבחירה בוטלה');
+        return;
+      }
+
+      if (action === 'all') {
+        var picked = TrashSel.all();
+        renderTrash();
+        toast(picked ? picked + ' פריטים נבחרו' : 'סל המחזור ריק');
+        return;
+      }
+
+      var ids = TrashSel.keys();
+      if (!ids.length) { toast('לא נבחר אף פריט'); return; }
+
+      if (action === 'restore') {
+        var back = TrashSel.restore(ids);
+        TrashSel.setMode(false);
+        if (!back) { toast('לא שוחזר דבר'); return; }
+        Haptics.done();
+        render();                  // the records re-enter lists they had left
+        toast(plural(back, 'פריט אחד שוחזר', 'פריטים שוחזרו'));
+        return;
+      }
+
+      if (action === 'purge') {
+        // the only deletion in the app with no net behind it — a batch of them
+        // asks exactly like a single one does
+        confirmDelete(plural(ids.length, 'פריט אחד', 'פריטים') +
+          ' — לצמיתות, ללא שחזור', function () {
+            var gone = TrashSel.purge(ids);
+            TrashSel.setMode(false);
+            toast(gone
+              ? plural(gone, 'פריט אחד נמחק לצמיתות', 'פריטים נמחקו לצמיתות')
+              : 'לא נמחק דבר');
+          });
+      }
+    },
+
+    /**
+     * The same gesture the cards answer to, bound to the bin. It declines a
+     * press that started on one of the row buttons — those are controls, not a
+     * surface — and swallows the click the press leaves behind, or the row
+     * under the finger would be un-picked the instant it was picked.
+     */
+    bindLongPress: function () {
+      var timer = null, x0 = 0, y0 = 0, id = null;
+
+      function cancel() {
+        if (timer) { clearTimeout(timer); timer = null; }
+        id = null;
+      }
+
+      document.addEventListener('touchstart', function (e) {
+        cancel();
+        TrashSel.swallow = false;
+        if (TrashSel.on || !e.touches || e.touches.length !== 1) return;
+        var t = e.target;
+        if (!t || !t.closest || !t.closest('#trashList')) return;
+        if (t.closest('.mini')) return;
+
+        var node = t.closest('[data-trashid]');
+        var k = node && node.dataset ? node.dataset.trashid : '';
+        if (!k) return;
+
+        id = k;
+        x0 = e.touches[0].clientX;
+        y0 = e.touches[0].clientY;
+        timer = setTimeout(function () {
+          timer = null;
+          if (!id) return;
+          Haptics.done();
+          TrashSel.swallow = true;
+          TrashSel.setMode(true, id);
+          toast('מצב בחירה בסל — סמן פריטים ובחר פעולה בסרגל שלמטה');
+          id = null;
+        }, LONG_PRESS_MS);
+      }, { passive: true });
+
+      document.addEventListener('touchmove', function (e) {
+        if (!timer || !e.touches || !e.touches.length) return;
+        var t = e.touches[0];
+        if (Math.abs(t.clientX - x0) > LONG_PRESS_SLOP ||
+          Math.abs(t.clientY - y0) > LONG_PRESS_SLOP) cancel();
+      }, { passive: true });
+
+      document.addEventListener('touchend', cancel, { passive: true });
+      document.addEventListener('touchcancel', cancel, { passive: true });
+    }
+  };
+
   /* ------------------------------------------------------------ master add */
 
   function openSheet(id) {
@@ -4504,6 +4804,10 @@
     $('#formSheet').hidden = true;
     $('#confirmSheet').hidden = true;
     $('#trashSheet').hidden = true;
+    // a selection belongs to the bin that is open — closing it ends the mode,
+    // or the next visit would open holding picks on rows nobody can see
+    TrashSel.exit();
+    TrashSel.paint();
     Drawer.close();
     document.body.style.overflow = '';
     PREFILL = null;
@@ -4521,6 +4825,7 @@
     // an entry that expired while the app was left open must not be offered
     // for restore just because the tab never reloaded
     if (purgeTrash()) Store.save();
+    TrashSel.exit();                   // every visit starts out of selection mode
     $('#typeSheet').hidden = true;
     $('#formSheet').hidden = true;
     // the sheet is unhidden FIRST: renderTrash() paints the list only while it
@@ -5345,8 +5650,34 @@
       });
   }
 
-  /** [שחזר] / [מחק לצמיתות] inside the bin */
+  /**
+   * [🗑 ריקון סל המחזור] — the only tap in the app that destroys a whole
+   * surface. It goes through the same confirmation door as a single row, with
+   * the bin named inside the question, and it counts what it is about to take
+   * so the answer is never given blind.
+   */
+  function askEmptyTrash() {
+    var n = trashCount();
+    if (!n) { renderTrash(); toast('סל המחזור ריק'); return false; }
+
+    return !!confirmDelete(
+      plural(n, 'פריט אחד', 'פריטים') + ' — לצמיתות, ללא שחזור',
+      function () {
+        var gone = emptyTrash();
+        // nothing is left to be picked, so the selection layer leaves with it
+        TrashSel.setMode(false);
+        if (!gone) { toast('לא נמחק דבר'); return; }
+        toast(plural(gone, 'פריט אחד נמחק לצמיתות', 'פריטים נמחקו לצמיתות'));
+      },
+      { title: CONFIRM_EMPTY_TRASH, yes: 'אישור' }
+    );
+  }
+
+  /** [שחזר] / [מחק לצמיתות] / [ריקון הסל] inside the bin */
   function runTrashAction(action, id) {
+    // the one bin action that is about the bin itself, not about a row in it
+    if (action === 'empty') return askEmptyTrash();
+
     var entry = trashFind(id);
     if (!entry) { renderTrash(); toast('הפריט כבר לא בסל המחזור'); return false; }
 
@@ -5378,6 +5709,10 @@
     // selection mode owns every tap that lands on a card (Wave 3), so it is
     // asked before any control branch below can act on that card
     if (Select.tap(e.target)) return;
+    // ...and the bin owns every tap that lands on one of its rows while its
+    // own selection is live. The two can never both be on: Select declines
+    // `.sheet`, and this one answers to nothing outside #trashList.
+    if (TrashSel.tap(e.target)) return;
 
     var el = e.target.closest ? e.target.closest(
       '[data-nav],[data-action],[data-type],[data-filter],[data-cat],[data-toggle],[data-del],' +
@@ -5385,7 +5720,7 @@
       '[data-tasktab],[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
       '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
       '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo],' +
-      '[data-edit],[data-batch],[data-confirmdel],[data-trash],[data-arch]') : null;
+      '[data-edit],[data-batch],[data-trashbatch],[data-confirmdel],[data-trash],[data-arch]') : null;
 
     // Sprint 8 · universal tap-to-edit — a tap that hit no control at all, but
     // landed on a card, opens that card's own form pre-filled. The check circle,
@@ -5428,6 +5763,7 @@
     }
 
     if (el.dataset.batch) { Select.run(el.dataset.batch); return; }
+    if (el.dataset.trashbatch) { TrashSel.run(el.dataset.trashbatch); return; }
 
     if (el.dataset.action === 'select-mode') { Select.toggleMode(); return; }
     if (el.dataset.action === 'close-confirm') { closeConfirm(); return; }
@@ -5652,6 +5988,8 @@
     Fab.init();                       // the CTA ducks while the page scrolls
     Select.paint();                   // the batch bar starts closed, the pill off
     Select.bindLongPress();           // long press on a card opens selection mode
+    TrashSel.paint();                 // the bin's own bar starts closed too
+    TrashSel.bindLongPress();         // long press on a binned row picks it
     registerServiceWorker();
     Notify.init();
     Sync.init();
@@ -5699,6 +6037,8 @@
       FAB_TOP: FAB_TOP,
       FAB_DELTA: FAB_DELTA,
       CONFIRM_QUESTION: CONFIRM_QUESTION,
+      CONFIRM_YES: CONFIRM_YES,
+      CONFIRM_EMPTY_TRASH: CONFIRM_EMPTY_TRASH,
       SELECTABLE: SELECTABLE,
       UNDO_BATCH_MS: UNDO_BATCH_MS,
       LONG_PRESS_MS: LONG_PRESS_MS,
@@ -5742,8 +6082,15 @@
       trashPut: trashPut,
       trashRestore: trashRestore,
       trashPurge: trashPurge,
+      emptyTrash: emptyTrash,
       purgeTrash: purgeTrash,
       trashRow: trashRow,
+      trashDone: trashDone,
+      selBoxHTML: selBoxHTML,
+
+      // the bin's own selection layer — pure state, so a whole
+      // enter → pick → בחר הכל → restore/purge cycle runs head-lessly
+      TrashSel: TrashSel,
 
       // Sprint 9 — in-place completion, the היסטוריה log and the anti-shake
       // layer. The whole log is pure store work, so healthcheck.js drives a

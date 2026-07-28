@@ -4551,6 +4551,323 @@ check('PROJECT_PLAN documents Sprint 9', () => {
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
 });
 
+/* ========================================================================== */
+/* ====== 26. Field wave — בחירה מרובה inside סל המחזור ==================== */
+/* ========================================================================== */
+
+/**
+ * TrashSel and Select deliberately carry the same method names — one gesture,
+ * two lists — so a bare bodyOf() would read whichever is declared first.
+ * Every check below slices the bin's module out before it looks inside it.
+ */
+function trashSelSrc() {
+  const start = js.indexOf('var TrashSel = {');
+  if (start === -1) return '';
+  return bodyOf(js.slice(start), 'var TrashSel = {');
+}
+
+check('the bin carries its own selection layer, separate from the cards', () => {
+  const U = loadApp().ui;
+  const T = U.TrashSel;
+  if (!T) return 'no APP.ui.TrashSel export';
+  if (T === U.Select) return 'the bin reuses the card selection, which cannot reach a sheet';
+  if (T.on !== false || T.count() !== 0) return 'bin selection does not start closed and empty';
+
+  T.enter('e1');
+  if (!T.on || !T.has('e1')) return 'entering did not pick the row it was given';
+  if (T.toggle('e2') !== true || T.count() !== 2) return 'a second row could not be picked';
+  if (T.toggle('e2') !== false || T.count() !== 1) return 'a picked row could not be un-picked';
+  if (T.toggle('') !== false || T.count() !== 1) return 'an empty id was accepted as a row';
+  T.exit();
+  if (T.on || T.count()) return 'leaving bin selection left state behind';
+  return true;
+});
+
+check('"בחר הכל" inside the bin picks exactly what the bin is showing', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store, T = U.TrashSel;
+  Store.load();
+
+  const ids = Store.data.tasks.slice(0, 2).map(t => t.id);
+  if (ids.length < 2) return 'the seeded store is too small';
+  ids.forEach(id => U.softDelete('tasks', id));
+
+  T.enter();
+  const visible = T.visibleKeys();
+  if (visible.length !== U.trashCount()) return 'the bin offers a different set than it renders';
+  if (visible.join(',') !== U.trashList().map(e => e.id).join(',')) {
+    return 'בחר הכל would pick in an order the bin does not show';
+  }
+  if (T.all() !== visible.length) return 'בחר הכל picked a different number of rows';
+  T.exit();
+  return true;
+});
+
+check('a batch restore puts every picked record back in the slot it left', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store, T = U.TrashSel;
+  Store.load();
+
+  const before = Store.data.tasks.map(t => t.id);
+  if (before.length < 3) return 'the seeded store is too small for a batch';
+  // the first and the third: restoring them together is what proves the order,
+  // because filling slot 2 before slot 0 would land the second one too early
+  const picked = [before[0], before[2]];
+  picked.forEach(id => U.softDelete('tasks', id));
+  if (Store.data.tasks.length !== before.length - 2) return 'the two records never left';
+
+  T.enter();
+  picked.forEach(id => T.toggle(id));
+  const back = T.restore(T.keys());
+  if (back !== 2) return 'the batch restored ' + back + ' records, not 2';
+  if (Store.data.tasks.map(t => t.id).join(',') !== before.join(',')) {
+    return 'the restored records came back in the wrong slots';
+  }
+  if (U.trashCount() !== 0) return 'the restored records are still in the bin';
+  if (T.restore(['no_such_entry']) !== 0) return 'a batch of nothing reported a restore';
+  T.exit();
+  return true;
+});
+
+check('a batch purge destroys exactly the picked rows and nothing else', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store, T = U.TrashSel;
+  Store.load();
+
+  const ids = Store.data.tasks.slice(0, 3).map(t => t.id);
+  if (ids.length < 3) return 'the seeded store is too small for a batch';
+  ids.forEach(id => U.softDelete('tasks', id));
+  if (U.trashCount() !== 3) return 'the bin holds ' + U.trashCount() + ' entries, not 3';
+
+  const gone = T.purge([ids[0], ids[2]]);
+  if (gone !== 2) return 'the purge destroyed ' + gone + ' entries, not 2';
+  if (U.trashCount() !== 1) return 'the purge took rows that were never picked';
+  if (!U.trashFind(ids[1])) return 'the surviving row is not the one that was left alone';
+  // and a purged record must not come back through the other door
+  if (Store.data.tasks.some(t => t.id === ids[0])) return 'a purged record is still in the store';
+  if (T.purge(['no_such_entry']) !== 0) return 'a batch of nothing reported a deletion';
+  return true;
+});
+
+check('the bin is emptied through the one confirmation door, like every deletion', () => {
+  const src = trashSelSrc();
+  if (!src) return 'no TrashSel module';
+  if (src.indexOf('confirmDelete(') === -1) return 'a batch purge destroys without asking';
+  if (!/action === 'restore'/.test(src)) return 'no batch restore action';
+  if (!/action === 'purge'/.test(src)) return 'no batch purge action';
+  if (!/action === 'all'/.test(src)) return 'no בחר הכל action';
+  if (!/action === 'exit'/.test(src)) return 'no way out of selection mode';
+  return true;
+});
+
+check('the bin selection is opened by the same 500ms press, scoped to the bin', () => {
+  const src = trashSelSrc();
+  const press = bodyOf(src, 'bindLongPress: function ()');
+  if (!press) return 'the bin has no long-press binding';
+  if (press.indexOf('LONG_PRESS_MS') === -1) return 'the bin press is not the app-wide 500ms';
+  if (press.indexOf('LONG_PRESS_SLOP') === -1) return 'a scroll inside the bin would open a selection';
+  if (press.indexOf('{ passive: true }') === -1) return 'the bin touch listeners are not passive';
+  if (press.indexOf("closest('#trashList')") === -1) return 'the press is not scoped to the bin list';
+  if (press.indexOf('TrashSel.swallow = true') === -1) {
+    return 'the click after the press would immediately un-pick the row';
+  }
+
+  const tap = bodyOf(src, 'tap: function (target)');
+  if (!tap) return 'no TrashSel.tap()';
+  if (tap.indexOf("closest('#trashList')") === -1) return 'the bin would claim taps outside itself';
+  if (tap.indexOf("closest('[data-trashid]')") === -1) return 'the tap is not resolved to an entry';
+
+  const onClick = (js.match(/function onClick\(e\) \{[\s\S]*?\n  \}\n/) || [''])[0];
+  if (onClick.indexOf('if (TrashSel.tap(e.target)) return;') === -1) {
+    return 'the delegate acts on a binned row before asking the bin selection';
+  }
+  if (onClick.indexOf('TrashSel.run(el.dataset.trashbatch)') === -1) {
+    return 'the bin batch bar is not in the click delegate';
+  }
+  if (js.indexOf('[data-trashbatch]') === -1) return 'the bar is not matched by the delegate';
+  return true;
+});
+
+check('the bin batch bar exists, is labelled, and can never outlive the sheet', () => {
+  ['id="trashBatchBar"', 'id="trashBatchCount"', 'id="trashSelectBtn"',
+    'id="trashSelectLabel"'].forEach(n => {
+      if (html.indexOf(n) === -1) throw new Error('missing ' + n);
+    });
+  ['mode', 'restore', 'all', 'purge', 'exit'].forEach(a => {
+    if (html.indexOf('data-trashbatch="' + a + '"') === -1) {
+      throw new Error('no bin batch action: ' + a);
+    }
+  });
+  // the bar has to live INSIDE the sheet: fixed to the shell it would sit under
+  // it, offering actions on a list the finger cannot see
+  const sheet = (html.match(/<div class="sheet trash"[\s\S]*?\n<\/div>/) || [''])[0];
+  if (!sheet) return 'no bin sheet';
+  if (sheet.indexOf('id="trashBatchBar"') === -1) return 'the bin bar is not inside the bin';
+  if (sheet.indexOf('id="trashSelectBtn"') === -1) return 'the bin pill is not inside the bin';
+
+  const bar = cssRules(css).filter(r => r.sel === '.trash-batchbar')[0];
+  if (!bar) return 'no .trash-batchbar rule';
+  if (!/position:\s*sticky/.test(bar.body)) return 'the bin bar is not sticky inside the sheet';
+
+  // closing the bin ends the mode, or the next visit opens holding picks on
+  // rows nobody can see
+  const close = bodyOf(js, 'function closeSheets(');
+  if (close.indexOf('TrashSel.exit()') === -1) return 'closing the bin leaves a selection armed';
+  const open = bodyOf(js, 'function openTrash(');
+  if (open.indexOf('TrashSel.exit()') === -1) return 'the bin re-opens in selection mode';
+  return true;
+});
+
+check('a binned row is pickable, and a finished one still reads as finished', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store, T = U.TrashSel;
+  Store.load();
+
+  const task = Store.data.tasks[0];
+  APP.tasks.setTaskStatus(task, 'done');
+  U.softDelete('tasks', task.id);
+  const entry = U.trashFind(task.id);
+  if (!entry) return 'the completed task never reached the bin';
+  if (!U.trashDone(entry)) return 'a finished task is not recognised as finished in the bin';
+
+  const now = entry.deletedAt;
+  const idle = U.trashRow(entry, now);
+  if (idle.indexOf('data-trash="restore:') === -1) return 'the idle row lost its שחזר button';
+  if (idle.indexOf('sel-box') !== -1) return 'a checkbox is drawn with no selection live';
+  if (idle.indexOf('is-done') === -1) return 'the finished row carries no is-done state';
+  if (idle.indexOf('>בוצע<') === -1) return 'the strikethrough is the only carrier of "done"';
+
+  T.enter(entry.id);
+  const picked = U.trashRow(entry, now);
+  if (picked.indexOf('sel-box is-picked') === -1) return 'a picked row grows no ticked checkbox';
+  if (picked.indexOf('is-pickable') === -1) return 'the row is not marked as pickable';
+  if (picked.indexOf('data-trash="purge:') !== -1) {
+    return 'the per-row buttons still compete with the checkbox for the same finger';
+  }
+  T.exit();
+
+  // ...and the line itself is CSS, on the title only
+  const rules = cssRules(css);
+  const strike = rules.filter(r => r.sel === '.trash-row.is-done .trash-title')[0];
+  if (!strike || !/text-decoration:\s*line-through/.test(strike.body)) {
+    return 'a finished binned title is not struck through';
+  }
+  if (!rules.some(r => r.sel === '.trash-row.is-picked')) return 'a picked row is not painted';
+  return true;
+});
+
+check('PROJECT_PLAN documents the bin selection wave', () => {
+  const required = [
+    'TrashSel', 'בחירה מרובה בסל', 'data-trashbatch', 'trash-batchbar', 'v13'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ========================================================================== */
+/* ====== 27. ריקון סל המחזור — the whole bin, in one tap ================== */
+/* ========================================================================== */
+
+check('ריקון סל המחזור is offered inside the bin, and starts hidden', () => {
+  const sheet = (html.match(/<div class="sheet trash"[\s\S]*?\n<\/div>/) || [''])[0];
+  if (!sheet) return 'no bin sheet';
+  if (sheet.indexOf('id="trashEmptyBtn"') === -1) return 'the empty-bin button is not inside the bin';
+  if (sheet.indexOf('data-trash="empty"') === -1) return 'the empty-bin button is not wired';
+  if (sheet.indexOf('🗑 ריקון סל המחזור') === -1) return 'the button is not labelled 🗑 ריקון סל המחזור';
+  // an empty bin must never offer to be emptied, so the row ships hidden and
+  // renderTrash() is what decides it can be seen
+  if (!/<div class="trash-tools" id="trashTools" hidden>/.test(html)) {
+    return 'the control row does not ship hidden';
+  }
+  const rules = cssRules(css);
+  if (!rules.some(r => r.sel === '.trash-tools')) return 'no .trash-tools rule';
+  const hid = rules.filter(r => r.sel === '.trash-tools[hidden]')[0];
+  if (!hid || !/display:\s*none/.test(hid.body)) {
+    return 'a display rule would defeat the hidden attribute the row ships with';
+  }
+  return true;
+});
+
+check('the bin control is hidden on an empty bin and while a selection is live', () => {
+  const rt = bodyOf(js, 'function renderTrash(');
+  if (!rt) return 'no renderTrash()';
+  if (rt.indexOf("$('#trashTools')") === -1) return 'renderTrash() never touches the control row';
+  if (!/hidden\s*=\s*!rows\.length\s*\|\|\s*TrashSel\.on/.test(rt)) {
+    return 'the control is shown over an empty bin, or next to the batch bar it duplicates';
+  }
+  return true;
+});
+
+check('the empty action is resolved before the bin looks for a row id', () => {
+  const run = bodyOf(js, 'function runTrashAction(');
+  if (!run) return 'no runTrashAction()';
+  const at = run.indexOf("action === 'empty'");
+  if (at === -1) return "the bin control's action is not handled";
+  const lookup = run.indexOf('trashFind(id)');
+  if (lookup !== -1 && at > lookup) {
+    return 'the empty action is looked up as a row id first and dies in that lookup';
+  }
+  if (js.indexOf('[data-trash]') === -1) return 'the delegate does not match the control';
+  return true;
+});
+
+check('emptying the bin asks first, and names the bin inside the question', () => {
+  const U = loadApp().ui;
+  if (U.CONFIRM_EMPTY_TRASH !== 'האם אתה בטוח שברצונך למחוק את סל המחזור?') {
+    return 'the question does not name what it destroys: ' + U.CONFIRM_EMPTY_TRASH;
+  }
+
+  const ask = bodyOf(js, 'function askEmptyTrash(');
+  if (!ask) return 'no askEmptyTrash()';
+  if (ask.indexOf('confirmDelete(') === -1) return 'the bin is emptied without asking';
+  if (ask.indexOf('CONFIRM_EMPTY_TRASH') === -1) return 'the door opens with the generic question';
+  if (!/yes:\s*'אישור'/.test(ask)) return 'the accept button is not labelled אישור';
+  if (ask.indexOf('trashCount()') === -1) return 'an empty bin is asked about anyway';
+
+  // one door, reworded — never a second one. And the wording is reset on every
+  // ask, or the next row deleted anywhere in the app inherits this question.
+  if ((js.match(/id="confirmSheet"|id='confirmSheet'/g) || []).length > 1) {
+    return 'a second confirmation surface was added';
+  }
+  const door = bodyOf(js, 'ask: function (what, run, opts)');
+  if (!door) return 'Confirm.ask() does not take a wording override';
+  if (door.indexOf('o.title || CONFIRM_QUESTION') === -1) return 'the question is not reset per ask';
+  if (door.indexOf('o.yes || CONFIRM_YES') === -1) return 'the accept label is not reset per ask';
+
+  // ...and both answers are on screen, which is what makes it a question
+  const confirm = (html.match(/<div class="sheet confirm"[\s\S]*?\n<\/div>/) || [''])[0];
+  if (confirm.indexOf('data-action="close-confirm"') === -1) return 'no ביטול';
+  if (confirm.indexOf('>ביטול<') === -1) return 'the cancel button is not labelled ביטול';
+  if (confirm.indexOf('data-confirmdel') === -1) return 'no accept button';
+  return true;
+});
+
+check('ריקון הסל destroys every entry in the bin and nothing outside it', () => {
+  const APP = loadApp(), U = APP.ui, Store = APP.Store;
+  Store.load();
+
+  const ids = Store.data.tasks.slice(0, 3).map(t => t.id);
+  if (ids.length < 3) return 'the seeded store is too small';
+  const notes = Store.data.notes.length;
+  const tasksLeft = Store.data.tasks.length - 3;
+  ids.forEach(id => U.softDelete('tasks', id));
+  if (U.trashCount() !== 3) return 'the bin holds ' + U.trashCount() + ' entries, not 3';
+
+  const gone = U.emptyTrash();
+  if (gone !== 3) return 'ריקון הסל reported ' + gone + ' deletions, not 3';
+  if (U.trashCount() !== 0) return 'the bin still holds ' + U.trashCount() + ' entries';
+  if (Store.data.tasks.length !== tasksLeft) return 'emptying the bin reached the live list';
+  if (Store.data.notes.length !== notes) return 'emptying the bin reached a collection it was never given';
+  // and a purged record must not come back through the other door
+  if (Store.data.tasks.some(t => ids.indexOf(t.id) !== -1)) return 'a purged record is still in the store';
+  if (U.emptyTrash() !== 0) return 'an empty bin reported a deletion';
+  return true;
+});
+
+check('PROJECT_PLAN documents ריקון סל המחזור', () => {
+  const required = [
+    'ריקון סל המחזור', 'trashEmptyBtn', 'data-trash="empty"', 'emptyTrash', 'v14'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
 /* --------------------------------------------------------------- report */
 
 report();

@@ -872,6 +872,13 @@ body.is-selecting .toast{ bottom:calc(var(--bar-h) + var(--safe-b) + 132px); }
   margin-bottom:12px;
   font-size:12.5px; line-height:1.65; color:var(--faint);
 }
+/* ריקון הסל sits above the list, not inside the batch bar: it acts on the
+   whole bin rather than on a picked set, and a destructive button that can
+   reach everything belongs where it is read, not where the thumb rests. */
+.trash-tools{ display:flex; justify-content:flex-start; margin-bottom:12px; }
+/* a display rule must never defeat the hidden attribute it ships with */
+.trash-tools[hidden]{ display:none; }
+
 .trash-list{ display:flex; flex-direction:column; gap:8px; }
 
 .trash-row{
@@ -890,6 +897,28 @@ body.is-selecting .toast{ bottom:calc(var(--bar-h) + var(--safe-b) + 132px); }
 /* the one button in the app with nothing behind it — it is coloured like it */
 .mini.is-danger{ color:var(--danger); border-color:var(--danger-edge); }
 .mini.is-danger:hover{ color:var(--danger); background:var(--danger-soft); }
+
+/* ---------- בחירה מרובה inside the bin ---------- */
+
+/* the pill lives in a sheet head, not in the top bar, so it drops the
+   margin the header stack gives it — everything else about it is the same
+   control, deliberately: one gesture, one look, two lists */
+.trash-select{ margin-top:0; }
+
+.trash-row.is-pickable{ cursor:pointer; }
+.trash-row.is-picked{ border-color:var(--gold-edge); background:var(--gold-soft); }
+
+/* a task that was already finished when it was deleted still reads finished —
+   the בוצע badge next to it is what carries the meaning without the line */
+.trash-row.is-done .trash-title{ text-decoration:line-through; color:var(--muted); }
+
+/* sticky inside the scrolling sheet, never fixed to the shell: #batchBar is
+   z-index 45 and the sheet is 60, so a fixed copy would sit behind the bin */
+.trash-batchbar{
+  position:sticky; z-index:1;
+  inset-inline:auto; bottom:0;
+  margin-top:12px;
+}
 
 /* the narrowest phones keep the pill square, exactly like בחירה מרובה */
 @media (max-width:420px){

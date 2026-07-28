@@ -328,13 +328,38 @@
   <div class="sheet-grab" aria-hidden="true"></div>
   <div class="sheet-head">
     <h2 id="trashTitle">🗑 סל מחזור</h2>
+    <!-- בחירה מרובה בתוך הסל — also entered by long-pressing any row -->
+    <button class="select-btn trash-select" id="trashSelectBtn" data-trashbatch="mode"
+            type="button" aria-pressed="false">
+      <span class="select-ico" aria-hidden="true">☑</span>
+      <span class="select-label" id="trashSelectLabel">בחירה מרובה</span>
+    </button>
     <button class="sheet-x" data-action="close-sheet" type="button" aria-label="סגירה">✕</button>
   </div>
   <p class="trash-hint">
     כל פריט שנמחק ממתין כאן 10 ימים. אפשר לשחזר אותו למקום שממנו נמחק,
     או למחוק אותו לצמיתות כבר עכשיו. אחרי 10 ימים הוא נמחק אוטומטית.
+    לחיצה ארוכה על פריט פותחת בחירה מרובה — לשחזור או למחיקה של כמה פריטים יחד.
   </p>
+  <!-- ריקון הסל — the one tap that clears every row at once. It hides itself
+       on an empty bin and while בחירה מרובה is live: that layer already owns a
+       מחיקה לצמיתות for exactly the rows the finger picked. -->
+  <div class="trash-tools" id="trashTools" hidden>
+    <button class="mini is-danger" id="trashEmptyBtn" data-trash="empty" type="button">🗑 ריקון סל המחזור</button>
+  </div>
   <div class="trash-list" id="trashList"></div>
+
+  <!-- the bin's batch bar. It is STICKY inside the sheet rather than fixed to
+       the shell like #batchBar: a fixed bar would sit under the sheet (z-index
+       60) and offer actions on a list the finger cannot see. -->
+  <div class="batchbar trash-batchbar" id="trashBatchBar" role="toolbar"
+       aria-label="פעולות על הפריטים שנבחרו בסל" hidden>
+    <span class="batch-count" id="trashBatchCount">בחר פריטים</span>
+    <button class="batch-btn"           data-trashbatch="restore" type="button">↺ שחזור</button>
+    <button class="batch-btn"           data-trashbatch="all"     type="button">בחר הכל</button>
+    <button class="batch-btn is-danger" data-trashbatch="purge"   type="button">🗑 מחיקה לצמיתות</button>
+    <button class="batch-btn is-quiet"  data-trashbatch="exit"    type="button">סיום בחירה</button>
+  </div>
   <div class="sheet-tail"></div>
 </div>
 
