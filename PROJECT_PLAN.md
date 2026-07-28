@@ -1258,6 +1258,133 @@ with both the first-install and the loop guard and cannot land mid-edit; `reg.wa
 inspected and `SKIP_WAITING` is both sent and answered; and the resume check exists and is
 throttled.
 
+### 7.4m Sprint 10 — the tasks that disappeared, a home for notes, and reminders that make a sound (shipped)
+
+The field report, from a UX pass against TickTick / Todoist / Morgen / Notion: on **היום שלי**
+the chip reads *"פתוחות: 3"* while the timeline and the daily list underneath are **empty**.
+
+Both statements were true. `openTasks()` counts every task that is not הושלם or בוטל; the board
+under it draws `x.due === today`. A task dated next Tuesday, and a task created with no date at
+all, were counted by the first and drawn by neither — and there was no screen anywhere in the app
+that would show them. Four gaps, one at a time.
+
+#### §1 The task views — היום · בקרוב · נכנסים · הכל
+
+`TASK_TABS` becomes `['all', 'today', 'upcoming', 'inbox', 'late', 'waiting', 'done']`.
+
+| View | Predicate (`taskMatchesTab`) | Reads as |
+|---|---|---|
+| **היום** | `due === today` | today's board |
+| **בקרוב** | `due > today` | the future, chronologically |
+| **נכנסים** | `!due` | captured, not yet scheduled |
+| **באיחור** | `due < today` | overdue |
+| **הכל** | everything | the union that proves nothing fell out |
+
+The first four are **mutually exclusive and, between them, exhaustive** over every task still on
+the board — a task is dated today, or later, or earlier, or not at all. That invariant is the
+whole fix, and `healthcheck.js` §42a asserts it by partitioning a synthetic store.
+
+Two supporting changes make **נכנסים** reachable at all:
+
+- **The task form no longer pre-fills a due date**, and `submitForm()` writes `due: v.due || ''`
+  instead of `due: v.due || todayISO()`. A dateless task could not previously *exist* — the
+  writer invented today for it — so the Inbox would have stayed permanently empty. The toast says
+  so: *"המשימה נוספה לנכנסים"*.
+- **בקרוב is sorted by `sortByDate()`, not `sortTasks()`.** The board sort floats high priority
+  across dates, which is right for a flat list and wrong for a calendar-shaped one: a low-priority
+  task tomorrow must outrank a high-priority one next week. Priority only ever breaks a tie inside
+  one day. The list is grouped by `upcomingBand()` captions (`.up-band`), which carry **no**
+  `data-rec` — the membership engine keeps reading exactly the key list `shownTasks()` promised.
+
+#### §1.2 The משימות קרובות widget on My Day
+
+Under **לביצוע היום**, a collapsible block (`#upcomingBlock`, `data-upcoming`) titled
+*"משימות קרובות (7 הימים הבאים) / ללא תאריך"*. It holds `upcomingSoon()` (dated, open, within
+`UPCOMING_DAYS = 7`) plus `inboxTasks()`, chronologically, undated last. It is registered in
+`SECTIONS` against `#upcomingList`, so it repaints on membership like every other container.
+
+It **starts open** (`prefs.upcomingOpen`, defaulted for stores written before it existed): a
+widget that hides the thing it exists to reveal is the bug it was written to fix.
+
+#### §2 פתקים ורשימות — a dedicated area
+
+The משימות screen gains a workspace switcher (`.work-tabs`, `data-work`) over three panes
+(`data-workpane`): **✓ משימות** (sub-tabs + list + היסטוריה), **☰ רשימות** (checklists — ציוד,
+קניות, תתי־משימות), **✎ פתקים** (quick capture — רעיונות, סיכומי שיחות, טקסט חופשי). The choice
+persists in `prefs.workspace`; a `data-tasktab` deep-link from an attention card switches into
+משימות on the way, since the sub-tab strip lives there.
+
+**CRM link (§2c).** `notes.client_id` has existed in D1 since Sprint 5 and was carried by
+`TO_ROW` / `FROM_ROW` — only the *form* never exposed it, so a note could never be filed under a
+client and any edit erased whatever a sync had brought in. The note form now offers
+`clientPicker()`, `TO_FORM.notes` round-trips it, `applyEdit` writes it back, creating a linked
+note writes a `link` line into that client's timeline, and `clientChip()` puts the client's name
+on the note, list and task rows.
+
+#### §3 Reminders — per-record leads and an audio chime
+
+`REMIND_OPTIONS = ['default', 'at', '15', '60', '1440', 'none']`, offered on both the task and the
+event form, with the mandated labels: **בזמן האירוע · 15 דקות לפני · שעה לפני · יום לפני**, plus
+**ללא התראה** (mutes one record without touching the global toggle) and the system default.
+
+- `remindLead(rec, lead)` returns the window in minutes, `null` for muted, and `prefs.notify.lead`
+  for `'default'` — so **every record written before this sprint behaves exactly as it did**.
+- `Notify.due()` scans **today and tomorrow**: "יום לפני" is a 1440-minute lead, and a reminder a
+  day early is by definition raised on the day before the one it is about.
+- The fired-ledger key becomes `id@<the record's own date>`, not `id@today`, and the daily sweep
+  drops keys strictly in the past. Keyed by today, a day-before reminder would be swept overnight
+  and fire a second time in the morning.
+- **The chime is synthesised** (`Chime`, Web Audio, two sine notes A5→D6 with an exponential
+  decay). An `.mp3` would be a tenth asset in the service-worker shell, a second thing to
+  cache-bust and a 404 away from silence; an oscillator is none of those and works offline by
+  construction. Every entry point declines rather than throws where audio is unavailable.
+  `Chime.unlock()` runs inside the enabling tap, because the autoplay policy only ever starts a
+  context inside a gesture. `#soundBtn` is its own toggle (`prefs.notify.sound`, default on).
+- **Server-sent push carries the same sound.** A worker has no `AudioContext`, so `sw.js` posts
+  `{ type: 'PUSH_CHIME' }` to every open client after `showNotification()`, and `app.js` answers
+  it on the `serviceWorker` `message` channel. Both notifications now set `silent: false`.
+
+#### §4 Time-blocking
+
+`timelineEntries()` merges today's events with `timedTasksToday()` — every open board task that
+carries a clock time — into `{collection, rec, at, hour}` slots. A task set for 14:00 is drawn as
+a compact `.row.task` inside the 14:00 bucket, beside the meetings it is competing with, so the
+day reads as a whole. Untimed tasks are unaffected and still belong to **לביצוע היום**.
+
+The B0 invariant is extended rather than relaxed: entries sort by **bucket first, clock second**.
+An untimed record clamps into the 08:00 bucket but sorts last by the clock, so sorting by the
+clock alone would report an order the renderer does not paint, `sameKeys()` would answer "changed"
+on every tap, and the container under the finger would be rebuilt every time.
+
+#### §5 Schema, shell and verification
+
+**Schema (migration `0003_sprint10_remind.sql`, append-only).** `ALTER TABLE events ADD COLUMN
+remind_key TEXT` and the same on `tasks`, backfilled to `'default'` so no existing row changes
+behaviour. The column trails every earlier one in the SQL, in `functions/api/_shared.js` `SCHEMA`
+and in `app.js` `SYNC_SCHEMA`; `healthcheck.js` rebuilds the order out of 0001 + 0002 + 0003 and
+proves all three still agree.
+
+`remind_key` joins `PRESERVE_IF_BLANK` for **both** tables. `/api/gcal/sync` writes whole event
+rows built from a Google payload, which knows nothing about this vocabulary and would otherwise
+null the column on every inbound edit. That is only safe because the client never emits a blank —
+`'default'` is how it says "no opinion", which is why the vocabulary has no `''`.
+
+**Shipped shell** — `sw.js` is bumped to `v16`, with `app.js?v=v16` and `styles.css?v=v16` in
+`index.html`.
+
+**Verification** — `healthcheck.js` §42 adds 17 checks, executed rather than pattern-matched: the
+four-view partition over a synthetic store; the Inbox writer no longer inventing today; the
+chronological sort and its day bands; the 7-day widget window (day 7 in, day 8 out) and its
+`SECTIONS` registration; the three workspaces and their panes; a full note↔client link round-trip
+through `TO_FORM` and `applyEdit`; every mandated lead resolving to its minute count and `none`
+to `null`; a real `Notify.due()` run in which only the 1440 lead reaches tomorrow, a muted record
+is never announced and a completed task is skipped; a driven `Notify.tick()` proving the ledger is
+keyed by the record's own date and fires exactly once; the chime declining safely with no
+`AudioContext` and shipping no audio asset; `PUSH_CHIME` on both sides; a timed task landing in
+hour 14 with the painted order still equal to the reported order; migration 0003 being append-only
+and agreeing three ways, including a `remind_key` round-trip through `toRow`/`fromRow`; and the
+`v16` bump reaching both cache-busted URLs.
+
 ### 7.4 General layout
 
 **Layout direction:** RTL by default (`dir="rtl"`), with LTR fallback driven by locale.

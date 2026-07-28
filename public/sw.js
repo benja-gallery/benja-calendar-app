@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v15';  // update path — the phone now reloads onto new code
+var CACHE_VERSION = 'v16';  // Sprint 10 — Inbox/Upcoming, notes area, reminder chime
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */
@@ -163,12 +163,31 @@ self.addEventListener('push', function (event) {
       lang: 'he',
       tag: payload.tag || 'benja-push',
       renotify: !!payload.tag,
+      // the OS tone can be silenced by a profile the app has no say in; the
+      // app's own chime (below) is not subject to that
+      silent: false,
       vibrate: [110, 60, 110],
       data: { url: payload.url },
       actions: [{ action: 'open', title: 'פתיחת היומן' }]
-    })
+    }).then(chimeInClients)
   );
 });
+
+/**
+ * A worker has no audio of its own — there is no AudioContext in this scope.
+ * When a window is open it does have one, so the sound is delegated: the page
+ * answers PUSH_CHIME by playing the same two-note bell a locally scheduled
+ * reminder plays. With no window open the notification's own tone is all
+ * there is, which is exactly what the platform intends.
+ */
+function chimeInClients() {
+  return self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+    .then(function (list) {
+      list.forEach(function (c) {
+        try { c.postMessage({ type: 'PUSH_CHIME' }); } catch (e) { /* gone */ }
+      });
+    })['catch'](function () { /* no clients — the OS tone stands alone */ });
+}
 
 self.addEventListener('notificationclick', function (event) {
   event.notification.close();

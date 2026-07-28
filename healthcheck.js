@@ -513,7 +513,14 @@ check('reminder scan ignores the category filter (business must not be muted)', 
 check('notification state is persisted and never double-fires', () => {
   if (!/prefs\.notify/.test(js)) return 'toggle state is not persisted';
   if (!/prefs\.fired/.test(js)) return 'no fired-ledger — a reminder would repeat every scan';
-  if (!/d\.prefs\.notify = \{ on: false, lead: 10 \}/.test(js)) return 'legacy stores are not migrated';
+  // Sprint 10 added the chime vote to the same block, so the fallback shape
+  // grew a third key — the point of the check is that a legacy store gets one
+  if (!/d\.prefs\.notify = \{ on: false, lead: 10, sound: true \}/.test(js)) {
+    return 'legacy stores are not migrated';
+  }
+  if (!/notify\.sound = d\.prefs\.notify\.sound !== false/.test(js)) {
+    return 'the chime pref is not defaulted for a store written before it existed';
+  }
   return true;
 });
 
@@ -730,7 +737,11 @@ check('tasks view exposes the four mandated quick sub-tabs', () => {
     if (view.indexOf('>' + l + ' <') === -1) throw new Error('missing sub-tab label ' + l);
   });
   if (view.indexOf('role="tablist"') === -1) return 'sub-tabs are not exposed as a tablist';
-  if (!/TASK_TABS = \['all', 'today', 'late', 'waiting', 'done'\]/.test(js)) return 'TASK_TABS vocabulary changed';
+  // Sprint 10 appended בקרוב and נכנסים; the original four are still here, in
+  // the order they were mandated in, and 'all' still leads the vocabulary
+  if (!/TASK_TABS = \['all', 'today', 'upcoming', 'inbox', 'late', 'waiting', 'done'\]/.test(js)) {
+    return 'TASK_TABS vocabulary changed';
+  }
   return true;
 });
 
@@ -1375,9 +1386,10 @@ const WORKER_FILES = ['_shared', '_collection'].concat(WORKER_ROUTES)
   .map(n => 'functions/api/' + n + '.js');
 const MIGRATION = 'migrations/0001_sprint5_init.sql';
 const MIGRATION_GCAL = 'migrations/0002_sprint6_gcal.sql';
+const MIGRATION_REMIND = 'migrations/0003_sprint10_remind.sql';
 
 check('Sprint 5 artefacts are present (worker routes, migration, wrangler)', () => {
-  const wanted = WORKER_FILES.concat([MIGRATION, MIGRATION_GCAL, 'wrangler.toml']);
+  const wanted = WORKER_FILES.concat([MIGRATION, MIGRATION_GCAL, MIGRATION_REMIND, 'wrangler.toml']);
   const missing = wanted.filter(f => !fs.existsSync(at(f)));
   return missing.length ? 'missing: ' + missing.join(', ') : true;
 });
@@ -1422,13 +1434,17 @@ check('the six mandated /api routes each export the CRUD handlers', () => {
 
 const sql = read(MIGRATION);
 const sqlGcal = read(MIGRATION_GCAL);
+const sqlRemind = read(MIGRATION_REMIND);
+
+/** every append-only migration after 0001, in the order SQLite would apply them */
+const LATER_MIGRATIONS = [sqlGcal, sqlRemind];
 
 /**
  * Live column order of a table, rebuilt the way SQLite itself builds it:
  * the CREATE TABLE declaration, then every ALTER TABLE ADD COLUMN in migration
- * order. Sprint 6 appends three columns to `events` that way, so the Worker and
- * the client have to list them in exactly that trailing position or the drift
- * check below fires.
+ * order. Sprint 6 appends three columns to `events` that way and Sprint 10
+ * appends one more to `events` and `tasks`, so the Worker and the client have
+ * to list them in exactly that trailing position or the drift check below fires.
  */
 function sqlColumns(table) {
   const m = sql.match(new RegExp('CREATE TABLE IF NOT EXISTS ' + table + '\\s*\\(([\\s\\S]*?)\\n\\);'));
@@ -1440,9 +1456,11 @@ function sqlColumns(table) {
     .filter(c => c && !/^(PRIMARY|FOREIGN|UNIQUE|CHECK|CONSTRAINT)$/i.test(c));
 
   const added = [];
-  const re = new RegExp('ALTER TABLE ' + table + '\\s+ADD COLUMN\\s+(\\w+)', 'g');
-  let hit;
-  while ((hit = re.exec(sqlGcal)) !== null) added.push(hit[1]);
+  LATER_MIGRATIONS.forEach(src => {
+    const re = new RegExp('ALTER TABLE ' + table + '\\s+ADD COLUMN\\s+(\\w+)', 'g');
+    let hit;
+    while ((hit = re.exec(src)) !== null) added.push(hit[1]);
+  });
 
   return declared.concat(added);
 }
@@ -3056,8 +3074,11 @@ check('the timeline reports the rows it PAINTS, not the rows it sorted (B0)', ()
   if (keys[1] !== 'events:' + nine.id) return '09:00 is not reported second';
   if (keys[2] !== 'events:' + late.id) return 'the out-of-window event was dropped from the membership';
 
+  // Sprint 10 — a timeline row now holds {collection, rec} entries, because a
+  // timed TASK is blocked into its hour beside the meetings (§4). The invariant
+  // is unchanged: what is painted and what is reported must be one list.
   const flat = [];
-  U.timelineRows().forEach(r => r.list.forEach(e => flat.push('events:' + e.id)));
+  U.timelineRows().forEach(r => r.list.forEach(e => flat.push(e.collection + ':' + e.rec.id)));
   if (flat.join(',') !== keys.join(',')) return 'the painted rows and the reported keys disagree';
 
   const section = U.SECTIONS.filter(s => s.sel === '#timeline')[0];
@@ -4922,6 +4943,526 @@ check('a resumed home-screen app re-checks for a new version', () => {
 
 check('PROJECT_PLAN documents the update path', () => {
   const required = ['controllerchange', 'SKIP_WAITING', 'app.js?v=', 'v15'];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ================= 42. Sprint 10 — Inbox, notes area, reminders ============
+   The field report: "פתוחות: 3" on My Day with an empty board underneath.
+   Both statements were true and neither was useful, because a task dated next
+   week or dated not at all had nowhere on screen it could be found. Everything
+   below pins the four surfaces that answer it — the task views, the משימות
+   קרובות widget, the notes & lists workspace and the reminder engine — and
+   every one of them is executed for real, not pattern-matched. */
+
+/** minutes since midnight, on the clock these checks are actually running on */
+function clockNow() {
+  const d = new Date();
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+/** minutes-since-midnight → 'HH:MM', wrapping into the next day */
+function hhmm(m) {
+  const x = ((m % 1440) + 1440) % 1440;
+  return String(Math.floor(x / 60)).padStart(2, '0') + ':' +
+    String(x % 60).padStart(2, '0');
+}
+
+/* ---- 42a. the four task views ---- */
+
+check('the tasks view ships בקרוב and נכנסים as real sub-tabs', () => {
+  const view = (html.match(/<section class="view" id="view-tasks"[\s\S]*?<\/section>/) || [''])[0];
+  if (!view) return 'no #view-tasks section';
+  ['upcoming', 'inbox'].forEach(t => {
+    if (view.indexOf('data-tasktab="' + t + '"') === -1) throw new Error('no sub-tab for ' + t);
+    if (view.indexOf('data-taskcount="' + t + '"') === -1) throw new Error('no live counter for ' + t);
+  });
+  ['בקרוב', 'נכנסים'].forEach(l => {
+    if (view.indexOf('>' + l + ' <') === -1) throw new Error('missing sub-tab label ' + l);
+  });
+  return true;
+});
+
+check('היום / בקרוב / נכנסים / באיחור partition the whole board', () => {
+  const APP = loadApp(), T = APP.tasks, Store = APP.Store, D = APP.dates;
+  Store.load();
+  const today = APP.isoDate(new Date());
+
+  Store.data.tasks.length = 0;
+  const rows = [
+    { title: 'היום', due: today },
+    { title: 'מחר', due: D.addDaysISO(today, 1) },
+    { title: 'בעוד שבועיים', due: D.addDaysISO(today, 14) },
+    { title: 'ללא תאריך', due: '' },
+    { title: 'אתמול', due: D.addDaysISO(today, -2) }
+  ].map(r => Store.add('tasks', {
+    type: 'task', title: r.title, category: 'personal', due: r.due, time: '',
+    status: 'todo', priority: 'medium', nextAction: '', subtasks: [],
+    done: false, notes: '', clientId: ''
+  }));
+
+  const VIEWS = ['today', 'upcoming', 'inbox', 'late'];
+  rows.forEach(t => {
+    const hits = VIEWS.filter(v => T.taskMatchesTab(t, v, today));
+    if (hits.length !== 1) {
+      throw new Error('"' + t.title + '" matches ' + hits.length + ' views [' + hits.join(', ') + ']');
+    }
+  });
+
+  // and הכל really is the union — nothing may be reachable only through it
+  const inAll = rows.filter(t => T.taskMatchesTab(t, 'all', today)).length;
+  if (inAll !== rows.length) return 'הכל does not hold every task';
+  return true;
+});
+
+check('a task saved with no date lands in נכנסים instead of claiming today', () => {
+  // the bug that made the Inbox unreachable: the writer defaulted an empty
+  // date to todayISO(), so a dateless task could not exist in the first place
+  if (/due: v\.due \|\| todayISO\(\)/.test(js)) {
+    return 'submitForm still back-fills an empty due date with today';
+  }
+  if (js.indexOf("due: v.due || ''") === -1) return 'an empty date is not preserved on create';
+  // ...and the form must not pre-fill one either, or the field is never empty
+  const taskForm = (js.match(/task: function \(\) \{[\s\S]*?\n {4}\},/) || [''])[0];
+  if (/name="due" value="/.test(taskForm)) return 'the task form still pre-fills a due date';
+  return true;
+});
+
+check('בקרוב is read forwards through time, not by priority', () => {
+  const APP = loadApp(), T = APP.tasks, D = APP.dates;
+  const today = APP.isoDate(new Date());
+  const mk = (title, due, priority, time) => ({
+    title, due, priority, time, status: 'todo', done: false, subtasks: []
+  });
+
+  // a low-priority task tomorrow must outrank a high-priority one next week
+  const sorted = T.sortByDate([
+    mk('רחוק', D.addDaysISO(today, 9), 'high', ''),
+    mk('ללא תאריך', '', 'high', ''),
+    mk('מחר מאוחר', D.addDaysISO(today, 1), 'high', '18:00'),
+    mk('מחר מוקדם', D.addDaysISO(today, 1), 'low', '08:00')
+  ]).map(t => t.title);
+
+  if (sorted.join(' | ') !== 'מחר מוקדם | מחר מאוחר | רחוק | ללא תאריך') {
+    return 'chronological order is ' + sorted.join(' | ');
+  }
+
+  // the day-band captions the list is grouped by
+  if (T.upcomingBand('', today) !== 'ללא תאריך יעד') return 'an undated task has no band';
+  if (T.upcomingBand(D.addDaysISO(today, 1), today).indexOf('מחר') === -1) return 'tomorrow has no band';
+  if (T.upcomingBand(D.addDaysISO(today, 10), today).indexOf('בשבוע הבא') === -1) {
+    return 'the second week has no band';
+  }
+  return true;
+});
+
+/* ---- 42b. the משימות קרובות widget on My Day ---- */
+
+check('the My Day widget holds the next 7 days AND everything undated', () => {
+  const APP = loadApp(), T = APP.tasks, Store = APP.Store, D = APP.dates;
+  Store.load();
+  const today = APP.isoDate(new Date());
+
+  Store.data.tasks.length = 0;
+  const add = (title, due) => Store.add('tasks', {
+    type: 'task', title, category: 'personal', due, time: '',
+    status: 'todo', priority: 'medium', nextAction: '', subtasks: [],
+    done: false, notes: '', clientId: ''
+  });
+
+  const now = add('היום', today);
+  const soon = add('בעוד 3', D.addDaysISO(today, 3));
+  const edge = add('בעוד 7', D.addDaysISO(today, 7));
+  const far = add('בעוד 8', D.addDaysISO(today, 8));
+  const none = add('ללא תאריך', '');
+
+  const week = T.upcomingSoon().map(t => t.id);
+  if (week.indexOf(now.id) !== -1) return "today's task belongs to the board, not to בקרוב";
+  if (week.indexOf(soon.id) === -1 || week.indexOf(edge.id) === -1) return 'the 7-day window is too narrow';
+  if (week.indexOf(far.id) !== -1) return 'the window leaks past ' + T.UPCOMING_DAYS + ' days';
+
+  const inbox = T.inboxTasks().map(t => t.id);
+  if (inbox.join() !== none.id) return 'נכנסים is ' + inbox.length + ' rows, expected exactly the undated one';
+
+  // the widget is the two together, chronologically, undated last
+  const widget = T.upcomingWidget().map(t => t.id);
+  if (widget.join(',') !== [soon.id, edge.id, none.id].join(',')) {
+    return 'widget order is ' + widget.length + ' rows in an unexpected sequence';
+  }
+  return true;
+});
+
+check('the widget is a registered container, so membership drives its repaints', () => {
+  ['upcomingBlock', 'upcomingToggle', 'upcomingList', 'upcomingCount', 'upcomingMeta']
+    .forEach(id => {
+      if (html.indexOf('id="' + id + '"') === -1) throw new Error('no #' + id);
+    });
+  if (html.indexOf('data-upcoming=') === -1) return 'the widget cannot be collapsed';
+  if (html.indexOf('aria-controls="upcomingList"') === -1) return 'the toggle is not wired to its region';
+  if (js.indexOf('function renderUpcoming') === -1) return 'no renderUpcoming()';
+
+  const APP = loadApp();
+  const section = APP.ui.SECTIONS.filter(s => s.sel === '#upcomingList')[0];
+  if (!section) return 'the widget is not a registered SECTION — it would never rebuild';
+  if (section.view !== 'today') return 'the widget is registered against the wrong view';
+
+  const Store = APP.Store;
+  Store.load();
+  Store.data.tasks.length = 0;
+  const t = Store.add('tasks', {
+    type: 'task', title: 'ללא תאריך', category: 'personal', due: '', time: '',
+    status: 'todo', priority: 'medium', nextAction: '', subtasks: [],
+    done: false, notes: '', clientId: ''
+  });
+  if (section.keys().join() !== 'tasks:' + t.id) return 'the section reports a different key list';
+  return true;
+});
+
+check('the widget opens by default and its state survives a reload', () => {
+  if (!/upcomingOpen: true/.test(js)) return 'the widget does not start open';
+  if (!/prefs\.upcomingOpen = d\.prefs\.upcomingOpen !== false/.test(js)) {
+    return 'a store written before the widget existed does not get a default';
+  }
+  return true;
+});
+
+/* ---- 42c. §2 — the dedicated פתקים ורשימות area ---- */
+
+check('משימות / רשימות / פתקים are three switchable workspaces', () => {
+  const APP = loadApp();
+  if (APP.tasks.WORK_TABS.join() !== 'tasks,lists,notes') {
+    return 'WORK_TABS is ' + APP.tasks.WORK_TABS.join();
+  }
+  ['tasks', 'lists', 'notes'].forEach(w => {
+    if (html.indexOf('data-work="' + w + '"') === -1) throw new Error('no switch for ' + w);
+    if (html.indexOf('data-workpane="' + w + '"') === -1) throw new Error('no pane for ' + w);
+  });
+  if (html.indexOf('class="segmented work-tabs"') === -1) return 'the switcher is not a segmented control';
+  if (js.indexOf('function renderWorkspace') === -1) return 'no renderWorkspace()';
+  if (!/\[data-workpane\]\[hidden\]\{\s*display:none/.test(css)) {
+    return 'an inactive workspace is not actually hidden';
+  }
+  if (!/WORK_TABS\.indexOf\(d\.prefs\.workspace\) === -1/.test(js)) {
+    return 'the chosen workspace does not survive a reload';
+  }
+  return true;
+});
+
+check('a note can be filed under a client, exactly like a task or a list', () => {
+  const APP = loadApp(), Store = APP.Store;
+  Store.load();
+
+  Store.data.clients.length = 0;
+  Store.data.notes.length = 0;
+  const client = Store.add('clients', {
+    type: 'client', name: 'דנה כהן', category: 'business', phone: '', email: '',
+    status: 'lead', interest: '', budget: '', nextAction: '', nextActionAt: '',
+    followUpAt: '', notes: ''
+  });
+  const note = Store.add('notes', {
+    type: 'note', title: 'סיכום שיחה', category: 'business',
+    body: 'רוצה פורטרט 70x100', pinned: false, clientId: client.id
+  });
+
+  // the form must be able to SHOW the link, or it is erased by the first edit
+  const form = APP.ui.TO_FORM.notes(note);
+  if (form.clientId !== client.id) return 'TO_FORM drops the client link';
+  if (js.indexOf("f('clientId', 'שיוך ללקוח', clientPicker())") === -1) {
+    return 'no client picker is offered anywhere';
+  }
+  const noteForm = (js.match(/note: function \(\) \{[\s\S]*?\n {4}\},/) || [''])[0];
+  if (noteForm.indexOf('clientPicker()') === -1) return 'the note form has no client picker';
+
+  // ...and an edit must write it back
+  const label = APP.ui.applyEdit('notes', note.id, {
+    title: 'סיכום שיחה', body: 'רוצה פורטרט 70x100', clientId: ''
+  }, 'business');
+  if (!label) return 'the note edit was rejected';
+  if (Store.find('notes', note.id).clientId !== '') return 'the link cannot be cleared';
+
+  // the row wears the link so it reads at a glance
+  if (APP.tasks.clientChip(client.id).indexOf('דנה כהן') === -1) return 'the row shows no client chip';
+  if (APP.tasks.clientChip('') !== '') return 'an unlinked record still renders a chip';
+  return true;
+});
+
+check('the notes and lists panes carry their own copy, not a bare list', () => {
+  ['פתקים מהירים', 'רשימות וצ׳ק־ליסטים'].forEach(h => {
+    if (html.indexOf(h) === -1) throw new Error('missing heading ' + h);
+  });
+  ['סיכומי שיחות', 'רשימות קניות'].forEach(s => {
+    if (html.indexOf(s) === -1) throw new Error('missing explanatory copy: ' + s);
+  });
+  return true;
+});
+
+/* ---- 42d. §3 — reminders with flexible leads and a chime ---- */
+
+check('every mandated reminder option ships with its lead and its Hebrew label', () => {
+  const R = loadApp().reminders;
+  if (R.OPTIONS.join() !== 'default,at,15,60,1440,none') return 'REMIND_OPTIONS is ' + R.OPTIONS.join();
+  ['בזמן האירוע', '15 דקות לפני', 'שעה לפני', 'יום לפני'].forEach(l => {
+    if (Object.keys(R.LABEL).filter(k => R.LABEL[k] === l).length !== 1) {
+      throw new Error('no option labelled ' + l);
+    }
+  });
+  const lead = 10;
+  if (R.remindLead({ remind: 'at' }, lead) !== 0) return 'בזמן האירוע is not a zero lead';
+  if (R.remindLead({ remind: '15' }, lead) !== 15) return '15 דקות is wrong';
+  if (R.remindLead({ remind: '60' }, lead) !== 60) return 'שעה is not 60 minutes';
+  if (R.remindLead({ remind: '1440' }, lead) !== 1440) return 'יום is not 1440 minutes';
+  if (R.remindLead({ remind: 'none' }, lead) !== null) return 'ללא התראה does not mute the record';
+  // a record written before this sprint has no key at all and must not change
+  if (R.remindLead({}, lead) !== lead) return 'a legacy record no longer uses the system default';
+  if (R.normRemind('') !== 'default') return 'a blank key is not normalised';
+  if (R.normRemind('nonsense') !== 'default') return 'an unknown key is not normalised';
+  return true;
+});
+
+check('the reminder picker is offered on both a task and an event', () => {
+  ['task', 'event'].forEach(t => {
+    const form = (js.match(new RegExp(t + ': function \\(\\) \\{[\\s\\S]*?\\n {4}\\},')) || [''])[0];
+    if (form.indexOf("picker('remind'") === -1) throw new Error('the ' + t + ' form offers no reminder');
+  });
+  if (js.indexOf('rec.remind = normRemind(v.remind)') === -1) return 'an edit never writes the reminder back';
+  return true;
+});
+
+check('a per-record lead really decides who is announced, and when', () => {
+  const APP = loadApp(), Store = APP.Store, D = APP.dates;
+  Store.load();
+  const today = APP.isoDate(new Date());
+  const tomorrow = D.addDaysISO(today, 1);
+  const now = clockNow();
+
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.notify.lead = 10;
+
+  const ev = (title, date, time, remind) => Store.add('events', {
+    type: 'event', title, category: 'personal', date, start: time, end: '',
+    location: '', notes: '', clientId: '', remind
+  });
+
+  // exactly 1440 minutes out: only the "יום לפני" lead can reach it
+  const dayBefore = ev('מחר · יום לפני', tomorrow, hhmm(now), '1440');
+  const hourOnly = ev('מחר · שעה לפני', tomorrow, hhmm(now), '60');
+  const muted = ev('היום · מושתק', today, hhmm(now), 'none');
+  const soon = ev('היום · עוד 3 דק׳', now + 3 >= 1440 ? tomorrow : today, hhmm(now + 3), '15');
+
+  const ids = APP.Notify.due().map(x => x.id);
+  if (ids.indexOf(dayBefore.id) === -1) return 'a "יום לפני" reminder never reaches tomorrow';
+  if (ids.indexOf(hourOnly.id) !== -1) return 'a 60-minute lead fired a day early';
+  if (ids.indexOf(muted.id) !== -1) return 'ללא התראה was announced anyway';
+  if (ids.indexOf(soon.id) === -1) return 'a 15-minute lead missed something 3 minutes away';
+
+  // a closed task is never announced, whatever its reminder says
+  const done = Store.add('tasks', {
+    type: 'task', title: 'הושלמה', category: 'personal', due: today,
+    time: hhmm(now), status: 'done', priority: 'medium', nextAction: '',
+    subtasks: [], done: true, notes: '', clientId: '', remind: 'at'
+  });
+  if (APP.Notify.due().map(x => x.id).indexOf(done.id) !== -1) {
+    return 'a completed task was still announced';
+  }
+  return true;
+});
+
+check('a day-before reminder is marked by its own date, so it fires once', () => {
+  const APP = loadApp(), Store = APP.Store, D = APP.dates;
+  Store.load();
+  const today = APP.isoDate(new Date());
+  const tomorrow = D.addDaysISO(today, 1);
+
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.fired = {};
+  const meeting = Store.add('events', {
+    type: 'event', title: 'פגישה מחר', category: 'business', date: tomorrow,
+    start: hhmm(clockNow()), end: '', location: '', notes: '', clientId: '',
+    remind: '1440'
+  });
+
+  // the sandbox has no Notification constructor and no speaker; the ledger and
+  // the de-duplication are what this check is about, so both are stubbed out
+  const shown = [];
+  APP.Notify.armed = () => true;
+  APP.Notify.show = (tag) => { shown.push(tag); };
+
+  APP.Notify.tick();
+  if (shown.length !== 1) return 'the reminder fired ' + shown.length + ' times on the first scan';
+  if (shown[0] !== meeting.id + '@' + tomorrow) {
+    return 'the mark is keyed ' + shown[0] + ', expected the event\'s OWN date';
+  }
+  if (Store.data.prefs.fired[meeting.id + '@' + today]) {
+    return "the mark was keyed by today — it would be swept and fire again tomorrow";
+  }
+
+  APP.Notify.tick();
+  if (shown.length !== 1) return 'the same reminder fired again on the next scan';
+
+  // a mark for a date still ahead must survive the daily sweep
+  APP.Notify.tick();
+  if (!Store.data.prefs.fired[meeting.id + '@' + tomorrow]) return 'the mark was swept while still needed';
+  return true;
+});
+
+check('the reminder chime is synthesised, guarded, and never throws', () => {
+  const APP = loadApp(), C = APP.reminders.Chime;
+  // the sandbox window has no AudioContext, which is the browser this has to
+  // survive: every entry point must decline rather than throw
+  if (C.supported() !== false) return 'supported() lies about a browser with no AudioContext';
+  if (C.play() !== false) return 'play() claims to have made a sound';
+  if (C.unlock() !== false) return 'unlock() claims to have started a context';
+  if (C.context() !== null) return 'context() invented an AudioContext';
+
+  if (APP.reminders.TONES.length !== 2) return 'the chime is not the mandated two-note bell';
+  if (js.indexOf('createOscillator') === -1) return 'no oscillator — the chime needs a binary asset';
+  if (js.indexOf('exponentialRampToValueAtTime') === -1) return 'the chime has no decay envelope';
+  // an .mp3 would have to be in the service-worker shell; it deliberately is not
+  if (/CORE_ASSETS[\s\S]*?\.(mp3|wav|ogg)/.test(sw)) return 'the chime ships as a cached audio file';
+  return true;
+});
+
+check('the chime has its own toggle and its own default', () => {
+  ['soundBtn', 'soundIco', 'soundLabel'].forEach(id => {
+    if (html.indexOf('id="' + id + '"') === -1) throw new Error('no #' + id);
+  });
+  if (js.indexOf('onSoundToggle') === -1) return 'the toggle is never wired';
+  if (js.indexOf('Chime.unlock()') === -1) return 'the AudioContext is never unlocked inside a gesture';
+  if (!/\.sound-btn\.is-on\{/.test(css)) return 'the toggle has no on state';
+
+  const APP = loadApp(), Store = APP.Store;
+  Store.load();
+  if (Store.data.prefs.notify.sound !== true) return 'the chime does not default on';
+  return true;
+});
+
+check('a server-sent push asks an open window to make the sound', () => {
+  if (sw.indexOf('PUSH_CHIME') === -1) return 'sw.js never asks for the chime';
+  if (sw.indexOf('postMessage') === -1) return 'sw.js cannot reach a client';
+  if (js.indexOf("event.data.type === 'PUSH_CHIME'") === -1) return 'app.js never answers PUSH_CHIME';
+  if (!/silent: false/.test(sw)) return 'sw.js lets the platform silence the notification';
+  return true;
+});
+
+/* ---- 42e. §4 — time-blocking ---- */
+
+check('a timed task is blocked into its own hour on the timeline', () => {
+  const APP = loadApp(), U = APP.ui, T = APP.tasks, Store = APP.Store;
+  Store.load();
+  const today = APP.isoDate(new Date());
+
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+
+  const meeting = Store.add('events', {
+    type: 'event', title: 'פגישה', category: 'business', date: today,
+    start: '09:00', end: '10:00', location: '', notes: '', clientId: ''
+  });
+  const block = Store.add('tasks', {
+    type: 'task', title: 'לצבוע רקע', category: 'personal', due: today,
+    time: '14:00', status: 'todo', priority: 'high', nextAction: '',
+    subtasks: [], done: false, notes: '', clientId: ''
+  });
+  const loose = Store.add('tasks', {
+    type: 'task', title: 'ללא שעה', category: 'personal', due: today,
+    time: '', status: 'todo', priority: 'high', nextAction: '',
+    subtasks: [], done: false, notes: '', clientId: ''
+  });
+
+  const keys = U.timelineKeys();
+  if (keys.join(',') !== 'events:' + meeting.id + ',tasks:' + block.id) {
+    return 'the timeline holds [' + keys.join(', ') + ']';
+  }
+
+  // the untimed one still belongs to לביצוע היום, and to nothing else
+  if (keys.indexOf('tasks:' + loose.id) !== -1) return 'an untimed task was forced into an hour';
+  if (T.timedTasksToday().map(x => x.id).join() !== block.id) return 'the time-blocking selector is wrong';
+
+  // the two hours the two records were painted into
+  const rows = U.timelineRows().filter(r => r.list.length).map(r => r.hour);
+  if (rows.join() !== '9,14') return 'records were painted into hours [' + rows.join(', ') + ']';
+
+  // and the painted order is still the reported order (B0, across two tables)
+  const flat = [];
+  U.timelineRows().forEach(r => r.list.forEach(e => flat.push(e.collection + ':' + e.rec.id)));
+  if (flat.join(',') !== keys.join(',')) return 'the painted rows and the reported keys disagree';
+
+  // a task block is drawn compact, so the checklist does not drown the grid
+  if (U.timelineCard({ collection: 'tasks', rec: block }).indexOf('data-compact="1"') === -1) {
+    return 'a timeline task block is not drawn compact';
+  }
+  return true;
+});
+
+/* ---- 42f. §5 — the shipped shell, the schema and the specification ---- */
+
+check('migration 0003 appends the reminder column without editing 0001 or 0002', () => {
+  ['events', 'tasks'].forEach(t => {
+    if (!new RegExp('ALTER TABLE ' + t + '\\s+ADD COLUMN\\s+remind_key\\b').test(sqlRemind)) {
+      throw new Error(t + '.remind_key is never added');
+    }
+  });
+  if (sql.indexOf('remind_key') !== -1) return '0001 was edited — migrations are append-only';
+  if (sqlGcal.indexOf('remind_key') !== -1) return '0002 was edited — migrations are append-only';
+  // every existing row has to keep the behaviour it already had
+  if (!/UPDATE events SET remind_key = 'default'/.test(sqlRemind)) return 'existing events are not backfilled';
+  if (!/UPDATE tasks\s+SET remind_key = 'default'/.test(sqlRemind)) return 'existing tasks are not backfilled';
+  return true;
+});
+
+check('remind_key agrees across the SQL, the Worker and the client', () => {
+  ['events', 'tasks'].forEach(t => {
+    const cols = sqlColumns(t);
+    if (cols[cols.length - 1] !== 'remind_key') {
+      throw new Error(t + ' ends with ' + cols[cols.length - 1] + ', not the appended column');
+    }
+    if (W.SCHEMA[t].columns.join() !== cols.join()) throw new Error(t + ': the Worker drifted from the SQL');
+    if (SY.SCHEMA[t].join() !== cols.join()) throw new Error(t + ': the client drifted from the SQL');
+  });
+
+  // and a round-trip must carry the value both ways
+  const row = SY.toRow('tasks', { id: 't1', title: 'x', remind: '60', updatedAt: 1, createdAt: 1 });
+  if (row.remind_key !== '60') return 'the reminder is dropped on the way out';
+  if (!SY.validRow('tasks', row)) return 'the emitted row is rejected by the payload guard';
+  if (SY.fromRow('tasks', row).remind !== '60') return 'the reminder is dropped on the way back in';
+  // an unknown key from a future build must normalise rather than corrupt
+  const odd = SY.fromRow('tasks', Object.assign({}, row, { remind_key: 'someday' }));
+  if (odd.remind !== 'default') return 'an unknown key survives a pull as ' + odd.remind;
+  return true;
+});
+
+check('a blank reminder can never erase a stored choice', () => {
+  // /api/gcal/sync writes whole event rows built from a Google payload, which
+  // knows nothing about this vocabulary — an unguarded column would be nulled
+  // on every inbound edit
+  const shared = read('functions/api/_shared.js');
+  const block = (shared.match(/const PRESERVE_IF_BLANK = \{[\s\S]*?\n\};/) || [''])[0];
+  if (!block) return 'no PRESERVE_IF_BLANK map';
+  if (!/events:[^\]]*'remind_key'/.test(block)) return 'events.remind_key is not preserved';
+  if (!/tasks:[^\]]*'remind_key'/.test(block)) return 'tasks.remind_key is not preserved';
+  // ...which is only safe because the client never sends a blank
+  if (js.indexOf("remind_key: normRemind(r.remind)") === -1) {
+    return 'the client can emit a blank reminder, which would read as "no opinion"';
+  }
+  return true;
+});
+
+check('the shell was bumped to v16 for this sprint', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'v(\d+)'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[1], 10) < 16) return 'the cache is still v' + m[1] + ' — returning phones keep the old shell';
+  if (html.indexOf('app.js?v=v16') === -1) return 'app.js is not busted to v16';
+  if (html.indexOf('styles.css?v=v16') === -1) return 'styles.css is not busted to v16';
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 10', () => {
+  const required = [
+    'Sprint 10', 'נכנסים', 'בקרוב', 'משימות קרובות', 'remind_key',
+    'REMIND_OPTIONS', 'PUSH_CHIME', 'data-workpane', 'Time-blocking', 'v16'
+  ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
 });

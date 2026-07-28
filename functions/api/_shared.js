@@ -41,13 +41,17 @@ export const SCHEMA = {
       'client_id', 'category_type', 'updated_at', 'owner_id', 'notes',
       'created_at', 'deleted_at',
       // Sprint 6 — appended by migration 0002, so they trail every Sprint-5 column
-      'google_event_id', 'etag', 'google_calendar_id'],
+      'google_event_id', 'etag', 'google_calendar_id',
+      // Sprint 10 — appended by migration 0003, so it trails those in turn
+      'remind_key'],
     ints: []
   },
   tasks: {
     columns: ['id', 'title', 'category', 'status', 'priority', 'due_date',
       'next_action', 'subtasks_json', 'client_id', 'updated_at', 'owner_id',
-      'due_time', 'notes', 'created_at', 'deleted_at'],
+      'due_time', 'notes', 'created_at', 'deleted_at',
+      // Sprint 10 — appended by migration 0003
+      'remind_key'],
     ints: []
   },
   lists: {
@@ -188,9 +192,17 @@ export function sanitize(table, input) {
  * the link on the very next tap — orphaning the Google event and re-creating
  * it as a duplicate on the next cycle. So for these columns an empty incoming
  * value means "I have nothing to say", not "set this to nothing".
+ *
+ * Sprint 10 adds remind_key for the same reason from the other direction:
+ * /api/gcal/sync writes whole event rows built from a Google payload, which
+ * knows nothing about this app's reminder vocabulary and would otherwise null
+ * the column on every inbound edit. The client never sends a blank — 'default'
+ * is how it says "no opinion" — so a blank here can only ever be a writer that
+ * has no opinion to express.
  */
 const PRESERVE_IF_BLANK = {
-  events: ['google_event_id', 'etag', 'google_calendar_id']
+  events: ['google_event_id', 'etag', 'google_calendar_id', 'remind_key'],
+  tasks: ['remind_key']
 };
 
 /**

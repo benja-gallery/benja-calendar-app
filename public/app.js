@@ -50,14 +50,70 @@
   var PRIORITY_LABEL = { high: 'גבוהה', medium: 'בינונית', low: 'נמוכה' };
   var PRIORITY_RANK = { high: 0, medium: 1, low: 2 };
 
-  var TASK_TABS = ['all', 'today', 'late', 'waiting', 'done'];
+  /**
+   * The task views (Sprint 10).
+   *
+   * Field report: "פתוחות: 3" on My Day while the board underneath was empty.
+   * Both statements were true — the counter counts every open task, the board
+   * only ever showed today's — and a task with a future date or no date at all
+   * had nowhere on screen it could be found. היום / בקרוב / נכנסים / הכל is
+   * that place: every open task in the store belongs to exactly one of the
+   * first three, and הכל is the union that proves it.
+   */
+  var TASK_TABS = ['all', 'today', 'upcoming', 'inbox', 'late', 'waiting', 'done'];
   var TASK_TAB_EMPTY = {
     all: 'כל משימה שתוסיף תופיע כאן, מסודרת לפי תאריך יעד ועדיפות.',
     today: 'אין משימה פתוחה שתאריך היעד שלה הוא היום.',
+    upcoming: 'אין משימות עתידיות — כל מה שמתוזמן כבר על הלוח של היום.',
+    inbox: 'תיבת הנכנסים ריקה. כל משימה שתיצור בלי תאריך יעד תחכה כאן.',
     late: 'שום דבר לא נשאר מאחור — אין משימות באיחור.',
     waiting: 'אין משימה שממתינה כרגע לחזרה של לקוח.',
     done: 'עוד לא סומנה כאן משימה כהושלמה.'
   };
+  var TASK_TAB_LABEL = {
+    all: 'הכל', today: 'היום', upcoming: 'בקרוב', inbox: 'נכנסים',
+    late: 'באיחור', waiting: 'ממתין', done: 'הושלם'
+  };
+
+  /** the horizon of "משימות קרובות" on My Day — seven days, inclusive of today+1 */
+  var UPCOMING_DAYS = 7;
+
+  /**
+   * The three workspaces of the משימות screen (Sprint 10). פתקים ורשימות is a
+   * destination of its own now, not two blocks stacked below the task list.
+   */
+  var WORK_TABS = ['tasks', 'lists', 'notes'];
+  var WORK_LABEL = { tasks: '✓ משימות', lists: '☰ רשימות', notes: '✎ פתקים' };
+  var WORK_TITLE = {
+    tasks: 'משימות', lists: 'רשימות וצ׳ק־ליסטים', notes: 'פתקים ורשימות'
+  };
+
+  /* --- reminders (Sprint 10) ---
+     Per-record lead time. 'default' defers to prefs.notify.lead, which is what
+     every record written before this sprint carries; 'none' mutes that one
+     record without touching the global toggle. Never '' — the column is
+     preserve-if-blank on the Worker side, so a blank would read as "no opinion"
+     and could never clear a choice. */
+  var REMIND_OPTIONS = ['default', 'at', '15', '60', '1440', 'none'];
+  var REMIND_DEFAULT = 'default';
+  var REMIND_MINUTES = { at: 0, '15': 15, '60': 60, '1440': 1440 };
+  var REMIND_LABEL = {
+    'default': 'ברירת מחדל של המערכת',
+    at: 'בזמן האירוע',
+    '15': '15 דקות לפני',
+    '60': 'שעה לפני',
+    '1440': 'יום לפני',
+    none: 'ללא התראה'
+  };
+  var REMIND_SHORT = {
+    'default': '', at: '🔔 בזמן', '15': '🔔 15 דק׳ לפני',
+    '60': '🔔 שעה לפני', '1440': '🔔 יום לפני', none: '🔕 ללא התראה'
+  };
+
+  /* the reminder chime — synthesised, so it needs no binary asset in the cache */
+  var CHIME_TONES = [880, 1174.66];   // A5 → D6, a two-note bell
+  var CHIME_STEP = 0.16;              // seconds between the two notes
+  var CHIME_TAIL = 0.55;              // seconds each note takes to die away
 
   /* --- client CRM (Sprint 4) --- */
   var CLIENT_STATUSES = ['lead', 'contacted', 'interested', 'quoted',
@@ -128,10 +184,14 @@
       // Sprint 6 — the Google Calendar link, appended by migration 0002. The
       // browser only ever echoes these back; /api/gcal/sync is what fills them,
       // and the Worker refuses to let a blank echo erase them.
-      'google_event_id', 'etag', 'google_calendar_id'],
+      'google_event_id', 'etag', 'google_calendar_id',
+      // Sprint 10 — the per-record reminder lead, appended by migration 0003
+      'remind_key'],
     tasks: ['id', 'title', 'category', 'status', 'priority', 'due_date',
       'next_action', 'subtasks_json', 'client_id', 'updated_at', 'owner_id',
-      'due_time', 'notes', 'created_at', 'deleted_at'],
+      'due_time', 'notes', 'created_at', 'deleted_at',
+      // Sprint 10 — appended by migration 0003, so it trails every older column
+      'remind_key'],
     lists: ['id', 'title', 'category', 'items_json', 'client_id',
       'updated_at', 'owner_id', 'list_date', 'created_at', 'deleted_at'],
     notes: ['id', 'title', 'body', 'category', 'is_pinned', 'client_id',
@@ -310,6 +370,85 @@
      * than after the card has already moved.
      */
     check: function () { return Haptics.fire(HAPTIC_CHECK); }
+  };
+
+  /* ==========================================================================
+     The reminder chime (Sprint 10)
+
+     A notification that only vibrates is a notification a phone on a desk never
+     delivers. The mandate asks for a sound, and the cheapest honest way to ship
+     one is to synthesise it: an .mp3 would be a tenth asset in the service-worker
+     shell, a second thing to cache-bust, and a 404 away from silence. Two sine
+     notes through the Web Audio API are none of those things and work offline by
+     construction.
+
+     Everything is guarded. A browser with no AudioContext, a context the
+     autoplay policy has suspended, a sandbox with no window at all — each one
+     returns false rather than throwing, because a reminder that cannot make a
+     sound must still be a reminder.
+     ========================================================================== */
+
+  var Chime = {
+    ctx: null,
+
+    supported: function () {
+      if (typeof window === 'undefined') return false;
+      return typeof (window.AudioContext || window.webkitAudioContext) === 'function';
+    },
+
+    /** on = the user has not turned the chime off; the store is the only vote */
+    armed: function () {
+      return Chime.supported() && !!(Store.data && Store.data.prefs.notify.sound);
+    },
+
+    context: function () {
+      if (Chime.ctx) return Chime.ctx;
+      if (!Chime.supported()) return null;
+      var Ctor = window.AudioContext || window.webkitAudioContext;
+      try { Chime.ctx = new Ctor(); } catch (e) { Chime.ctx = null; }
+      return Chime.ctx;
+    },
+
+    /**
+     * Browsers only let audio start inside a gesture. Every tap that could ever
+     * lead to a reminder — enabling notifications, toggling the chime — calls
+     * this, so the context is already running when a timer fires hours later.
+     */
+    unlock: function () {
+      var ctx = Chime.context();
+      if (!ctx) return false;
+      try {
+        if (ctx.state === 'suspended' && typeof ctx.resume === 'function') ctx.resume();
+      } catch (e) { return false; }
+      return true;
+    },
+
+    /** the two-note bell itself — returns false when it could not be played */
+    play: function () {
+      if (!Chime.armed()) return false;
+      var ctx = Chime.context();
+      if (!ctx) return false;
+      try {
+        if (ctx.state === 'suspended' && typeof ctx.resume === 'function') ctx.resume();
+        var t0 = ctx.currentTime;
+        CHIME_TONES.forEach(function (freq, i) {
+          var osc = ctx.createOscillator();
+          var gain = ctx.createGain();
+          var at = t0 + i * CHIME_STEP;
+          osc.type = 'sine';
+          osc.frequency.value = freq;
+          // a struck bell, not a beep: instant attack, exponential decay
+          gain.gain.setValueAtTime(0.0001, at);
+          gain.gain.exponentialRampToValueAtTime(0.22, at + 0.012);
+          gain.gain.exponentialRampToValueAtTime(0.0001, at + CHIME_TAIL);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(at);
+          osc.stop(at + CHIME_TAIL + 0.02);
+        });
+      } catch (e) { return false; }
+      return true;
+    }
   };
 
   /* ==========================================================================
@@ -597,7 +736,19 @@
     t.nextAction = typeof t.nextAction === 'string' ? t.nextAction : '';
     t.subtasks = normItems(t.subtasks, 'st');
     t.done = t.status === 'done';
+    t.remind = normRemind(t.remind);                         // Sprint 10
     return t;
+  }
+
+  /**
+   * Events had no migrator: every field they carry has existed since Sprint 1.
+   * Sprint 10 adds the reminder key, so they need one now — and it stays as
+   * narrow as it needs to be, exactly like the other three.
+   */
+  function migrateEvent(e) {
+    if (!e || typeof e !== 'object') return e;
+    e.remind = normRemind(e.remind);
+    return e;
   }
 
   function migrateList(l) {
@@ -612,6 +763,36 @@
     n.pinned = !!n.pinned;
     n.body = typeof n.body === 'string' ? n.body : '';
     return n;
+  }
+
+  /* ------------------------------------------------- reminders (Sprint 10) */
+
+  /** never '' and never unknown — the sync column is preserve-if-blank */
+  function normRemind(v) {
+    return REMIND_OPTIONS.indexOf(v) === -1 ? REMIND_DEFAULT : v;
+  }
+
+  /**
+   * How many minutes before its own start this record wants to be announced.
+   * `null` means "never" — the one answer that mutes a single record without
+   * touching the global toggle. `lead` is the system default, so a store
+   * written before this sprint behaves exactly as it always did.
+   */
+  function remindLead(rec, lead) {
+    var key = normRemind(rec && rec.remind);
+    if (key === 'none') return null;
+    if (key === REMIND_DEFAULT) {
+      return typeof lead === 'number' && lead >= 0 ? lead : 10;
+    }
+    return REMIND_MINUTES[key];
+  }
+
+  /** the chip a card wears when it carries a non-default reminder */
+  function remindTag(rec) {
+    var key = normRemind(rec && rec.remind);
+    var text = REMIND_SHORT[key];
+    if (!text) return '';
+    return '<span class="badge remind rm-' + key + '">' + esc(text) + '</span>';
   }
 
   /** the single writer of task state — status and `done` never drift apart */
@@ -698,10 +879,46 @@
     var onBoard = !isClosed(status) || awaitingArchive(task);
     var t = today || todayISO();
     if (tab === 'today') return onBoard && task.due === t;
+    // Sprint 10 — everything the "today" board legitimately cannot show.
+    // היום / בקרוב / נכנסים / באיחור are mutually exclusive and, between them,
+    // exhaustive over every task still on the board: a task is dated today, or
+    // later, or earlier, or not at all. That is what closes the field report —
+    // an open task can never again be counted somewhere and listed nowhere.
+    if (tab === 'upcoming') return onBoard && !!task.due && task.due > t;
+    if (tab === 'inbox') return onBoard && !task.due;
     if (tab === 'late') return onBoard && !!task.due && task.due < t;
     if (tab === 'waiting') return status === 'waiting';
     if (tab === 'done') return status === 'done';
     return true;                                              // 'all'
+  }
+
+  /**
+   * The chronological order בקרוב is read in: soonest first, undated last, and
+   * priority only ever breaks a tie inside one day. sortTasks() cannot be used
+   * here — it floats by priority across dates, which is right for a flat board
+   * and wrong for a calendar-shaped one.
+   */
+  function sortByDate(tasks) {
+    return (Array.isArray(tasks) ? tasks.slice() : []).sort(function (a, b) {
+      var da = a.due || '9999-99-99', db = b.due || '9999-99-99';
+      if (da !== db) return da < db ? -1 : 1;
+      var ta = timeToMinutes(a.time), tb = timeToMinutes(b.time);
+      if (ta !== tb) return ta - tb;
+      var pa = PRIORITY_RANK[normPriority(a.priority)], pb = PRIORITY_RANK[normPriority(b.priority)];
+      if (pa !== pb) return pa - pb;
+      return 0;
+    });
+  }
+
+  /** the day-band a בקרוב row is filed under — "מחר", "בעוד 3 ימים", "ללא תאריך" */
+  function upcomingBand(due, today) {
+    if (!due) return 'ללא תאריך יעד';
+    var t = today || todayISO();
+    var gap = Math.round((parseISO(due) - parseISO(t)) / DAY_MS);
+    if (gap <= 7) return relDay(due) + ' · ' + fmtDayMon(due);
+    if (gap <= 14) return 'בשבוע הבא · ' + fmtDayMon(due);
+    if (gap <= 30) return 'בהמשך החודש · ' + fmtDayMon(due);
+    return 'בהמשך · ' + fmtDayMon(due);
   }
 
   /** open first, then by due date, then by priority, then by time of day */
@@ -933,7 +1150,11 @@
         owner: OWNER,
         prefs: {
           filter: 'all', calView: 'month', taskTab: 'all', clientTab: 'all',
-          notify: { on: false, lead: 10 }, fired: {}
+          workspace: 'tasks',
+          notify: { on: false, lead: 10, sound: true }, fired: {},
+          // Sprint 10 — "משימות קרובות" on My Day starts open: the whole point
+          // of the widget is that nothing can hide inside it
+          upcomingOpen: true
         },
         events: [], tasks: [], lists: [], notes: [], clients: [],
         // סל מחזור (Sprint 8) — deleted records wait here for ten days
@@ -983,6 +1204,8 @@
       d.tasks = d.tasks.map(migrateTask);
       d.lists = d.lists.map(migrateList);
       d.notes = d.notes.map(migrateNote);
+      // Sprint 10 shape: every pre-reminder event and task carries no lead key
+      d.events = d.events.map(migrateEvent);
       // Sprint 4 shapes: a pre-CRM client holds no status, no file, no timeline
       d.clients = d.clients.map(migrateClient);
 
@@ -997,11 +1220,19 @@
       // the selected calendar view survives a reload; anything unknown falls back
       if (CAL_VIEWS.indexOf(d.prefs.calView) === -1) d.prefs.calView = 'month';
 
+      // and so does the selected workspace of the משימות screen (Sprint 10)
+      if (WORK_TABS.indexOf(d.prefs.workspace) === -1) d.prefs.workspace = 'tasks';
+
       // reminder prefs may be absent in a store written before the PWA upgrade
-      if (!d.prefs.notify || typeof d.prefs.notify !== 'object') d.prefs.notify = { on: false, lead: 10 };
+      if (!d.prefs.notify || typeof d.prefs.notify !== 'object') {
+        d.prefs.notify = { on: false, lead: 10, sound: true };
+      }
       d.prefs.notify.on = !!d.prefs.notify.on;
       if (typeof d.prefs.notify.lead !== 'number' || d.prefs.notify.lead < 0) d.prefs.notify.lead = 10;
+      // Sprint 10 — the chime defaults ON, and only an explicit false turns it off
+      d.prefs.notify.sound = d.prefs.notify.sound !== false;
       if (!d.prefs.fired || typeof d.prefs.fired !== 'object') d.prefs.fired = {};
+      d.prefs.upcomingOpen = d.prefs.upcomingOpen !== false;
 
       // Sprint 5: the cloud block is absent in every pre-D1 store, and its
       // outbox is replayed from disk — a queued mutation survives a reload
@@ -1233,7 +1464,8 @@
         notes: str(r.notes), created_at: toISOStamp(r.createdAt), deleted_at: null,
         // echoed back untouched — '' simply means "this device knows no link yet"
         google_event_id: str(r.googleEventId), etag: str(r.googleEtag),
-        google_calendar_id: str(r.googleCalendarId)
+        google_calendar_id: str(r.googleCalendarId),
+        remind_key: normRemind(r.remind)
       };
     },
     tasks: function (r) {
@@ -1244,7 +1476,8 @@
         subtasks_json: jsonOut(r.subtasks), client_id: str(r.clientId),
         updated_at: toISOStamp(r.updatedAt), owner_id: str(r.ownerId) || OWNER.id,
         due_time: str(r.time), notes: str(r.notes),
-        created_at: toISOStamp(r.createdAt), deleted_at: null
+        created_at: toISOStamp(r.createdAt), deleted_at: null,
+        remind_key: normRemind(r.remind)
       };
     },
     lists: function (r) {
@@ -1282,15 +1515,16 @@
   var FROM_ROW = {
     events: function (row) {
       var s = splitStamp(row.start_time), e = splitStamp(row.end_time);
-      return {
+      return migrateEvent({
         type: str(row.category_type) || 'event', id: row.id,
         title: str(row.title), category: normCat(row.category),
         date: s.date, start: s.time, end: e.time,
         location: str(row.location), notes: str(row.notes),
         clientId: str(row.client_id),
         googleEventId: str(row.google_event_id), googleEtag: str(row.etag),
-        googleCalendarId: str(row.google_calendar_id)
-      };
+        googleCalendarId: str(row.google_calendar_id),
+        remind: str(row.remind_key)
+      });
     },
     tasks: function (row) {
       return migrateTask({
@@ -1298,7 +1532,8 @@
         status: normStatus(row.status), priority: normPriority(row.priority),
         due: str(row.due_date), time: str(row.due_time),
         nextAction: str(row.next_action), subtasks: jsonIn(row.subtasks_json),
-        notes: str(row.notes), clientId: str(row.client_id)
+        notes: str(row.notes), clientId: str(row.client_id),
+        remind: str(row.remind_key)
       });
     },
     lists: function (row) {
@@ -2013,6 +2248,31 @@
     return boardTasksToday().filter(function (x) { return !hourOf(x.time) && hourOf(x.time) !== 0; });
   }
 
+  /* ---- Sprint 10 · the two populations My Day used to lose ---------------
+     A task dated next Tuesday and a task with no date at all were both counted
+     by "פתוחות: N" and shown by nothing. These are the selectors the widget at
+     the bottom of My Day is built from — the same predicates the בקרוב and
+     נכנסים tabs use, windowed to a week so the widget stays a glance. */
+
+  /** open, dated, and inside the next UPCOMING_DAYS days — never today */
+  function upcomingSoon() {
+    var t = todayISO();
+    var horizon = addDaysISO(t, UPCOMING_DAYS);
+    return pick('tasks').filter(function (x) {
+      return taskMatchesTab(x, 'upcoming', t) && x.due <= horizon;
+    });
+  }
+
+  /** נכנסים — created without a date, and therefore homeless until now */
+  function inboxTasks() {
+    return pick('tasks').filter(function (x) { return taskMatchesTab(x, 'inbox', todayISO()); });
+  }
+
+  /** what the My Day widget lists, in the order it lists it */
+  function upcomingWidget() {
+    return sortByDate(upcomingSoon().concat(inboxTasks()));
+  }
+
   /** every task still awaiting a place in the log, in the order it is shown */
   function doneUnfiled() {
     return sortTasks(pick('tasks').filter(awaitingArchive));
@@ -2135,12 +2395,53 @@
    * 08:00–22:00 — an untimed event included — is clamped into the window
    * rather than dropped.
    */
-  function timelineHour(e) {
-    var h = hourOf(e.start);
+  function timelineHour(time) {
+    var h = hourOf(time);
     if (h === null) h = DAY_START;
     if (h < DAY_START) h = DAY_START;
     if (h > DAY_END) h = DAY_END;
     return h;
+  }
+
+  /**
+   * Time-blocking (Sprint 10 · mandate §4).
+   *
+   * A task with a clock time is an appointment with yourself, and it used to be
+   * invisible on My Day: the timeline drew events only, and "לביצוע היום" draws
+   * the UNTIMED tasks by definition. So a task set for 14:00 appeared nowhere on
+   * the one screen that claims to be the day. It is now blocked into its own
+   * hour, beside the meetings it is competing with, which is the only way the
+   * day reads as a whole.
+   */
+  function timedTasksToday() {
+    return boardTasksToday().filter(function (x) { return hourOf(x.time) !== null; });
+  }
+
+  /**
+   * One slot of the timeline, as {collection, rec}. Both the renderer and the
+   * membership check read this, so the paint order and the expected order are
+   * the same list — the invariant B0 established, extended to two collections.
+   */
+  function timelineEntries() {
+    var out = [];
+    todaysEvents().forEach(function (e) {
+      out.push({ collection: 'events', rec: e, at: timeToMinutes(e.start), hour: timelineHour(e.start) });
+    });
+    timedTasksToday().forEach(function (x) {
+      out.push({ collection: 'tasks', rec: x, at: timeToMinutes(x.time), hour: timelineHour(x.time) });
+    });
+    /* Bucket first, clock second — B0 again, and for the same reason. An
+       untimed record clamps into the 08:00 bucket but sorts LAST by the clock
+       (no time = 24:01), so sorting by the clock alone would report an order
+       the renderer does not paint, sameKeys() would answer "changed" on every
+       tap, and the container under the finger would be rebuilt every time.
+       Inside one hour: earliest first, and a meeting outranks a self-appointment. */
+    return out.sort(function (a, b) {
+      if (a.hour !== b.hour) return a.hour - b.hour;
+      if (a.at !== b.at) return a.at - b.at;
+      if (a.collection !== b.collection) return a.collection === 'events' ? -1 : 1;
+      return a.rec.id < b.rec.id ? -1 : (a.rec.id > b.rec.id ? 1 : 0);
+    });
   }
 
   /**
@@ -2157,9 +2458,8 @@
    */
   function timelineRows() {
     var byHour = {};
-    todaysEvents().forEach(function (e) {
-      var h = timelineHour(e);
-      (byHour[h] = byHour[h] || []).push(e);
+    timelineEntries().forEach(function (entry) {
+      (byHour[entry.hour] = byHour[entry.hour] || []).push(entry);
     });
 
     var out = [];
@@ -2169,16 +2469,22 @@
 
   /** the ordered record keys #timeline holds once painted */
   function timelineKeys() {
-    var out = [];
-    timelineRows().forEach(function (row) {
-      out = out.concat(recKeys('events', row.list));
+    return timelineEntries().map(function (entry) {
+      return entry.collection + ':' + entry.rec.id;
     });
-    return out;
+  }
+
+  /** an event card, or a compact task block — the timeline draws both (§4) */
+  function timelineCard(entry) {
+    return entry.collection === 'events'
+      ? eventCard(entry.rec)
+      : taskRow(entry.rec, true);
   }
 
   function renderTimeline(quiet) {
     var buckets = timelineRows();
-    var events = todaysEvents();
+    var events = todaysEvents().length;
+    var blocks = timedTasksToday().length;
 
     var nowH = new Date().getHours();
     var rows = [];
@@ -2190,14 +2496,18 @@
         '<div class="tl-row' + (h === nowH ? ' is-now' : '') + '">' +
         '<div class="tl-hour">' + pad2(h) + ':00</div>' +
         '<div class="tl-slot' + (list.length ? '' : ' tl-empty') + '">' +
-        list.map(eventCard).join('') +
+        list.map(timelineCard).join('') +
         '</div></div>'
       );
     }
 
     if (!quiet) $('#timeline').innerHTML = rows.join('');
-    setText($('#timelineMeta'), events.length
-      ? plural(events.length, 'אירוע אחד', 'אירועים') + ' · ' + pad2(DAY_START) + ':00–' + pad2(DAY_END) + ':00'
+
+    var parts = [];
+    if (events) parts.push(plural(events, 'אירוע אחד', 'אירועים'));
+    if (blocks) parts.push(plural(blocks, 'משימה מתוזמנת אחת', 'משימות מתוזמנות'));
+    setText($('#timelineMeta'), parts.length
+      ? parts.join(' · ') + ' · ' + pad2(DAY_START) + ':00–' + pad2(DAY_END) + ':00'
       : 'אין אירועים מתוזמנים');
   }
 
@@ -2209,7 +2519,7 @@
       selBox('events', e.id) +
       '<div class="ev-body">' +
       '<div class="ev-title">' + esc(e.title) + '</div>' +
-      '<div class="ev-meta">' + esc(meta) + '</div>' +
+      '<div class="ev-meta">' + esc(meta) + remindTag(e) + '</div>' +
       '</div>' +
       catTag(e.category) +
       editBtn('events', e.id) +
@@ -2227,6 +2537,69 @@
         : emptyState('אין משימות פתוחות להיום', 'כל מה שתייעד להיום ללא שעה מסוימת יופיע כאן.');
     }
     setText($('#todoMeta'), list.length ? plural(list.length, 'משימה אחת', 'משימות') : '');
+  }
+
+  /* ------------------------- render: 3b. "משימות קרובות" (Sprint 10 · §1.2) */
+
+  function upcomingOpen() { return Store.data.prefs.upcomingOpen !== false; }
+
+  function toggleUpcoming() {
+    Store.data.prefs.upcomingOpen = !upcomingOpen();
+    Store.save();
+    renderUpcoming();
+  }
+
+  /**
+   * The answer to "where did my משימות go". It sits under the daily board, it
+   * is collapsible but starts open, and it holds precisely the two populations
+   * the board cannot: the next seven days, and everything with no date at all.
+   * A day-band caption separates them, so the list reads chronologically rather
+   * than as an undifferentiated pile.
+   */
+  function renderUpcoming(quiet) {
+    var rows = upcomingWidget();
+    var box = $('#upcomingBlock');
+    var open = upcomingOpen();
+
+    var soon = upcomingSoon().length;
+    var inbox = inboxTasks().length;
+
+    var btn = $('#upcomingToggle');
+    if (btn) {
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      setText($('#upcomingCaret'), open ? '⌃' : '⌄');
+    }
+    setText($('#upcomingCount'), String(rows.length));
+
+    var parts = [];
+    if (soon) parts.push(plural(soon, 'משימה אחת בשבוע הקרוב', 'משימות בשבוע הקרוב'));
+    if (inbox) parts.push(plural(inbox, 'משימה אחת ללא תאריך', 'משימות ללא תאריך'));
+    setText($('#upcomingMeta'), parts.join(' · '));
+
+    var body = $('#upcomingList');
+    if (body) body.hidden = !open;
+    if (box) box.classList.toggle('is-open', open);
+
+    if (quiet || !body) return;
+
+    if (!rows.length) {
+      body.innerHTML = emptyState('אין משימות קרובות',
+        'כל משימה שתייעד לשבוע הקרוב — או שתיצור בלי תאריך יעד — תופיע כאן, כדי ששום דבר לא ייעלם.');
+      return;
+    }
+
+    var today = todayISO();
+    var band = null;
+    var html = [];
+    rows.forEach(function (t) {
+      var next = upcomingBand(t.due, today);
+      if (next !== band) {
+        band = next;
+        html.push('<div class="up-band">' + esc(band) + '</div>');
+      }
+      html.push(taskRow(t, true));
+    });
+    body.innerHTML = html.join('');
   }
 
   /**
@@ -2265,6 +2638,8 @@
       catTag(t.category) +
       statusBadge(t) +
       priorityTag(t.priority) +
+      remindTag(t) +
+      (compact ? '' : clientChip(t.clientId)) +
       esc(meta.join(' · ')) +
       '</div>' +
       (!compact && t.nextAction
@@ -2704,10 +3079,17 @@
     render();
   }
 
-  /** the tasks the list is currently showing, in the order it shows them */
+  /**
+   * The tasks the list is currently showing, in the order it shows them.
+   *
+   * בקרוב is the one tab that is not sorted like a board: it is read forwards
+   * through time, so priority may only break a tie inside a single day. Every
+   * other tab keeps the ranking it has always had.
+   */
   function shownTasks() {
     var tab = taskTab(), today = todayISO();
-    return sortTasks(pick('tasks').filter(function (x) { return taskMatchesTab(x, tab, today); }));
+    var rows = pick('tasks').filter(function (x) { return taskMatchesTab(x, tab, today); });
+    return tab === 'upcoming' ? sortByDate(rows) : sortTasks(rows);
   }
 
   function renderTasks(quiet) {
@@ -2729,15 +3111,76 @@
       el.textContent = all.filter(function (x) { return taskMatchesTab(x, key, today); }).length;
     });
 
+    setText($('#tasksTitle'), 'משימות · ' + (TASK_TAB_LABEL[tab] || TASK_TAB_LABEL.all));
+
     if (!quiet) {
       $('#tasksList').innerHTML = shown.length
-        ? shown.map(function (t) { return taskRow(t); }).join('')
+        ? tasksHTML(shown, tab, today)
         : emptyState('אין משימות בתצוגה הזו', TASK_TAB_EMPTY[tab] || TASK_TAB_EMPTY.all);
     }
 
     setText($('#tasksMeta'), all.length
       ? all.filter(function (t) { return !isClosed(t.status); }).length + ' פתוחות מתוך ' + all.length
       : '');
+  }
+
+  /**
+   * בקרוב is drawn as a chronology — a caption per day-band, then that day's
+   * rows. The captions carry no data-rec, so the membership engine still reads
+   * exactly the same key list shownTasks() promised it.
+   */
+  function tasksHTML(rows, tab, today) {
+    if (tab !== 'upcoming') {
+      return rows.map(function (t) { return taskRow(t); }).join('');
+    }
+    var band = null;
+    return rows.map(function (t) {
+      var next = upcomingBand(t.due, today);
+      var head = next === band ? '' : '<div class="up-band">' + esc(next) + '</div>';
+      band = next;
+      return head + taskRow(t);
+    }).join('');
+  }
+
+  /* ------------------------ the three workspaces of the משימות screen (§2) */
+
+  function workspace() { return Store.data.prefs.workspace; }
+
+  function setWorkspace(w) {
+    if (WORK_TABS.indexOf(w) === -1) w = 'tasks';
+    Store.data.prefs.workspace = w;
+    Store.save();
+    if (UI.view !== 'tasks') { setView('tasks'); return; }   // setView() repaints
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  /**
+   * פתקים ורשימות is an area of its own now (mandate §2), not two blocks
+   * stacked under a task list that already fills the screen. The switch is a
+   * segmented control at the top of the משימות screen; only the chosen
+   * workspace's blocks are on screen, and the quick sub-tabs belong to
+   * משימות alone.
+   */
+  function renderWorkspace() {
+    var w = workspace();
+
+    $$('.work-tabs [data-work]').forEach(function (b) {
+      var on = b.dataset.work === w;
+      b.classList.toggle('is-active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+
+    setText($('#workCount_tasks'), String(openTasks().length));
+    setText($('#workCount_lists'), String(pick('lists').length));
+    setText($('#workCount_notes'), String(pick('notes').length));
+
+    $$('#view-tasks [data-workpane]').forEach(function (pane) {
+      pane.hidden = pane.dataset.workpane !== w;
+    });
+
+    var title = $('#viewTitle');
+    if (title && UI.view === 'tasks') title.textContent = WORK_TITLE[w] || WORK_TITLE.tasks;
   }
 
   /* ------------------------------------------------- smart checklist lists */
@@ -2784,6 +3227,7 @@
         ? '<span class="badge dated">' + esc(relDay(l.date)) + '</span>'
         : '<span class="badge timeless">ללא תאריך</span>') +
       (complete ? '<span class="badge st-done">הרשימה הושלמה</span>' : '') +
+      clientChip(l.clientId) +
       '</div>' +
       (p.total
         ? checklist(p, l.items, 'listitem', l.id)
@@ -2792,6 +3236,17 @@
       editBtn('lists', l.id) +
       delBtn('lists', l.id) +
       '</div>';
+  }
+
+  /**
+   * The CRM link, worn by the record that carries it (mandate §2c). It is a
+   * label, not a control: the client file is one tap away through לקוחות, and
+   * a second way in from inside a note row would compete with tap-to-edit.
+   */
+  function clientChip(clientId) {
+    var c = clientId ? Store.find('clients', clientId) : null;
+    if (!c) return '';
+    return '<span class="badge linked">☺ ' + esc(c.name || 'לקוח') + '</span>';
   }
 
   /* -------------------------------------------------------- quick notes */
@@ -2820,7 +3275,8 @@
       '<div class="row-body">' +
       '<div class="row-title">' + (n.pinned ? '📌 ' : '✎ ') + esc(n.title || 'פתק') + '</div>' +
       '<div class="row-meta">' + catTag(n.category) +
-      (n.pinned ? '<span class="badge pinned">מוצמד</span>' : '') + '</div>' +
+      (n.pinned ? '<span class="badge pinned">מוצמד</span>' : '') +
+      clientChip(n.clientId) + '</div>' +
       '<p class="note-body">' + esc(n.body || '') + '</p>' +
       '<div class="quick-acts">' +
       '<button type="button" class="mini" data-pin="' + n.id + '">' +
@@ -3436,7 +3892,9 @@
     renderAttention();
     renderTimeline();
     renderTodo();
+    renderUpcoming();
     renderCalendar();
+    renderWorkspace();
     renderTasks();
     renderLists();
     renderNotes();
@@ -3532,6 +3990,10 @@
       keys: timelineKeys },                      // paint order, not sort order (B0)
     { view: 'today', sel: '#todoToday', draw: renderTodo,
       keys: function () { return recKeys('tasks', unscheduledToday()); } },
+    // Sprint 10 — the widget is a list container like any other, so a task that
+    // leaves the week (or gains a date) makes it rebuild, and nothing else does
+    { view: 'today', sel: '#upcomingList', draw: renderUpcoming,
+      keys: function () { return recKeys('tasks', upcomingWidget()); } },
     // scope: the stage keeps the markup of every pane it has ever drawn, and
     // only hides the inactive ones — membership must be read off the live pane
     { view: 'calendar', sel: '#calStage', scope: '#calStage .cal-pane:not([hidden])',
@@ -3579,6 +4041,9 @@
       // cheap, idempotent, and the count it carries is derived state like any
       // other counter — a task ticked anywhere must offer to be filed
       renderArchiveBar();
+      // the workspace counters are derived state too, and setting `hidden` on a
+      // pane that is already hidden costs nothing and touches no list container
+      renderWorkspace();
 
       SECTIONS.forEach(function (s) {
         if (UI.view !== s.view) return;          // off-screen: setView() will redraw it
@@ -4921,19 +5386,24 @@
         f('end', 'שעת סיום', '<input class="input" type="time" name="end">') +
         f('location', 'מיקום', '<input class="input" name="location" placeholder="זום / כתובת">') +
         '</div>' +
+        f('remind', 'תזכורת', picker('remind', REMIND_OPTIONS, REMIND_LABEL, REMIND_DEFAULT)) +
         f('clientId', 'שיוך ללקוח', clientPicker()) +
         f('notes', 'הערות', '<textarea class="textarea" name="notes" placeholder="פרטים נוספים…"></textarea>');
     },
     task: function () {
       return f('title', 'מה צריך לעשות?', '<input class="input" name="title" placeholder="לשלוח הצעת מחיר…" required>') +
         '<div class="field-row">' +
-        f('due', 'תאריך יעד', '<input class="input" type="date" name="due" value="' + todayISO() + '">') +
+        // blank on purpose (Sprint 10): a task saved with no date lands in
+        // נכנסים instead of silently claiming today, which is what made the
+        // Inbox impossible to fill in the first place
+        f('due', 'תאריך יעד (ריק = נכנסים)', '<input class="input" type="date" name="due">') +
         f('time', 'שעה (לא חובה)', '<input class="input" type="time" name="time">') +
         '</div>' +
         '<div class="field-row">' +
         f('status', 'סטטוס', picker('status', TASK_STATUSES, STATUS_LABEL, 'new')) +
         f('priority', 'עדיפות', picker('priority', PRIORITIES, PRIORITY_LABEL, 'medium')) +
         '</div>' +
+        f('remind', 'תזכורת', picker('remind', REMIND_OPTIONS, REMIND_LABEL, REMIND_DEFAULT)) +
         f('nextAction', 'הפעולה הבאה', '<input class="input" name="nextAction" placeholder="להתקשר ללקוח ולאשר מידות">') +
         f('clientId', 'שיוך ללקוח', clientPicker()) +
         f('subtasks', 'תת־משימות (שורה לכל אחת)', '<textarea class="textarea" name="subtasks" placeholder="לאסוף מידות&#10;לחשב תמחור"></textarea>') +
@@ -4947,7 +5417,10 @@
     },
     note: function () {
       return f('title', 'כותרת', '<input class="input" name="title" placeholder="רעיון / תזכורת">') +
-        f('body', 'תוכן הפתק', '<textarea class="textarea" name="body" placeholder="כתוב כאן…" required></textarea>');
+        f('body', 'תוכן הפתק', '<textarea class="textarea" name="body" placeholder="כתוב כאן…" required></textarea>') +
+        // mandate §2c — a note is the one thing that could not be filed under a
+        // client, even though the column has existed in D1 since Sprint 5
+        f('clientId', 'שיוך ללקוח', clientPicker());
     },
     client: function () {
       return f('name', 'שם הלקוח', '<input class="input" name="name" placeholder="שם מלא / שם העסק" required>') +
@@ -5039,7 +5512,8 @@
     events: function (r) {
       return {
         title: r.title, date: r.date, start: r.start, end: r.end,
-        location: r.location, notes: r.notes, clientId: r.clientId
+        location: r.location, notes: r.notes, clientId: r.clientId,
+        remind: normRemind(r.remind)
       };
     },
     tasks: function (r) {
@@ -5047,13 +5521,14 @@
         title: r.title, due: r.due, time: r.time,
         status: normStatus(r.status), priority: normPriority(r.priority),
         nextAction: r.nextAction, clientId: r.clientId,
-        subtasks: itemLines(r.subtasks), notes: r.notes
+        subtasks: itemLines(r.subtasks), notes: r.notes,
+        remind: normRemind(r.remind)
       };
     },
     lists: function (r) {
       return { title: r.title, date: r.date, clientId: r.clientId, items: itemLines(r.items) };
     },
-    notes: function (r) { return { title: r.title, body: r.body }; },
+    notes: function (r) { return { title: r.title, body: r.body, clientId: r.clientId }; },
     clients: function (r) {
       return {
         name: r.name, phone: r.phone, email: r.email,
@@ -5098,6 +5573,7 @@
       rec.location = v.location || '';
       rec.notes = v.notes || '';
       rec.clientId = v.clientId || '';
+      rec.remind = normRemind(v.remind);
       label = 'האירוע עודכן';
     } else if (collection === 'tasks') {
       if (!v.title) { warn('צריך שם למשימה'); return ''; }
@@ -5108,6 +5584,7 @@
       rec.nextAction = v.nextAction || '';
       rec.notes = v.notes || '';
       rec.clientId = v.clientId || '';
+      rec.remind = normRemind(v.remind);
       rec.subtasks = mergeChecklist(rec.subtasks, v.subtasks, 'st');
       setTaskStatus(rec, v.status || rec.status);        // keeps `done` in lockstep
       label = 'המשימה עודכנה';
@@ -5122,6 +5599,7 @@
       if (!v.body) { warn('הפתק ריק'); return ''; }
       rec.title = v.title || 'פתק';
       rec.body = v.body;
+      rec.clientId = v.clientId || '';
       label = 'הפתק עודכן';
     } else if (collection === 'clients') {
       if (!v.name) { warn('צריך שם ללקוח'); return ''; }
@@ -5209,7 +5687,8 @@
       Store.add('events', {
         type: 'event', title: v.title, category: cat,
         date: v.date || todayISO(), start: v.start || '', end: v.end || '',
-        location: v.location || '', notes: v.notes || '', clientId: v.clientId || ''
+        location: v.location || '', notes: v.notes || '', clientId: v.clientId || '',
+        remind: normRemind(v.remind)
       });
       linkLog(v.clientId, 'נקבעה פגישה: ' + v.title);
       label = 'האירוע נוסף';
@@ -5217,13 +5696,16 @@
       if (!v.title) return warn('צריך שם למשימה');
       Store.add('tasks', {
         type: 'task', title: v.title, category: cat,
-        due: v.due || todayISO(), time: v.time || '',
+        // Sprint 10 — an empty date is now a real answer, not a missing one:
+        // it files the task into נכנסים instead of pretending it is due today
+        due: v.due || '', time: v.time || '',
         status: v.status || 'new', priority: v.priority || 'medium',
         nextAction: v.nextAction || '', subtasks: parseChecklist(v.subtasks, 'st'),
-        done: false, notes: v.notes || '', clientId: v.clientId || ''
+        done: false, notes: v.notes || '', clientId: v.clientId || '',
+        remind: normRemind(v.remind)
       });
       linkLog(v.clientId, 'נוספה משימה: ' + v.title);
-      label = 'המשימה נוספה';
+      label = v.due ? 'המשימה נוספה' : 'המשימה נוספה לנכנסים';
     } else if (type === 'list') {
       if (!v.title) return warn('צריך שם לרשימה');
       Store.add('lists', {
@@ -5235,8 +5717,10 @@
     } else if (type === 'note') {
       if (!v.body) return warn('הפתק ריק');
       Store.add('notes', {
-        type: 'note', title: v.title || 'פתק', category: cat, body: v.body, pinned: false
+        type: 'note', title: v.title || 'פתק', category: cat, body: v.body,
+        pinned: false, clientId: v.clientId || ''
       });
+      linkLog(v.clientId, 'נוסף פתק: ' + (v.title || 'פתק'));
       label = 'הפתק נשמר';
     } else if (type === 'client') {
       if (!v.name) return warn('צריך שם ללקוח');
@@ -5430,6 +5914,8 @@
 
     /** paint the top-bar toggle to match the real browser permission state */
     paint: function () {
+      this.paintSound();
+
       var btn = $('#pushBtn'), label = $('#pushLabel'), ico = $('#pushIco');
       if (!btn) return;
 
@@ -5459,6 +5945,9 @@
       var self = this;
 
       if (!this.supported()) { toast('הדפדפן הזה לא תומך בהתראות'); return; }
+
+      // the only reliable moment to start an AudioContext is inside a gesture
+      Chime.unlock();
 
       var p = this.permission();
 
@@ -5495,7 +5984,8 @@
         Store.save();
         this.paint();
         this.show('benja-welcome', 'ההתראות הופעלו 🔔',
-          'נשלח לך תזכורת ' + Store.data.prefs.notify.lead + ' דקות לפני כל פגישה ומשימה מתוזמנת.');
+          'ברירת המחדל היא ' + Store.data.prefs.notify.lead +
+          ' דקות לפני כל פגישה ומשימה מתוזמנת — ולכל פריט אפשר לבחור תזכורת משלו.');
         toast('התראות פוש הופעלו');
         this.tick();
       } else {
@@ -5515,6 +6005,9 @@
         dir: 'rtl',
         lang: 'he',
         tag: tag,
+        // the OS may silence its own tone; the chime below is ours and is not
+        // subject to that, which is the whole reason it exists
+        silent: false,
         vibrate: [110, 60, 110],
         data: { url: './index.html' }
       };
@@ -5522,6 +6015,8 @@
       function fallback() {
         try { new window.Notification(title, opts); } catch (e) { /* mobile blocks this ctor */ }
       }
+
+      Chime.play();               // guarded to a no-op wherever audio is not available
 
       if (navigator.serviceWorker && navigator.serviceWorker.ready) {
         navigator.serviceWorker.ready
@@ -5532,24 +6027,71 @@
       }
     },
 
-    /** everything starting inside the lead window that has not fired today */
+    /** 🔊 / 🔈 — the chime is a separate vote from the notifications themselves */
+    paintSound: function () {
+      var btn = $('#soundBtn'), ico = $('#soundIco'), label = $('#soundLabel');
+      if (!btn) return;
+      if (!Chime.supported()) { btn.hidden = true; return; }
+      btn.hidden = false;
+
+      var on = !!Store.data.prefs.notify.sound;
+      btn.classList.toggle('is-on', on);
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+      if (ico) ico.textContent = on ? '🔊' : '🔈';
+      if (label) label.textContent = on ? 'צליל תזכורת פעיל' : 'צליל תזכורת כבוי';
+    },
+
+    onSoundToggle: function () {
+      if (!Chime.supported()) { toast('הדפדפן הזה לא תומך בצליל התראה'); return; }
+      var on = !Store.data.prefs.notify.sound;
+      Store.data.prefs.notify.sound = on;
+      Store.save();
+      // this tap IS the gesture the autoplay policy wants; unlocking here is
+      // what lets a reminder hours from now make a sound at all
+      if (on) { Chime.unlock(); Chime.play(); }
+      this.paintSound();
+      toast(on ? 'צליל התזכורת הופעל' : 'צליל התזכורת כובה');
+    },
+
+    /**
+     * Everything whose own lead window is open right now (Sprint 10).
+     *
+     * The window is per record, not global: `remind` decides it, and the
+     * system default is only what a record with no opinion falls back to. That
+     * is also why the scan reaches into TOMORROW — "יום לפני" is a 1440-minute
+     * lead, and a reminder a day early is by definition raised on the day
+     * before the one it is about.
+     */
     due: function () {
       var t = todayISO();
+      var horizon = addDaysISO(t, 1);
       var now = new Date();
       var mins = now.getHours() * 60 + now.getMinutes();
       var lead = Store.data.prefs.notify.lead;
       var out = [];
 
       function when(gap) {
-        return gap <= 0 ? 'מתחיל עכשיו' : 'בעוד ' + gap + ' דק׳';
+        if (gap <= 0) return 'מתחיל עכשיו';
+        if (gap < 60) return 'בעוד ' + gap + ' דק׳';
+        if (gap < 1440) return 'בעוד ' + Math.round(gap / 60) + ' שע׳';
+        return 'מחר';
+      }
+
+      /** minutes from now until a record on `date` at `time` starts, or null */
+      function gapTo(date, time) {
+        if (!time) return null;
+        var day = date === t ? 0 : (date === horizon ? 1 : -1);
+        if (day === -1) return null;
+        return day * 1440 + timeToMinutes(time) - mins;
       }
 
       Store.data.events.forEach(function (e) {
-        if (e.date !== t || !e.start) return;
-        var gap = timeToMinutes(e.start) - mins;
-        if (gap < 0 || gap > lead) return;
+        var window_ = remindLead(e, lead);
+        if (window_ === null) return;                 // this record is muted
+        var gap = gapTo(e.date, e.start);
+        if (gap === null || gap < 0 || gap > window_) return;
         out.push({
-          id: e.id,
+          id: e.id, on: e.date,
           title: 'פגישה ' + when(gap),
           body: e.title + ' · ' + e.start + (e.location ? ' · ' + e.location : '')
         });
@@ -5557,11 +6099,13 @@
 
       Store.data.tasks.forEach(function (x) {
         // הושלם and בוטל are both closed — neither deserves a reminder
-        if (isClosed(x.status) || x.due !== t || !x.time) return;
-        var gap = timeToMinutes(x.time) - mins;
-        if (gap < 0 || gap > lead) return;
+        if (isClosed(x.status)) return;
+        var window_ = remindLead(x, lead);
+        if (window_ === null) return;
+        var gap = gapTo(x.due, x.time);
+        if (gap === null || gap < 0 || gap > window_) return;
         out.push({
-          id: x.id,
+          id: x.id, on: x.due,
           title: 'משימה ' + when(gap),
           body: x.title + ' · ' + x.time
         });
@@ -5577,14 +6121,18 @@
       var fired = Store.data.prefs.fired;
       var dirty = false;
 
-      // yesterday's marks are dead weight — a record may legitimately repeat
+      /* The mark is keyed by the record's OWN date, not by today. With a
+         day-before lead the same reminder is legitimately raised on the day
+         before the event, and keying by today would let it fire a second time
+         the next morning. Marks strictly in the past are dead weight; a mark
+         for tomorrow is the one still doing its job. */
       Object.keys(fired).forEach(function (k) {
-        if (k.slice(-10) !== t) { delete fired[k]; dirty = true; }
+        if (k.slice(-10) < t) { delete fired[k]; dirty = true; }
       });
 
       var self = this;
       this.due().forEach(function (item) {
-        var key = item.id + '@' + t;
+        var key = item.id + '@' + (item.on || t);
         if (fired[key]) return;
         fired[key] = 1;
         dirty = true;
@@ -5617,6 +6165,18 @@
 
       var btn = $('#pushBtn');
       if (btn) btn.addEventListener('click', function () { self.onToggle(); });
+
+      var sound = $('#soundBtn');
+      if (sound) sound.addEventListener('click', function () { self.onSoundToggle(); });
+
+      /* A server-sent push is rendered by sw.js, which has no audio at all.
+         When a window IS open the worker asks it to make the sound, so a real
+         Web Push carries the same chime a locally-scheduled reminder does. */
+      if (navigator.serviceWorker && navigator.serviceWorker.addEventListener) {
+        navigator.serviceWorker.addEventListener('message', function (event) {
+          if (event && event.data && event.data.type === 'PUSH_CHIME') Chime.play();
+        });
+      }
 
       clearInterval(this.timer);
       this.timer = setInterval(function () { self.tick(); }, SCAN_MS);
@@ -5777,7 +6337,8 @@
     var el = e.target.closest ? e.target.closest(
       '[data-nav],[data-action],[data-type],[data-filter],[data-cat],[data-toggle],[data-del],' +
       '[data-calview],[data-calnav],[data-calslot],' +
-      '[data-tasktab],[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
+      '[data-tasktab],[data-work],[data-upcoming],' +
+      '[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
       '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
       '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo],' +
       '[data-edit],[data-batch],[data-trashbatch],[data-confirmdel],[data-trash],[data-arch]') : null;
@@ -5855,7 +6416,20 @@
       return;
     }
 
-    if (el.dataset.tasktab) { setTaskTab(el.dataset.tasktab); return; }
+    // a deep-link from an attention card names a tab but not a workspace, and
+    // the tab strip only exists inside משימות — so arriving there is part of
+    // the same move
+    if (el.dataset.tasktab) {
+      if (workspace() !== 'tasks') {
+        Store.data.prefs.workspace = 'tasks';
+        Store.save();
+      }
+      setTaskTab(el.dataset.tasktab);
+      return;
+    }
+
+    if (el.dataset.work) { setWorkspace(el.dataset.work); return; }
+    if (el.dataset.upcoming) { toggleUpcoming(); return; }
 
     /* ---------- client CRM ---------- */
 
@@ -6109,6 +6683,9 @@
       softDeleteMany: softDeleteMany,
       timelineRows: timelineRows,
       timelineKeys: timelineKeys,
+      // Sprint 10 — the timeline now draws two collections (§4 time-blocking)
+      timelineEntries: timelineEntries,
+      timelineCard: timelineCard,
       recSummary: recSummary,
       recTitle: recTitle,
       itemLines: itemLines,
@@ -6235,7 +6812,43 @@
       nextStatus: nextStatus,
       subtaskProgress: subtaskProgress,
       taskMatchesTab: taskMatchesTab,
-      sortTasks: sortTasks
+      sortTasks: sortTasks,
+
+      // Sprint 10 — the Inbox / Upcoming split, the My Day widget behind it and
+      // the workspaces of the משימות screen. Every predicate here is pure, so
+      // healthcheck.js partitions a whole synthetic store with no DOM at all.
+      TAB_LABEL: TASK_TAB_LABEL,
+      TAB_EMPTY: TASK_TAB_EMPTY,
+      UPCOMING_DAYS: UPCOMING_DAYS,
+      WORK_TABS: WORK_TABS,
+      WORK_LABEL: WORK_LABEL,
+      WORK_TITLE: WORK_TITLE,
+      sortByDate: sortByDate,
+      upcomingBand: upcomingBand,
+      upcomingSoon: upcomingSoon,
+      inboxTasks: inboxTasks,
+      upcomingWidget: upcomingWidget,
+      shownTasks: shownTasks,
+      tasksHTML: tasksHTML,
+      workspace: workspace,
+      timedTasksToday: timedTasksToday,
+      clientChip: clientChip
+    },
+
+    // Sprint 10 — per-record reminder leads and the synthesised chime. Both are
+    // pure enough to drive with no clock, no speaker and no permission prompt.
+    reminders: {
+      OPTIONS: REMIND_OPTIONS,
+      LABEL: REMIND_LABEL,
+      SHORT: REMIND_SHORT,
+      MINUTES: REMIND_MINUTES,
+      DEFAULT: REMIND_DEFAULT,
+      TONES: CHIME_TONES,
+      normRemind: normRemind,
+      remindLead: remindLead,
+      remindTag: remindTag,
+      migrateEvent: migrateEvent,
+      Chime: Chime
     },
 
     lists: {

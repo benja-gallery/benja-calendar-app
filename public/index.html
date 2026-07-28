@@ -26,7 +26,7 @@
 <!-- ?v= MUST match CACHE_VERSION in sw.js. GitHub Pages serves these with
      max-age=600 and no content hash, so without the query an installed phone
      can keep serving the previous build out of its own HTTP cache. -->
-<link rel="stylesheet" href="styles.css?v=v15">
+<link rel="stylesheet" href="styles.css?v=v16">
 </head>
 <body>
 
@@ -72,6 +72,13 @@
         <button class="push-btn" id="pushBtn" type="button" aria-pressed="false">
           <span class="push-ico" id="pushIco" aria-hidden="true">🔔</span>
           <span class="push-label" id="pushLabel">הפעל התראות פוש</span>
+        </button>
+        <!-- צליל תזכורת — a separate vote from the notifications themselves: a
+             phone on a desk that only vibrates has not been notified. Tapping
+             it is also the gesture that unlocks the AudioContext. -->
+        <button class="push-btn sound-btn is-on" id="soundBtn" type="button" aria-pressed="true">
+          <span class="push-ico" id="soundIco" aria-hidden="true">🔊</span>
+          <span class="push-label" id="soundLabel">צליל תזכורת פעיל</span>
         </button>
         <!-- Google Calendar two-way sync — connect, then tap to run a cycle -->
         <button class="gcal-btn is-off" id="gcalBtn" type="button"
@@ -146,6 +153,24 @@
         <div class="archive-bar" id="archiveBarToday" hidden></div>
       </section>
 
+      <!-- 3b. משימות קרובות — the answer to "where did my tasks go" (Sprint 10)
+           The counters on this screen count every open task; the board above can
+           only ever show today's. This widget holds the rest — the next seven
+           days and everything with no date at all — so a task can never again be
+           counted somewhere and listed nowhere. Collapsible, but open by
+           default: a widget that hides the thing it exists to reveal is the bug
+           it was written to fix. -->
+      <section class="block up-block is-open" id="upcomingBlock" aria-label="משימות קרובות">
+        <button class="up-head" id="upcomingToggle" data-upcoming="toggle"
+                type="button" aria-expanded="true" aria-controls="upcomingList">
+          <span class="up-caret" id="upcomingCaret" aria-hidden="true">⌃</span>
+          <span class="up-title">משימות קרובות (7 הימים הבאים) / ללא תאריך</span>
+          <b class="up-count" id="upcomingCount">0</b>
+        </button>
+        <p class="up-meta block-meta" id="upcomingMeta"></p>
+        <div class="todo card" id="upcomingList"></div>
+      </section>
+
       <div class="scroll-tail"></div>
     </section>
 
@@ -184,54 +209,86 @@
     <!-- ---------- VIEW: TASKS / LISTS / NOTES ---------- -->
     <section class="view" id="view-tasks" aria-label="משימות, רשימות ופתקים">
 
-      <!-- quick sub-tabs: הכל · היום · באיחור · ממתין · הושלם -->
-      <div class="segmented task-tabs" role="tablist" aria-label="סינון מהיר של משימות">
-        <button class="seg is-active" role="tab" aria-selected="true"  data-tasktab="all"     type="button">הכל <b class="seg-count" data-taskcount="all">0</b></button>
-        <button class="seg"           role="tab" aria-selected="false" data-tasktab="today"   type="button">היום <b class="seg-count" data-taskcount="today">0</b></button>
-        <button class="seg"           role="tab" aria-selected="false" data-tasktab="late"    type="button">באיחור <b class="seg-count" data-taskcount="late">0</b></button>
-        <button class="seg"           role="tab" aria-selected="false" data-tasktab="waiting" type="button">ממתין <b class="seg-count" data-taskcount="waiting">0</b></button>
-        <button class="seg"           role="tab" aria-selected="false" data-tasktab="done"    type="button">הושלם <b class="seg-count" data-taskcount="done">0</b></button>
+      <!-- Sprint 10 · workspaces. פתקים ורשימות is a destination of its own
+           now (mandate §2), not two blocks stacked below a task list that
+           already fills the screen. -->
+      <div class="segmented work-tabs" role="tablist" aria-label="בחירת אזור עבודה">
+        <button class="seg is-active" role="tab" aria-selected="true"  data-work="tasks" type="button">✓ משימות <b class="seg-count" id="workCount_tasks">0</b></button>
+        <button class="seg"           role="tab" aria-selected="false" data-work="lists" type="button">☰ רשימות <b class="seg-count" id="workCount_lists">0</b></button>
+        <button class="seg"           role="tab" aria-selected="false" data-work="notes" type="button">✎ פתקים <b class="seg-count" id="workCount_notes">0</b></button>
       </div>
 
-      <div class="block">
-        <div class="block-head">
-          <h2>כל המשימות</h2>
-          <span class="block-meta" id="tasksMeta"></span>
+      <!-- ========== WORKSPACE: משימות ========== -->
+      <div data-workpane="tasks">
+
+        <!-- Sprint 10 · the four mandated views, then the three older filters.
+             היום / בקרוב / נכנסים / באיחור are mutually exclusive and, between
+             them, exhaustive over every task on the board — and הכל is the
+             union that proves nothing fell between them. -->
+        <div class="segmented task-tabs" role="tablist" aria-label="סינון מהיר של משימות">
+          <button class="seg"           role="tab" aria-selected="false" data-tasktab="today"    type="button">היום <b class="seg-count" data-taskcount="today">0</b></button>
+          <button class="seg"           role="tab" aria-selected="false" data-tasktab="upcoming" type="button">בקרוב <b class="seg-count" data-taskcount="upcoming">0</b></button>
+          <button class="seg"           role="tab" aria-selected="false" data-tasktab="inbox"    type="button">נכנסים <b class="seg-count" data-taskcount="inbox">0</b></button>
+          <button class="seg is-active" role="tab" aria-selected="true"  data-tasktab="all"      type="button">הכל <b class="seg-count" data-taskcount="all">0</b></button>
+          <button class="seg"           role="tab" aria-selected="false" data-tasktab="late"     type="button">באיחור <b class="seg-count" data-taskcount="late">0</b></button>
+          <button class="seg"           role="tab" aria-selected="false" data-tasktab="waiting"  type="button">ממתין <b class="seg-count" data-taskcount="waiting">0</b></button>
+          <button class="seg"           role="tab" aria-selected="false" data-tasktab="done"     type="button">הושלם <b class="seg-count" data-taskcount="done">0</b></button>
         </div>
-        <div class="card" id="tasksList"></div>
-        <div class="archive-bar" id="archiveBarTasks" hidden></div>
+
+        <div class="block">
+          <div class="block-head">
+            <h2 id="tasksTitle">משימות · הכל</h2>
+            <span class="block-meta" id="tasksMeta"></span>
+          </div>
+          <div class="card" id="tasksList"></div>
+          <div class="archive-bar" id="archiveBarTasks" hidden></div>
+        </div>
+
+        <!-- ---- היסטוריה — the completed-tasks log (Sprint 9) ----
+             Where finished work waits out its ten days. Deliberately NOT סל
+             מחזור: restoring something you completed must not read as undoing a
+             deletion, and emptying the bin must not throw away a month of it. -->
+        <div class="block">
+          <div class="block-head">
+            <h2>✓ בוצעו — היסטוריה</h2>
+            <span class="block-meta" id="archiveMeta"></span>
+          </div>
+          <p class="trash-hint">
+            כל משימה שתעביר לכאן ממתינה 10 ימים. אפשר לשחזר אותה לרשימה שממנה הגיעה,
+            או למחוק אותה לצמיתות כבר עכשיו. אחרי 10 ימים היא נמחקת אוטומטית.
+          </p>
+          <div class="card trash-list" id="archiveList"></div>
+        </div>
       </div>
 
-      <div class="block">
-        <div class="block-head">
-          <h2>רשימות</h2>
-          <span class="block-meta" id="listsMeta"></span>
+      <!-- ========== WORKSPACE: רשימות (צ׳קליסטים) ========== -->
+      <div data-workpane="lists" hidden>
+        <div class="block">
+          <div class="block-head">
+            <h2>☰ רשימות וצ׳ק־ליסטים</h2>
+            <span class="block-meta" id="listsMeta"></span>
+          </div>
+          <p class="trash-hint">
+            רשימות ציוד לסטודיו, רשימות קניות ותתי־משימות לפרויקט. כל רשימה יכולה
+            להיות ללא תאריך, ואפשר לקשר אותה ישירות לכרטיס לקוח קיים.
+          </p>
+          <div class="card" id="listsList"></div>
         </div>
-        <div class="card" id="listsList"></div>
       </div>
 
-      <div class="block">
-        <div class="block-head">
-          <h2>פתקים</h2>
-          <span class="block-meta" id="notesMeta"></span>
+      <!-- ========== WORKSPACE: פתקים ========== -->
+      <div data-workpane="notes" hidden>
+        <div class="block">
+          <div class="block-head">
+            <h2>✎ פתקים מהירים</h2>
+            <span class="block-meta" id="notesMeta"></span>
+          </div>
+          <p class="trash-hint">
+            שרבוט רעיונות, סיכומי שיחות ותזכורות טקסט חופשי. כל פתק אפשר להצמיד
+            למעלה, לקשר לכרטיס לקוח, או להפוך למשימה או לאירוע בלחיצה אחת.
+          </p>
+          <div class="card" id="notesList"></div>
         </div>
-        <div class="card" id="notesList"></div>
-      </div>
-
-      <!-- ---- היסטוריה — the completed-tasks log (Sprint 9) ----
-           Where finished work waits out its ten days. Deliberately NOT סל
-           מחזור: restoring something you completed must not read as undoing a
-           deletion, and emptying the bin must not throw away a month of it. -->
-      <div class="block">
-        <div class="block-head">
-          <h2>✓ בוצעו — היסטוריה</h2>
-          <span class="block-meta" id="archiveMeta"></span>
-        </div>
-        <p class="trash-hint">
-          כל משימה שתעביר לכאן ממתינה 10 ימים. אפשר לשחזר אותה לרשימה שממנה הגיעה,
-          או למחוק אותה לצמיתות כבר עכשיו. אחרי 10 ימים היא נמחקת אוטומטית.
-        </p>
-        <div class="card trash-list" id="archiveList"></div>
       </div>
 
       <div class="scroll-tail"></div>
@@ -432,6 +489,6 @@
   <button class="toast-undo" id="toastUndo" data-undo="1" type="button" hidden>אחזר</button>
 </div>
 
-<script src="app.js?v=v15"></script>
+<script src="app.js?v=v16"></script>
 </body>
 </html>

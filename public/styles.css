@@ -1594,6 +1594,109 @@ body.is-selecting .fab{ opacity:0; pointer-events:none; }
 .arch-row .trash-title{ color:var(--muted); }
 
 /* ==========================================================================
+   Sprint 10 — Inbox / Upcoming, the notes & lists workspace, reminders
+
+   The field report was that tasks "disappear": the counters count every open
+   task, the daily board can only ever show today's, and everything else had
+   nowhere on screen it could be found. Three surfaces answer that — the
+   workspace switcher, seven quick sub-tabs, and the משימות קרובות widget —
+   plus the reminder chips the timed ones now carry.
+   ========================================================================== */
+
+/* ---------- the workspace switcher: משימות · רשימות · פתקים ---------- */
+.work-tabs{ margin-top:14px; }
+.work-tabs .seg{ padding:10px 6px; font-size:13.5px; white-space:nowrap; }
+.work-tabs .seg.is-active .seg-count{ color:var(--gold); }
+
+[data-workpane][hidden]{ display:none; }
+
+/* ---------- seven sub-tabs do not fit a phone, so the strip scrolls ----------
+   flex:1 0 auto keeps them stretched to fill a desktop row while refusing to
+   shrink below a readable width on a narrow one; the scrollbar itself is
+   hidden because the tabs are the affordance. */
+.task-tabs{
+  overflow-x:auto; overflow-y:hidden;
+  scrollbar-width:none;
+  -webkit-overflow-scrolling:touch;
+  scroll-snap-type:x proximity;
+  overscroll-behavior-x:contain;
+}
+.task-tabs::-webkit-scrollbar{ display:none; }
+.task-tabs .seg{
+  flex:1 0 auto; min-width:74px;
+  scroll-snap-align:center; white-space:nowrap;
+}
+
+/* ---------- 3b. משימות קרובות (7 הימים הבאים) / ללא תאריך ---------- */
+.up-head{
+  display:flex; align-items:center; gap:10px;
+  width:100%; min-height:var(--tap);
+  padding:12px 14px;
+  background:var(--card); border:1px solid var(--line-soft);
+  border-radius:var(--r-lg);
+  color:var(--ink); font-size:14px; font-weight:800;
+  text-align:start;
+  transition:border-color .18s, background .18s;
+}
+.up-head:hover{ border-color:var(--gold-edge); }
+.up-block.is-open .up-head{ background:var(--gold-soft); border-color:var(--gold-edge); }
+.up-caret{ flex:0 0 auto; color:var(--gold); font-size:15px; line-height:1; }
+.up-title{ flex:1 1 auto; min-width:0; }
+.up-count{
+  flex:0 0 auto;
+  display:inline-grid; place-items:center;
+  min-width:26px; height:26px; padding:0 8px;
+  border-radius:999px;
+  background:var(--surface); color:var(--gold);
+  font-size:12.5px; font-weight:800;
+  font-variant-numeric:tabular-nums;
+}
+.up-meta{ margin:8px 6px 0; }
+.up-meta:empty{ display:none; }
+.up-block > .card{ margin-top:10px; }
+.up-block > .card[hidden]{ display:none; }
+
+/* the day-band caption inside בקרוב and inside the widget. It carries no
+   data-rec on purpose — the membership engine must keep reading exactly the
+   key list shownTasks() promised it. */
+.up-band{
+  padding:10px 14px 6px;
+  color:var(--gold); font-size:12px; font-weight:800;
+  letter-spacing:.02em;
+  border-bottom:1px solid var(--line-soft);
+  background:var(--gold-soft);
+}
+.up-band:first-child{ border-start-start-radius:var(--r-lg); border-start-end-radius:var(--r-lg); }
+
+/* ---------- reminder and CRM-link chips ---------- */
+.badge.remind{ background:var(--progress-soft); color:var(--progress); }
+.badge.rm-none{ background:var(--muted-soft); color:var(--faint); }
+.badge.linked{ background:var(--business-soft); color:var(--business); }
+
+/* ---------- the chime toggle, beside the push toggle ---------- */
+/* .push-btn takes margin-inline-start:auto to push the pair away from the
+   title; only the FIRST of them may do that, or a gap opens between the two */
+.sound-btn{ margin-inline-start:0; }
+.sound-btn.is-on{
+  background:var(--gold-soft); border-color:var(--gold-edge); color:var(--gold);
+}
+
+/* ---------- §4 time-blocking: a timed task drawn inside its own hour ----------
+   It has to read as a self-appointment rather than as a meeting, so it keeps
+   the task row it is everywhere else and gains the block treatment .ev has —
+   a panel, a rounded corner and a category rail — in gold, which no event
+   rail ever uses. */
+.tl-slot .row.task{
+  padding:10px 12px;
+  background:var(--card-2);
+  border:1px solid var(--line-soft);
+  border-inline-start:3px solid var(--gold);
+  border-radius:var(--r-sm);
+}
+.tl-slot .row.task:last-child{ border-bottom:1px solid var(--line-soft); }
+.tl-slot .row.task .row-title{ font-size:14px; }
+
+/* ==========================================================================
    Hover lifts — fine pointers only   (Sprint 9)
 
    `:hover` on a touch screen is sticky: it latches on tap and stays until the
