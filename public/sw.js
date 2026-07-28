@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v14';  // ריקון סל המחזור — empty the whole bin in one tap
+var CACHE_VERSION = 'v15';  // update path — the phone now reloads onto new code
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */
@@ -31,6 +31,16 @@ var CORE_ASSETS = [
   './icons/favicon-32.png'
 ];
 
+/* The two files index.html loads with a ?v= query. GitHub Pages serves them
+   with max-age=600 and no content hash, so an installed phone can keep an old
+   copy in the HTTP cache; the query makes the new build a different URL that no
+   stale entry can answer. MUST stay in step with the ?v= in index.html. */
+var VERSIONED = { './styles.css': 1, './app.js': 1 };
+
+function shellURL(url) {
+  return VERSIONED[url] ? url + '?v=' + CACHE_VERSION : url;
+}
+
 var NOTIFY_ICON = './icons/icon-192.png';
 var NOTIFY_BADGE = './icons/favicon-32.png';
 
@@ -43,7 +53,9 @@ self.addEventListener('install', function (event) {
         // addAll is all-or-nothing; cache each asset so one 404 cannot
         // abort the whole install and leave the app uncached.
         return Promise.all(CORE_ASSETS.map(function (url) {
-          return cache.add(new Request(url, { cache: 'reload' }))['catch'](function () { /* skip */ });
+          // cache:'reload' bypasses the HTTP cache, so an install always pulls
+          // the build that was just deployed and never a max-age=600 leftover
+          return cache.add(new Request(shellURL(url), { cache: 'reload' }))['catch'](function () { /* skip */ });
         }));
       })
       .then(function () { return self.skipWaiting(); })
@@ -69,6 +81,15 @@ self.addEventListener('message', function (event) {
 
 /* ----------------------------------------------------------------- fetch */
 
+/* Always look inside THIS version's cache. The bare caches.match() searches
+   every cache in the origin, so while an old benja-calendar-vNN is still
+   around — install runs before activate evicts it — a stale app.js could win
+   over the one that was just downloaded, and the phone would keep booting old
+   code with a new worker in charge. */
+function cacheHit(req) {
+  return caches.open(CACHE_NAME).then(function (c) { return c.match(req); });
+}
+
 self.addEventListener('fetch', function (event) {
   var req = event.request;
   if (req.method !== 'GET') return;
@@ -91,8 +112,8 @@ self.addEventListener('fetch', function (event) {
           return res;
         })
         ['catch'](function () {
-          return caches.match(req).then(function (hit) {
-            return hit || caches.match('./index.html');
+          return cacheHit(req).then(function (hit) {
+            return hit || cacheHit('./index.html');
           });
         })
     );
@@ -101,7 +122,7 @@ self.addEventListener('fetch', function (event) {
 
   // static assets: cache-first, refreshed in the background
   event.respondWith(
-    caches.match(req).then(function (hit) {
+    cacheHit(req).then(function (hit) {
       var network = fetch(req).then(function (res) {
         if (res && res.status === 200 && res.type === 'basic') {
           var copy = res.clone();

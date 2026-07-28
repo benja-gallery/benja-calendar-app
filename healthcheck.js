@@ -4868,6 +4868,64 @@ check('PROJECT_PLAN documents ריקון סל המחזור', () => {
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
 });
 
+/* ------------------------------- 41. the PWA update path (field report) ----
+   "the screen on the phone never changed" — the deploy was live and the worker
+   was new, but claiming a client does not reload it, so the document kept
+   running the app.js it parsed at launch. These pin the whole path shut. */
+
+check('sw.js reads only its own version of the cache', () => {
+  const body = sw.slice(sw.indexOf("addEventListener('fetch'"));
+  if (/caches\.match\(/.test(body)) {
+    return 'bare caches.match() searches every cache — a stale version can win';
+  }
+  if (!/caches\.open\(CACHE_NAME\)[\s\S]{0,120}\.match\(/.test(sw)) {
+    return 'no lookup is scoped to CACHE_NAME';
+  }
+  return true;
+});
+
+check('index.html cache-busts app.js and styles.css against the sw version', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'(v\d+)'/);
+  if (!m) return 'no CACHE_VERSION';
+  const v = m[1];
+  if (html.indexOf('app.js?v=' + v) === -1) return 'app.js is not busted to ' + v;
+  if (html.indexOf('styles.css?v=' + v) === -1) return 'styles.css is not busted to ' + v;
+  // and the worker must pre-cache the same URLs the page actually asks for
+  if (!/VERSIONED\s*=/.test(sw) || sw.indexOf("'./app.js'") === -1) {
+    return 'sw.js pre-caches a different URL than index.html requests';
+  }
+  return true;
+});
+
+check('a new worker taking control reloads the page onto the new code', () => {
+  if (js.indexOf("'controllerchange'") === -1) return 'controllerchange is never handled';
+  if (!/hadController/.test(js)) return 'a first install would reload for nothing';
+  if (!/swReloading/.test(js)) return 'nothing guards against a reload loop';
+  if (!/location\.reload\(\)/.test(js)) return 'the page is never reloaded';
+  if (js.indexOf('backdrop') === -1) return 'the reload can land mid-edit';
+  return true;
+});
+
+check('an update found before the listener attached is still adopted', () => {
+  if (!/reg\.waiting/.test(js)) return 'reg.waiting is never inspected';
+  if (js.indexOf("type: 'SKIP_WAITING'") === -1) return 'the waiting worker is never told to take over';
+  if (sw.indexOf("=== 'SKIP_WAITING'") === -1) return 'sw.js does not answer SKIP_WAITING';
+  return true;
+});
+
+check('a resumed home-screen app re-checks for a new version', () => {
+  if (!/reg\.update\(\)/.test(js)) return 'update() is never called';
+  if (js.indexOf("'visibilitychange'") === -1) return 'resume does not trigger a check';
+  if (!/SW_UPDATE_MS/.test(js)) return 'the check is unthrottled';
+  return true;
+});
+
+check('PROJECT_PLAN documents the update path', () => {
+  const required = ['controllerchange', 'SKIP_WAITING', 'app.js?v=', 'v15'];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
 /* --------------------------------------------------------------- report */
 
 report();

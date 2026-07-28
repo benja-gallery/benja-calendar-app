@@ -1,6 +1,11 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Field wave shipped (§7.4j) — בחירה מרובה inside סל המחזור: long press or the
+> **Status:** Field wave shipped (§7.4l) — **the PWA update path**: `controllerchange` now
+> reloads the page onto new code, a waiting worker is adopted, a resumed app re-checks for a
+> version, cache reads are scoped to `CACHE_NAME`, and `index.html` busts `app.js`/`styles.css`
+> against `CACHE_VERSION`. This is why the phone kept showing v13 with v14 deployed, v0.9.2.
+> §7.4k before it — ריקון סל המחזור, one tap that empties the whole bin.
+> §7.4j before it — בחירה מרובה inside סל המחזור: long press or the
 > bin's own pill, batch שחזור / מחיקה לצמיתות, and a struck-through `בוצע` row, v0.9.1.
 > Sprint 9 before it (§7.4i) — in-place strikethrough completion, the manual
 > `העבר משימות שבוצעו להיסטוריה` batch archive with a 10-day היסטוריה log, and the end of the
@@ -1203,6 +1208,55 @@ proven to name the bin, the accept button proven to read `אישור`, both defa
 per ask and no second confirmation surface added; and `emptyTrash()` executed against a real
 seeded store — three binned tasks destroyed, the live list and every other collection untouched,
 the purged records unable to return, and a second call on an empty bin reporting nothing.
+
+### 7.4l Field wave — the update path, or why the phone still showed v13 (shipped)
+
+The field report: *"still not seeing the change — the screen on the phone is unchanged"*, with
+`0e7d3b8` pushed and `sw.js` at `v14`. **The deploy was never the problem.** `origin/main` was
+level with the commit and the live GitHub Pages copy already served `v14`, `ריקון סל המחזור`,
+`#trashEmptyBtn` and `data-trash="empty"`. The break was entirely on the delivery side, and it
+was three faults stacked:
+
+| Fault | Why the phone kept old code |
+|---|---|
+| `clients.claim()` was read as "the app updates" | Claiming a client hands the **worker** the page. It does not reload the document, which is still running the `app.js` it parsed at launch. A home-screen PWA is *resumed*, never re-navigated, so that document can live for days. |
+| The toast was the only exit | `גרסה חדשה מוכנה — רענן כדי לעדכן` asks for a refresh a standalone PWA has no button for. And it was attached only to `updatefound`, which can fire before `register()` resolves — so the update sat in `reg.waiting` and the toast never even appeared. |
+| Nothing re-checked | Without a navigation the browser never re-fetched `sw.js`, so the new worker was not found in the first place. |
+
+**The fix — the page now lands on the new code by itself.**
+
+- **`controllerchange` → `swReload()`.** One reload, the moment a new worker takes charge.
+  `hadController` is captured *before* `register()` so a first install does not reload for
+  nothing, and `swReloading` closes the loop. `swReload()` waits while `#backdrop` is visible:
+  a sheet or the client drawer is open means a finger is mid-edit, and the update can wait for
+  the tap that closes it.
+- **`reg.waiting || reg.installing` is adopted up front**, then `updatefound` after it — an
+  update found before the listener existed is no longer stranded. `adopt()` posts
+  `{ type: 'SKIP_WAITING' }`, which `sw.js` has always answered, and re-arms with a one-shot
+  `statechange` listener that removes itself (no leak on repeat).
+- **`reg.update()` on `visibilitychange` / `focus`**, throttled by `SW_UPDATE_MS` (60s), so a
+  resumed home-screen app performs the check a navigation would have.
+- **`caches.match()` → `cacheHit()`, scoped to `CACHE_NAME`.** The bare form searches *every*
+  cache in the origin. `install` runs before `activate` evicts the old one, so a stale
+  `benja-calendar-v14` entry could out-answer the `app.js` just downloaded — a new worker
+  serving old code.
+- **`app.js?v=v15` / `styles.css?v=v15` in `index.html`.** GitHub Pages serves both with
+  `Cache-Control: max-age=600` and no content hash, so the query is what makes a new build a
+  URL no stale entry can answer. `VERSIONED` in `sw.js` pre-caches the same URLs the page
+  requests — the `?v=` and `CACHE_VERSION` must be bumped together.
+
+**Deployment note.** The live app is `https://benja-gallery.github.io/benja-calendar-app/public/`
+— the repo root is *not* published (`/benja-calendar-app/` returns 404), because the shell moved
+into `public/` in Sprint 6 (§7.4e) while Pages still serves from the branch root.
+
+**Shipped shell** — `sw.js` is bumped to `v15`.
+
+**Verification** — `healthcheck.js` §41 adds 6 checks: no bare `caches.match` survives in the
+fetch handler and a lookup is scoped to `CACHE_NAME`; `index.html` busts both assets to the
+exact `CACHE_VERSION` string and `sw.js` pre-caches the same URLs; `controllerchange` reloads
+with both the first-install and the loop guard and cannot land mid-edit; `reg.waiting` is
+inspected and `SKIP_WAITING` is both sent and answered; and the resume check exists and is
+throttled.
 
 ### 7.4 General layout
 

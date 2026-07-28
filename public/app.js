@@ -5320,21 +5320,81 @@
      PWA — service worker registration
      ========================================================================== */
 
+  /* How an installed phone actually lands on new code.
+
+     sw.js calls skipWaiting() and clients.claim(), so a new worker takes charge
+     by itself — but claiming a client does NOT reload it. The open document
+     keeps running the app.js it parsed at launch, and a home-screen PWA is
+     resumed rather than reloaded, so a phone could sit on last week's screen
+     indefinitely with a brand-new worker in charge. That is exactly the "the
+     screen never changed" report. Three things close it:
+
+       1. controllerchange => reload once, so the new code is the code running.
+       2. reg.waiting / reg.installing are read up front — updatefound can fire
+          before this listener is ever attached, and that update would then sit
+          waiting forever with nobody to hand it the page.
+       3. reg.update() on resume — a home-screen app can go days without the
+          navigation that would otherwise trigger the browser's own check. */
+
+  var SW_UPDATE_MS = 60 * 1000;   // one check per minute of foreground, at most
+  var swReloading = false;
+  var swCheckedAt = 0;
+
+  /** Reload, but never out from under a half-filled form. */
+  function swReload() {
+    if (swReloading) return;
+    swReloading = true;
+    (function whenIdle() {
+      var backdrop = $('#backdrop');
+      // a visible backdrop means a sheet or the client drawer is open, and the
+      // finger is mid-edit: the update can wait for the tap that closes it
+      if (backdrop && !backdrop.hidden) { setTimeout(whenIdle, 800); return; }
+      window.location.reload();
+    })();
+  }
+
   function registerServiceWorker() {
     if (!('serviceWorker' in navigator)) return;
     if (window.location.protocol === 'file:') return;   // a worker needs http(s)
 
+    // read BEFORE registering: with no previous controller the first install
+    // also fires controllerchange, and reloading there is a pointless flash
+    var hadController = !!navigator.serviceWorker.controller;
+
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (hadController) swReload();
+    });
+
     navigator.serviceWorker.register('sw.js').then(function (reg) {
-      reg.addEventListener('updatefound', function () {
-        var sw = reg.installing;
+      /** Push a worker that finished installing into control of this page. */
+      function adopt(sw) {
         if (!sw) return;
-        sw.addEventListener('statechange', function () {
-          // a previous version was already controlling the page => real update
-          if (sw.state === 'installed' && navigator.serviceWorker.controller) {
-            toast('גרסה חדשה מוכנה — רענן כדי לעדכן');
-          }
-        });
-      });
+        if (sw.state === 'installed' && navigator.serviceWorker.controller) {
+          toast('גרסה חדשה — מעדכן…');
+          sw.postMessage({ type: 'SKIP_WAITING' });      // sw.js answers this
+          return;
+        }
+        if (sw.state === 'installing') {
+          sw.addEventListener('statechange', function once() {
+            sw.removeEventListener('statechange', once);  // one hop, no leak
+            adopt(sw);
+          });
+        }
+      }
+
+      adopt(reg.waiting || reg.installing);              // an update we missed
+      reg.addEventListener('updatefound', function () { adopt(reg.installing); });
+
+      function checkForUpdate() {
+        if (document.visibilityState === 'hidden') return;
+        var now = Date.now();
+        if (now - swCheckedAt < SW_UPDATE_MS) return;
+        swCheckedAt = now;
+        reg.update()['catch'](function () { /* offline — retry on next resume */ });
+      }
+      document.addEventListener('visibilitychange', checkForUpdate);
+      window.addEventListener('focus', checkForUpdate);
+      checkForUpdate();
     })['catch'](function () { /* offline install is a bonus, never a blocker */ });
   }
 

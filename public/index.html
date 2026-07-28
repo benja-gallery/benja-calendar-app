@@ -23,7 +23,10 @@
 <meta name="apple-mobile-web-app-title" content="מה הלו&quot;ז">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon-180.png">
 
-<link rel="stylesheet" href="styles.css">
+<!-- ?v= MUST match CACHE_VERSION in sw.js. GitHub Pages serves these with
+     max-age=600 and no content hash, so without the query an installed phone
+     can keep serving the previous build out of its own HTTP cache. -->
+<link rel="stylesheet" href="styles.css?v=v15">
 </head>
 <body>
 
@@ -429,6 +432,6 @@
   <button class="toast-undo" id="toastUndo" data-undo="1" type="button" hidden>אחזר</button>
 </div>
 
-<script src="app.js"></script>
+<script src="app.js?v=v15"></script>
 </body>
 </html>
