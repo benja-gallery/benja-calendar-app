@@ -1764,6 +1764,73 @@ tables, `TO_FORM`/`applyEdit` proven to carry an edit and a picker-less form pro
 reset one, `Notify.due()` proven to hand the record's own pair to `show()`, and the theme
 resolved in both directions against a stubbed `matchMedia`.
 
+### 7.4p The compact task row & tap-to-expand details (shipped — Sprint 14)
+
+Field mandate: *"the task list is a wall of chips — I can see four tasks on a screen and I
+can't read any of them."* The row had accumulated, one sprint at a time, four badges
+(`catTag` · `statusBadge` · `priorityTag` · `remindTag`), a client chip, a meta sentence, a
+✎, a ✕, the next-action line and the whole sub-task checklist. Every one of them was added
+for a good reason and the sum of them was unreadable. The shell ships as **v20** on both
+cache-busted URLs.
+
+#### §1 The row is the scan surface
+
+`taskRow()` now renders exactly three things:
+
+| | |
+|---|---|
+| the check circle | `.check-tap`, the same 44px target with the same drawn ✓ |
+| the title | `.row-title`, one line, ellipsed |
+| the when-token | `.row-when` — `באיחור`, or the time, or the day. Nothing when there is nothing to say. |
+
+The when-token is the one piece of metadata that survived, and deliberately: everything else
+a task carries is a property of the **task**, and can wait for the reader. This is a property
+of **today** — a list that hides it turns an overdue task into an ordinary one. It sits at the
+end of the title line, so it costs no height at all.
+
+`.row.is-compact` trims the padding to `9px 14px`. The 44px hit area around the check circle
+is the floor and is not negotiable (§10's touch standard asserts it), so the height that was
+actually bought back came from deleting the second line and the checklist, not from the
+padding.
+
+`compact` no longer changes the shape — a row this small already *is* the calendar variant —
+but it still rides on the node as `data-compact`, because `Patch.record()` rebuilds each node
+in the variant it was drawn in.
+
+#### §2 Nothing was deleted — it moved into the reader
+
+The reader (§7.4n, Sprint 12) was already the surface with room. It now opens with a
+**`.dt-tags` strip** carrying the same four chips the row gave up — including the live
+`data-cycle` status chip, which still cycles, and still lands on screen immediately because
+`Patch.settle()` repaints an open reader. Below them, unchanged: the notes, `.dt-lines`, and
+every active reminder named. Added this sprint: **נוצרה** (`stampDay(rec.createdAt)` — "מתי"
+is the *due* date; this is the only line that separates a task filed this morning from one
+that has been sitting there three weeks) and the **sub-task checklist**, same `checklist()`
+helper and same `data-subtask` handler, so ticking a sub-task still works in place.
+
+The action row reads **[✎ עריכה מלאה]** · **[✓ סימון כבוצע]** · **[🗑 מחיקה]**, and מחיקה
+still goes through the one `confirmDelete()` door every other deletion in the app uses.
+
+A task is now the one card type with no ✎ of its own; its edit door is the reader's
+**עריכה מלאה**, one tap in. Both doors end in the same `openEdit()`.
+
+#### §3 The check circle was not touched
+
+`data-toggle` is matched by the click delegate *before* the fall-through to `tapEditKey()`, so
+a tap on the circle completes the task in place — the ✓ draws, the strikethrough sweeps, the
+dual pulse fires, the row stays exactly where it is — and never opens the reader. A tap
+anywhere else on the row resolves through `openTapped()` → `Detail.open()`.
+
+#### §4 Verification
+
+`healthcheck.js` §46 adds 6 checks that render real records rather than pattern-matching:
+`taskRow()` is called on a fully-loaded task (category, status, priority, reminders,
+sub-tasks, linked client) and asserted to contain **none** of `tag-`, `st-`, `pr-`,
+`badge remind`, `row-edit`, `data-del`, `checklist` or `next-action`, while still carrying
+`data-toggle`, `data-rec` and the title; the reader is asserted to contain every one of them;
+`rowWhen()` is driven across late / timed / dated / bare tasks; the check-circle precedence is
+asserted against the delegate's own selector list; and the cache floor is raised to v20.
+
 ### 7.4 General layout
 
 **Layout direction:** RTL by default (`dir="rtl"`), with LTR fallback driven by locale.

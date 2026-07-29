@@ -224,7 +224,7 @@
   var THEME_DEFAULT = 'dark';
 
   /** the shell version — MUST match CACHE_VERSION in sw.js and the ?v= in index.html */
-  var APP_VERSION = 'v19';
+  var APP_VERSION = 'v20';
 
   /* --- client CRM (Sprint 4) --- */
   var CLIENT_STATUSES = ['lead', 'contacted', 'interested', 'quoted',
@@ -954,6 +954,16 @@
   function fmtDayMon(iso) {
     var d = parseISO(iso);
     return d ? d.getDate() + ' ב' + HE_MONTHS[d.getMonth()] : '';
+  }
+
+  /** a createdAt/updatedAt millisecond stamp as "היום · 14:03" (Sprint 14 §2) */
+  function stampDay(ms) {
+    if (!ms) return '';
+    var d = new Date(ms);
+    if (isNaN(d.getTime())) return '';
+    var hh = d.getHours(), mm = d.getMinutes();
+    return relDay(isoDate(d)) + ' · ' +
+      (hh < 10 ? '0' : '') + hh + ':' + (mm < 10 ? '0' : '') + mm;
   }
 
   function relDay(iso) {
@@ -3144,21 +3154,52 @@
     body.innerHTML = html.join('');
   }
 
+  /** "מחר" / "12 באוגוסט" — relDay() without the weekday, so it fits one line */
+  function shortDay(iso) {
+    var t = todayISO();
+    if (iso === t) return 'היום';
+    if (iso === addDaysISO(t, 1)) return 'מחר';
+    if (iso === addDaysISO(t, -1)) return 'אתמול';
+    return fmtDayMon(iso);
+  }
+
   /**
-   * One task row. `compact` is used inside the calendar panes, where the
-   * next-action line and the sub-task checklist would drown the day grid.
+   * The ONE token a compact row keeps (Sprint 14 · mandate §1): WHEN.
+   *
+   * Everything else a task carries is a property of the task; this is the only
+   * thing that is a property of TODAY, and a list that hides it turns an
+   * overdue task into an ordinary one. It rides at the end of the title line,
+   * so it costs no height at all — and a task with nothing to say about time
+   * draws nothing, which is the whole point of the redesign.
+   */
+  function rowWhen(t, late) {
+    if (late) return '<span class="row-when is-late">באיחור</span>';
+    if (t.time) return '<span class="row-when">' + esc(t.time) + '</span>';
+    if (t.due && t.due !== todayISO()) return '<span class="row-when">' + esc(shortDay(t.due)) + '</span>';
+    return '';
+  }
+
+  /**
+   * One task row (Sprint 14 · mandate §1) — the SCAN surface.
+   *
+   * It used to carry four badges, a client chip, a meta sentence, two icon
+   * buttons, the next-action line and the whole sub-task checklist. Six tasks
+   * filled a screen. Now it is the check circle, the title and the when-token:
+   * one line, scannable at a glance.
+   *
+   * Nothing was deleted — the category, the status, the priority, the alerts,
+   * the next action, the sub-tasks, עריכה and מחיקה all moved into the reader
+   * a tap on the row opens (§2), which is a surface with room to hold them.
+   *
+   * `compact` no longer changes the shape — a row this small already IS the
+   * calendar variant — but it still rides on the node as data-compact, because
+   * Patch.record() rebuilds each node in the variant it was drawn in.
    */
   function taskRow(t, compact) {
     var status = normStatus(t.status);
     var late = !isClosed(status) && t.due && t.due < todayISO();
-    var prog = subtaskProgress(t);
 
-    var meta = [];
-    if (t.due) meta.push((late ? 'באיחור · ' : '') + relDay(t.due));
-    if (t.time) meta.push(t.time);
-    if (!compact && t.notes) meta.push(t.notes);
-
-    var cls = 'row task st-row-' + status +
+    var cls = 'row task is-compact st-row-' + status +
       (t.done ? ' is-done' : '') +
       (status === 'cancelled' ? ' is-cancelled' : '') +
       (status === 'waiting' ? ' is-waiting' : '') +
@@ -3176,20 +3217,8 @@
       '<span class="check">' + CHECK_MARK + '</span></button>' +
       '<div class="row-body">' +
       '<div class="row-title">' + esc(t.title) + '</div>' +
-      '<div class="row-meta">' +
-      catTag(t.category) +
-      statusBadge(t) +
-      priorityTag(t.priority) +
-      remindTag(t) +
-      (compact ? '' : clientChip(t.clientId)) +
-      esc(meta.join(' · ')) +
       '</div>' +
-      (!compact && t.nextAction
-        ? '<div class="next-action"><span>הפעולה הבאה</span>' + esc(t.nextAction) + '</div>' : '') +
-      (!compact && prog.total ? checklist(prog, t.subtasks, 'subtask', t.id) : '') +
-      '</div>' +
-      editBtn('tasks', t.id) +
-      delBtn('tasks', t.id) +
+      rowWhen(t, late) +
       '</div>';
   }
 
@@ -6113,22 +6142,38 @@
           (rec.start ? ' · ' + rec.start + (rec.end ? '–' + rec.end : '') : ' · ללא שעה') : 'ללא תאריך');
 
       var client = rec.clientId ? Store.find('clients', rec.clientId) : null;
+      var prog = isTask ? subtaskProgress(rec) : null;
 
-      return '<div class="dt-head"><h3 class="dt-title">' + esc(rec.title || (isTask ? 'משימה' : 'אירוע')) + '</h3>' +
-        catTag(rec.category) + '</div>' +
+      return '<div class="dt-head"><h3 class="dt-title">' + esc(rec.title || (isTask ? 'משימה' : 'אירוע')) + '</h3></div>' +
+        /* Sprint 14 §2 — the badges the row stopped carrying land HERE, as the
+           same chips they always were. The status chip is still the live
+           data-cycle control it is on a card, and Patch.settle() repaints this
+           reader, so cycling from inside it lands on screen immediately. */
+        '<div class="dt-tags">' +
+        catTag(rec.category) +
+        (isTask ? statusBadge(rec) + priorityTag(rec.priority) : '') +
+        remindTag(rec) +
+        '</div>' +
         (rec.notes ? '<p class="dt-notes">' + esc(rec.notes) + '</p>' : '') +
         '<div class="dt-lines">' +
         this.line('מתי', when) +
-        this.line('קטגוריה', CAT_LABEL[normCat(rec.category)]) +
-        (isTask ? this.line('סטטוס', STATUS_LABEL[normStatus(rec.status)]) : '') +
-        (isTask ? this.line('עדיפות', PRIORITY_LABEL[normPriority(rec.priority)]) : '') +
+        // Sprint 14 §2 — קטגוריה / סטטוס / עדיפות used to be spelled out here
+        // AND drawn as chips two lines above. The chips say the same words, in
+        // the same order, in colour; the duplicate lines were pure noise.
         (isTask ? this.line('הפעולה הבאה', rec.nextAction) : this.line('מיקום', rec.location)) +
         this.line('לקוח מקושר', client ? client.name : '') +
         // Sprint 13 — the reader states HOW as well as WHEN: a record that
         // rings for ten seconds and one that only ticks look identical on a
         // card, and this is the only surface that says which is which
         this.line('צליל ורטט', alertSentence(rec)) +
+        // Sprint 14 §2 — "מתי" is the DUE date; this is when the record was
+        // opened, which is the only way to tell a task that has been sitting
+        // there for three weeks from one filed this morning
+        this.line('נוצרה', stampDay(rec.createdAt)) +
         '</div>' +
+        // the checklist came off the card with the badges — same markup, same
+        // data-subtask handler, so ticking a sub-task still works in place
+        (isTask && prog.total ? checklist(prog, rec.subtasks, 'subtask', rec.id) : '') +
         this.reminders(rec);
     },
 
@@ -8691,7 +8736,15 @@
       openRowHTML: openRowHTML,
       renderOpenSheet: renderOpenSheet,
       Detail: Detail,
-      openTapped: openTapped
+      openTapped: openTapped,
+
+      /* Sprint 14 — the compact task row (§1) and the reader that now holds
+         everything it stopped carrying (§2). taskRow() is pure string work, so
+         healthcheck.js renders real records and asserts on the markup itself. */
+      taskRow: taskRow,
+      rowWhen: rowWhen,
+      shortDay: shortDay,
+      stampDay: stampDay
     },
 
     // cloud sync engine — schema, serialisers, outbox and merge, all pure

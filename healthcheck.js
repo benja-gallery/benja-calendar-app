@@ -816,7 +816,11 @@ check('smart lists render a real progress bar with a count', () => {
   if (js.indexOf("inline-size:' + p.pct + '%") === -1) return 'the bar is not driven by the real percentage';
   if (js.indexOf("checklist(p, l.items, 'listitem', l.id)") === -1) return 'list items render no checklist';
   if (js.indexOf('[data-listitem]') === -1) return 'list item taps are not delegated';
-  if (js.indexOf("checklist(prog, t.subtasks, 'subtask', t.id)") === -1) return 'sub-tasks render no checklist';
+  // Sprint 14 §1 moved the sub-task checklist off the row and into the reader —
+  // same helper, same data-subtask handler, so the checklist itself must still
+  // be rendered from a task's own sub-tasks, just from the surface with room
+  if (js.indexOf("checklist(prog, rec.subtasks, 'subtask', rec.id)") === -1) return 'sub-tasks render no checklist';
+  if (js.indexOf('[data-subtask]') === -1) return 'sub-task taps are not delegated';
   return true;
 });
 
@@ -1313,7 +1317,10 @@ check('every drawer tab renders real content for a real client file', () => {
   const expected = {
     overview: ['הפעולה הבאה', 'לשלוח הצעה סופית', 'תקציב', '📞 התקשר', 'wa.me'],
     meetings: ['פגישות קרובות', 'פגישות שהיו', 'פגישת היכרות'],
-    tasks: ['להכין הצעה', 'data-cycle'],
+    // Sprint 14 §1 — a task inside a client file is the same compact row it is
+    // everywhere else: the title, the check circle and the tap target that
+    // opens the reader. The status chip it used to carry lives in the reader.
+    tasks: ['להכין הצעה', 'data-toggle=', 'data-rec="tasks:'],
     lists: ['מידות קיר', 'prog-fill'],
     notes: ['ביקשה מסגרת כהה', 'data-clientnote'],
     history: ['התיק נפתח']
@@ -3218,9 +3225,13 @@ check('the confirmation closes without taking the client file underneath it', ()
 });
 
 check('every card type carries an edit affordance wired to the delegate', () => {
-  ['events', 'tasks', 'lists', 'notes', 'clients'].forEach(c => {
+  // Sprint 14 §1 stripped the ✎ off the task row: it is the one card type whose
+  // edit affordance is now the reader's [עריכה מלאה], one tap in. Every other
+  // card still carries its own pencil, and both doors end in the same openEdit().
+  ['events', 'lists', 'notes', 'clients'].forEach(c => {
     if (js.indexOf("editBtn('" + c + "'") === -1) throw new Error(c + ' cards cannot be edited');
   });
+  if (html.indexOf('data-detailact="edit"') === -1) return 'a task has no edit door at all';
   if (js.indexOf('data-edit="') === -1) return 'the edit button carries no record key';
   if (js.indexOf('[data-edit]') === -1) return 'the edit button is not in the click delegate';
   if (js.indexOf('function openEdit(') === -1) return 'no openEdit()';
@@ -6574,6 +6585,243 @@ check('the reader offers עריכה, סימון כבוצע and מחיקה', () =
     return 'an event is offered a "סימון כבוצע" it cannot honour';
   }
   return true;
+});
+
+/* ==========================================================================
+   46. Sprint 14 — the compact task row and tap-to-expand details
+        (PROJECT_PLAN §7.4p)
+
+   The row is the SCAN surface: check circle, title, one when-token. Every
+   badge, both icon buttons, the next-action line and the sub-task checklist
+   moved into the reader a tap opens. These checks render real records through
+   the real taskRow() and Detail.body() and assert on the markup itself, so
+   "moved" is proven on both sides rather than asserted on one.
+   ========================================================================== */
+
+/** a task carrying one of everything the old row used to draw */
+function loadedTask() {
+  const APP = loadApp(), Store = APP.Store;
+  Store.load();
+  Store.data.tasks.length = 0;
+  Store.data.clients.length = 0;
+  const client = Store.add('clients', {
+    type: 'client', name: 'דנה כהן', category: 'business', phone: '', email: '',
+    status: 'quoted', interest: '', budget: '', nextAction: '', nextActionAt: '',
+    followUpAt: '', notes: ''
+  });
+  const today = APP.isoDate(new Date());
+  const task = Store.add('tasks', {
+    type: 'task', title: 'לשלוח הצעת מחיר ללקוחה', category: 'business',
+    due: today, time: '14:00', status: 'progress', priority: 'high',
+    nextAction: 'לאסוף מידות', done: false, clientId: client.id,
+    notes: 'הפירוט המלא של המשימה.', reminders: ['1440', 'at'],
+    subtasks: [{ id: 's1', title: 'לאסוף מידות', done: true },
+               { id: 's2', title: 'לחשב תמחור', done: false }]
+  });
+  return { APP, Store, task: Store.find('tasks', task.id) };
+}
+
+/* ---- 46a. §1 — the row itself ---- */
+
+check('the task row is the check circle, the title and nothing else', () => {
+  const { APP, task } = loadedTask();
+  const row = APP.ui.taskRow(task);
+
+  // what MUST still be there: the record key Patch repaints through, the check
+  // circle with its drawn ✓, and the title itself
+  if (row.indexOf('data-rec="tasks:' + task.id + '"') === -1) return 'the row is not a patchable card';
+  if (row.indexOf('data-toggle="' + task.id + '"') === -1) return 'the row lost its check circle';
+  if (row.indexOf('check-mark') === -1) return 'the check circle lost the drawn ✓';
+  if (row.indexOf('לשלוח הצעת מחיר ללקוחה') === -1) return 'the row does not show the task title';
+  if (row.indexOf('is-compact') === -1) return 'the row does not opt into the compact rule';
+
+  // ...and everything the mandate names as clutter, absent
+  const banned = [
+    ['class="tag tag-', 'the category tag'],
+    ['data-cycle=', 'the status badge'],
+    ['badge pr-', 'the priority badge'],
+    ['badge remind', 'the alert badge'],
+    ['class="badge linked"', 'the client chip'],
+    ['row-edit', 'the ✎ button'],
+    ['data-del=', 'the ✕ button'],
+    ['row-meta', 'the meta line'],
+    ['next-action', 'the next-action line'],
+    ['checklist', 'the sub-task checklist']
+  ];
+  banned.forEach(([needle, what]) => {
+    if (row.indexOf(needle) !== -1) throw new Error('the row still draws ' + what);
+  });
+
+  // the row body holds exactly ONE block — the title. A second one is a second
+  // line, which is the vertical bloat §1 exists to remove.
+  const body = row.split('<div class="row-body">')[1] || '';
+  if ((body.match(/<div/g) || []).length !== 1) return 'the row body grew a second line';
+  return true;
+});
+
+check('the when-token is the one thing the row keeps, and only when there is one', () => {
+  const { APP, Store } = loadedTask();
+  const U = APP.ui, today = APP.isoDate(new Date());
+
+  const make = over => Store.shaped('tasks', Object.assign({
+    type: 'task', title: 'x', category: 'personal', due: '', time: '',
+    status: 'todo', priority: 'medium', nextAction: '', subtasks: [],
+    done: false, notes: '', clientId: '', reminders: []
+  }, over));
+
+  const late = make({ due: APP.dates.addDaysISO(today, -3) });
+  if (U.taskRow(late).indexOf('באיחור') === -1) return 'an overdue task does not say so';
+  if (U.taskRow(late).indexOf('row-when is-late') === -1) return 'the overdue token is not marked as late';
+
+  if (U.taskRow(make({ due: today, time: '09:30' })).indexOf('09:30') === -1) {
+    return 'a timed task does not show its time';
+  }
+  if (U.taskRow(make({ due: APP.dates.addDaysISO(today, 1) })).indexOf('מחר') === -1) {
+    return 'a task due tomorrow does not say when';
+  }
+  // today, no time, not late — there is nothing to say, so nothing is drawn
+  if (U.taskRow(make({ due: today })).indexOf('row-when') !== -1) {
+    return 'a task with nothing to say about time still draws a token';
+  }
+  // an inbox task has no date at all
+  if (U.taskRow(make({})).indexOf('row-when') !== -1) return 'an undated task drew a when-token';
+
+  // a done task is never "late", however old its due date
+  if (U.taskRow(make({ due: APP.dates.addDaysISO(today, -3), status: 'done', done: true }))
+      .indexOf('באיחור') !== -1) {
+    return 'a finished task is still being called overdue';
+  }
+  return true;
+});
+
+check('the compact row is styled for one line', () => {
+  if (!/\.row\.is-compact\{/.test(css)) return 'no .row.is-compact rule';
+  if (!/\.row-when\{/.test(css)) return 'the when-token has no style of its own';
+  if (!/\.row-when\.is-late\{/.test(css)) return 'an overdue token reads like an ordinary one';
+  const title = cssRules(css).filter(r => r.sel === '.row.is-compact .row-title')[0];
+  if (!title) return 'the compact title is not constrained to one line';
+  ['overflow:hidden', 'text-overflow:ellipsis', 'white-space:nowrap'].forEach(d => {
+    if (title.body.replace(/\s/g, '').indexOf(d) === -1) {
+      throw new Error('the compact title is missing ' + d);
+    }
+  });
+  return true;
+});
+
+/* ---- 46b. §2 — and all of it is in the reader ---- */
+
+check('everything the row gave up is in the reader', () => {
+  const { APP, task } = loadedTask();
+  const Reader = APP.ui.Detail;
+  Reader.collection = 'tasks';
+  Reader.id = task.id;
+  const out = Reader.body(task);
+
+  // the badge strip §2 mandates — category, status, priority, alerts
+  if (out.indexOf('dt-tags') === -1) return 'the reader has no badge strip';
+  if (out.indexOf('class="tag tag-business"') === -1) return 'the reader lost the category tag';
+  if (out.indexOf('data-cycle="' + task.id + '"') === -1) return 'the reader lost the status badge';
+  if (out.indexOf('badge pr-high') === -1) return 'the reader lost the priority badge';
+  if (out.indexOf('badge remind') === -1) return 'the reader lost the alert badge';
+
+  // the description, the dates, the linked client and the next action
+  if (out.indexOf('הפירוט המלא של המשימה') === -1) return 'the reader omits the description';
+  if (out.indexOf('14:00') === -1) return 'the reader omits the due time';
+  if (out.indexOf('נוצרה') === -1) return 'the reader never says when the task was created';
+  if (out.indexOf('דנה כהן') === -1) return 'the reader omits the linked client';
+  if (out.indexOf('לאסוף מידות') === -1) return 'the reader omits the next action';
+
+  // and the checklist that came off the row, still tappable in place
+  if (out.indexOf('data-subtask="' + task.id + ':s1"') === -1) {
+    return 'the sub-tasks are not tickable from the reader';
+  }
+  if (out.indexOf('1/2 הושלמו') === -1) return 'the reader shows no sub-task progress';
+
+  // an event has no status or priority to state, and must not be given one
+  const APP2 = loadApp(), Store2 = APP2.Store;
+  Store2.load();
+  Store2.data.events.length = 0;
+  const ev = Store2.add('events', {
+    type: 'event', title: 'פגישה', category: 'business', date: APP2.isoDate(new Date()),
+    start: '10:00', end: '11:00', location: 'זום', notes: '', clientId: '', reminders: []
+  });
+  const R2 = APP2.ui.Detail;
+  R2.collection = 'events';
+  R2.id = ev.id;
+  const evOut = R2.body(Store2.find('events', ev.id));
+  if (evOut.indexOf('data-cycle=') !== -1) return 'an event was given a task status badge';
+  if (evOut.indexOf('badge pr-') !== -1) return 'an event was given a priority it does not have';
+  if (evOut.indexOf('dt-tags') === -1) return 'an event gets no badge strip at all';
+  return true;
+});
+
+check('נוצרה reads a real timestamp and never invents one', () => {
+  const U = loadApp().ui;
+  if (U.stampDay(0) !== '') return 'a missing timestamp was rendered anyway';
+  if (U.stampDay(NaN) !== '') return 'a broken timestamp was rendered anyway';
+  if (U.stampDay(undefined) !== '') return 'an absent timestamp was rendered anyway';
+  const noon = new Date();
+  noon.setHours(9, 5, 0, 0);
+  const out = U.stampDay(noon.getTime());
+  if (out.indexOf('היום') === -1) return 'a stamp from today does not read as היום';
+  if (out.indexOf('09:05') === -1) return 'the stamp lost its zero-padded time — ' + out;
+  // and the reader draws no line at all for a record with no stamp
+  if (U.Detail.line('נוצרה', U.stampDay(0)) !== '') return 'a blank stamp still drew a line';
+  return true;
+});
+
+/* ---- 46c. §3 — the tap contract ---- */
+
+check('a tap on the row opens the reader; a tap on the check circle does not', () => {
+  // the reader is what a tapped task opens
+  if (loadApp().ui.TAP_DETAIL.indexOf('tasks') === -1) return 'a task no longer opens the reader';
+  const gate = bodyOf(js, 'function openTapped(collection, id)');
+  if (!gate || gate.indexOf('Detail.open') === -1) return 'openTapped() no longer opens the reader';
+
+  // the delegate matches every data-* control FIRST and only falls through to
+  // the card body when nothing was hit — that fall-through is what makes the
+  // whole row a tap target, and what keeps the check circle out of it
+  const delegate = js.slice(js.indexOf("'[data-remindmode]"), js.indexOf("if (el.dataset.undo)"));
+  if (delegate.indexOf('[data-toggle]') === -1 && js.indexOf('[data-toggle]') === -1) {
+    return 'the check circle is not matched as a control';
+  }
+  if (delegate.indexOf('tapEditKey(e.target)') === -1) {
+    return 'the card body is no longer a tap target';
+  }
+  if (delegate.indexOf('if (!el)') === -1) {
+    return 'the card-body fall-through is not guarded by "no control was hit"';
+  }
+  // ticking is still in-place: the row is patched, never re-listed
+  const toggle = js.slice(js.indexOf('if (el.dataset.toggle) {'));
+  if (toggle.indexOf('Patch.apply') === -1 && toggle.indexOf('commitDone') === -1) {
+    return 'a ticked task is no longer settled in place';
+  }
+  // and the reader declines to stack a second layer on itself
+  if (bodyOf(js, 'function tapEditKey(target)').indexOf('Detail.isOpen()') === -1) {
+    return 'a tap inside the reader would open a second layer';
+  }
+  return true;
+});
+
+/* ---- 46d. the shell ---- */
+
+check('the shell was bumped to v20 for Sprint 14', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'(v(\d+))'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[2], 10) < 20) return 'the cache is still ' + m[1] + ' — returning phones keep the old shell';
+  if (html.indexOf('app.js?v=' + m[1]) === -1) return 'app.js is not busted to ' + m[1];
+  if (html.indexOf('styles.css?v=' + m[1]) === -1) return 'styles.css is not busted to ' + m[1];
+  if (html.indexOf('עריכה מלאה') === -1) return 'the reader does not offer the mandated עריכה מלאה';
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 14', () => {
+  const required = [
+    'Sprint 14', 'row-when', 'is-compact', 'dt-tags', 'stampDay',
+    'עריכה מלאה', 'נוצרה', 'v20'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
 });
 
 /* ---- 44e. §5 — the server half of a multi-reminder record ---- */
