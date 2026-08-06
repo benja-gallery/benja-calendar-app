@@ -1,6 +1,12 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Sprint 13 shipped (§7.4o) — **the hamburger settings drawer**: the top bar is
+> **Status:** Sprint 15 shipped (§7.4q) — **קטלוג המצרכים**: the list form now carries the
+> whole grocery vocabulary the field mandate handed over — 161 products across ten aisles
+> (`PANTRY`) — as a searchable chip grid under the items field. A tap adds a line, a second
+> tap removes it, and the textarea stays the single source of truth, so a hand-typed product
+> ticks its own chip and `mergeChecklist()` keeps every item's progress on an edit. v21.
+> Sprint 14 before it (§7.4p) — the compact task row and the tap-to-expand reader, v20.
+> Sprint 13 before it (§7.4o) — **the hamburger settings drawer**: the top bar is
 > down to a title, the cloud badge and `☰`; every pill it carried (`#pushBtn`, `#soundBtn`,
 > `#gcalBtn`, `#gcalSync`, `#trashBtn`) is the same element moved into `#settingsDrawer`;
 > reminders now carry their own `alert_sound` / `alert_vibe` (a short tone or a ~10-second
@@ -1830,6 +1836,91 @@ sub-tasks, linked client) and asserted to contain **none** of `tag-`, `st-`, `pr
 `data-toggle`, `data-rec` and the title; the reader is asserted to contain every one of them;
 `rowWhen()` is driven across late / timed / dated / bare tasks; the check-circle precedence is
 asserted against the delegate's own selector list; and the cache floor is raised to v20.
+
+### 7.4q קטלוג המצרכים — the pantry catalog inside the list form (shipped — Sprint 15)
+
+Field mandate: the whole grocery vocabulary, dictated in ten aisles — קטניות · קפואים ·
+שימורים · תבלינים · שמנים ורטבים · אפייה · חטיפים ומתוקים · משקאות · ניקיון הבית ·
+היגיינה וטיפוח. A shopping list was already a first-class record (§7.4m §2), but building
+one meant typing the same hundred-and-sixty products every week into a bare textarea. The
+mandate's list *is* the missing keyboard. The shell ships as **v21** on both cache-busted
+URLs.
+
+#### §1 The catalog is data, not a second store
+
+`PANTRY` is a flat array of ten aisles, each `{ key, label, items[] }`, exactly as dictated
+and in the dictated order. **161 products** (`PANTRY_TOTAL`), Hebrew verbatim — nothing was
+renamed, merged or "corrected"; the one normalisation is the repo's own Hebrew geresh in
+`צ׳יפס` · `צ׳ילי מתוק` · `ג׳ל כביסה` · `סקוץ׳`, as everywhere else in the app, and
+`pantryNorm()` folds it away so either spelling finds them. Two titles appear in two aisles
+on purpose, because the
+mandate put them there: `חומוס` (קטניות · שימורים) and `סויה` (קטניות · שמנים ורטבים);
+membership is by title, so ticking one ticks its twin, and the list still holds one line.
+
+| aisle | key | products |
+|---|---|---|
+| קטניות | `legumes` | 10 |
+| קפואים | `frozen` | 11 |
+| שימורים | `canned` | 12 |
+| תבלינים | `spices` | 21 |
+| שמנים ורטבים | `oils` | 16 |
+| אפייה | `baking` | 13 |
+| חטיפים ומתוקים | `snacks` | 17 |
+| משקאות | `drinks` | 17 |
+| ניקיון הבית | `cleaning` | 22 |
+| היגיינה וטיפוח | `hygiene` | 22 |
+
+No record, no migration and no D1 column was added: the catalog ships inside `app.js`, and
+what a list stores is what it always stored — `items`, through `parseChecklist()`.
+
+#### §2 The textarea is the single source of truth
+
+`pantryField()` renders under `f('items', …)`: a `type="search"` box, the aisle strip
+(`.pn-cat`, `data-pantrycat`), the chip grid (`.pn-chip`, `data-pantryitem`) and a summary
+line. A chip holds **no state of its own**. `pantryToggle(text, title)` is a pure function
+over the field's lines — absent → appended, present → removed, every other line returned
+untouched and in order — and `FormPantry.paint()` reads each chip's tick straight back off
+the field with `pantryHas()`.
+
+That one rule buys three behaviours for free:
+
+* a product typed by hand into the textarea ticks its own chip (`onInput` → `paint()`, the
+  app's only keystroke listener);
+* opening an existing list for edit (`openForm()` → `FormPantry.load()`, after
+  `fillForm()`) shows its products already ticked;
+* saving goes through the unchanged `parseChecklist()` / `mergeChecklist()` path, so
+  editing a ten-item list does **not** un-tick the items already bought.
+
+The search box carries no `name`, so `submitForm()`'s `[name]` sweep never sees it.
+
+#### §3 An aisle is a filter, never a container
+
+`חיפוש` runs across all ten aisles at once — `סבון` is a word before it is a shelf — and
+each hit wears its aisle name (`.pn-aisle`). `pantryNorm()` strips the geresh and folds
+whitespace, so `ציפס` finds `צ׳יפס` and `סקוץ` finds `סקוץ׳`, which is the difference
+between a search box and a spelling test on a phone keyboard. Tapping an aisle clears the
+query; an empty query returns to the aisle. A query with no hits says so, and points at the
+textarea — the catalog never blocks a product it does not know.
+
+Nothing is ever auto-added: a new list opens empty.
+
+#### §4 Layout
+
+`.pn-cats` scrolls sideways (44px pills, hidden scrollbar); `.pn-items` is a bounded
+`auto-fill minmax(140px, 1fr)` grid that scrolls inside `max-height:280px`, so 161 products
+never turn the sheet into a mile of form. A chosen product is gold-filled (`.pn-chip.is-on`,
+`✓`), so "מה כבר ברשימה" is answerable without reading the textarea. Every chip clears the
+44px touch floor, and every colour is a `var()` token, so the light theme inherits it.
+
+#### §5 Verification
+
+`healthcheck.js` §47 adds 12 checks that execute the engine rather than pattern-matching it:
+the ten aisles and all 161 titles are asserted against the mandate verbatim (including both
+deliberate duplicates), `pantryToggle()` is driven through add / remove / re-add / hand-typed
+neighbours / blank lines, `pantrySearch()` is driven across aisles and through the geresh
+fold, the rendered chip grid is asserted to tick exactly what the field holds, the delegate
+and `openForm()` wiring is asserted, `submitForm()` is proven to ignore the search box, and
+the cache floor is raised to **v21**.
 
 ### 7.4 General layout
 

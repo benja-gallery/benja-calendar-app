@@ -2831,7 +2831,9 @@ const CONTROLS = [
   // Sprint 9: the batch-archive button
   'archive-btn',
   // Sprint 11: the notification-permission banner's CTA
-  'nfy-cta'
+  'nfy-cta',
+  // Sprint 15: the pantry catalog's aisle pills and product chips
+  'pn-cat', 'pn-chip'
 ];
 
 /** chips that stay visually small and clear the floor with a hit expander */
@@ -7682,6 +7684,364 @@ check('PROJECT_PLAN documents Sprint 13', () => {
     'Sprint 13', 'settingsDrawer', 'menuBtn', 'הגדרות', 'צלצול',
     'רטט חוזר', 'alert_sound', 'alert_vibe', 'data-theme',
     '0006_sprint13_alerts.sql', 'v19'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ==========================================================================
+   §47 — SPRINT 15
+   קטלוג המצרכים: the ten aisles the field mandate dictated, the pure toggle
+   engine underneath them, and the one rule that keeps the textarea the single
+   source of truth.
+   ========================================================================== */
+
+/** the mandate, transcribed — this literal IS the specification for §47 */
+const AISLES = [
+  ['legumes', 'קטניות',
+    'עדשים ירוקות|עדשים כתומות|עדשים שחורות|חומוס|שעועית לבנה|שעועית אדומה|שעועית שחורה|אפונה יבשה|פול|סויה'],
+  ['frozen', 'קפואים',
+    'ירקות קפואים|אפונה קפואה|תירס קפוא|ברוקולי קפוא|כרובית קפואה|פיצה קפואה|בורקס קפוא|שניצל קפוא|צ׳יפס קפוא|גלידה|קוביות קרח'],
+  ['canned', 'שימורים',
+    'טונה|תירס|אפונה|פטריות|זיתים|מלפפון חמוץ|חמוצים|עגבניות מרוסקות|רסק עגבניות|שעועית|חומוס|עלי גפן'],
+  ['spices', 'תבלינים',
+    'מלח|פלפל שחור|פלפל לבן|פפריקה מתוקה|פפריקה חריפה|כורכום|כמון|קינמון|זעתר|אורגנו|בזיליקום|טימין|רוזמרין|אבקת שום|אבקת בצל|קארי|גראם מסאלה|מוסקט|הל|ציפורן|סומאק'],
+  ['oils', 'שמנים ורטבים',
+    'שמן זית|שמן קנולה|שמן חמניות|שמן קוקוס|חומץ|חומץ בלסמי|סויה|טריאקי|קטשופ|חרדל|מיונז|צ׳ילי מתוק|ברביקיו|טחינה|סילאן|דבש'],
+  ['baking', 'אפייה',
+    'קמח לבן|קמח מלא|קמח תופח|סוכר|סוכר חום|אבקת אפייה|סודה לשתייה|שמרים|קקאו|שוקולד לאפייה|תמצית וניל|סוכר וניל|קוקוס טחון'],
+  ['snacks', 'חטיפים ומתוקים',
+    'שוקולד|חטיפי שוקולד|וופלים|ביסקוויטים|במבה|ביסלי|צ׳יפס|פופקורן|בוטנים|פיסטוקים|קשיו|אגוזי מלך|אגוזי לוז|שקדים|גרעינים|סוכריות|מסטיקים'],
+  ['drinks', 'משקאות',
+    'מים מינרליים|מים מוגזים|קולה|דיאט קולה|זירו|ספרייט|פאנטה|אייס טי|מיץ תפוזים|מיץ ענבים|לימונדה|קפה|קפה נמס|קפה שחור|קפסולות קפה|תה|חליטות'],
+  ['cleaning', 'ניקיון הבית',
+    'נוזל כלים|טבליות למדיח|אבקת כביסה|ג׳ל כביסה|מרכך כביסה|מסיר כתמים|אקונומיקה|חומר לניקוי רצפות|חומר לניקוי אסלות|חומר לניקוי אמבטיה|חומר לניקוי חלונות|ספריי רב שימושי|סנט מוריץ|מטליות|ספוגים|סקוץ׳|כפפות|שקיות אשפה|נייר סופג|נייר אלומיניום|ניילון נצמד|נייר אפייה'],
+  ['hygiene', 'היגיינה וטיפוח',
+    'נייר טואלט|מגבונים לחים|שמפו|מרכך|מסכת שיער|סבון גוף|סבון ידיים|סבון פנים|משחת שיניים|מברשת שיניים|חוט דנטלי|מי פה|דאודורנט|קרם פנים|קרם גוף|קרם ידיים|קרם גילוח|קצף גילוח|סכיני גילוח|מקלות אוזניים|מגבונים להסרת איפור|צמר גפן']
+].map(([key, label, items]) => ({ key, label, items: items.split('|') }));
+
+const AISLE_TOTAL = AISLES.reduce((n, a) => n + a.items.length, 0);
+
+/**
+ * The form the catalog lives in, as a stub: a #formFields box that answers the
+ * five selectors FormPantry reaches for. The textarea is a real value carrier,
+ * which is the whole point — every assertion below reads the field back rather
+ * than trusting the module's own memory.
+ */
+function pantryStub(itemsText) {
+  const noop = () => {};
+  const mk = extra => Object.assign({
+    textContent: '', innerHTML: '', value: '', dataset: {}, attrs: {},
+    classList: {
+      on: {},
+      add(c) { this.on[c] = true; },
+      remove(c) { delete this.on[c]; },
+      toggle(c, v) { if (v) this.on[c] = true; else delete this.on[c]; },
+      contains(c) { return !!this.on[c]; }
+    },
+    setAttribute(k, v) { this.attrs[k] = v; },
+    getAttribute(k) { return this.attrs[k]; }
+  }, extra || {});
+
+  const items = mk({ name: 'items', value: itemsText || '' });
+  const field = mk(), grid = mk(), summary = mk(), search = mk();
+  const cats = AISLES.map(a => mk({ dataset: { pantrycat: a.key } }));
+
+  const box = mk({
+    querySelector(sel) {
+      if (sel === '.pn-field') return field;
+      if (sel === '[name="items"]') return items;
+      if (sel === '.pn-items') return grid;
+      if (sel === '.pn-summary') return summary;
+      if (sel === '.pn-search') return search;
+      return null;
+    },
+    querySelectorAll: sel => (sel === '[data-pantrycat]' ? cats : [])
+  });
+
+  return {
+    items, grid, summary, search, cats,
+    doc: {
+      readyState: 'loading',
+      addEventListener: noop,
+      body: { style: {} },
+      querySelector: sel => (sel === '#formFields' ? box : null),
+      querySelectorAll: () => []
+    }
+  };
+}
+
+/** the catalog module, wired to a stubbed form */
+function loadPantry(itemsText) {
+  const stub = pantryStub(itemsText);
+  const APP = loadApp({ document: stub.doc });
+  return { P: APP.lists, F: APP.lists.FormPantry, stub };
+}
+
+check('the catalog is the ten mandated aisles, in the mandated order', () => {
+  const { P } = loadPantry('');
+  if (!Array.isArray(P.PANTRY)) return 'no APP.lists.PANTRY export';
+  if (P.PANTRY.length !== AISLES.length) return 'the catalog has ' + P.PANTRY.length + ' aisles';
+  AISLES.forEach((a, i) => {
+    if (P.PANTRY[i].key !== a.key) throw new Error('aisle ' + i + ' is ' + P.PANTRY[i].key + ', expected ' + a.key);
+    if (P.PANTRY[i].label !== a.label) throw new Error(a.key + ' is labelled ' + P.PANTRY[i].label);
+    if (P.PANTRY[i].items.length !== a.items.length) {
+      throw new Error(a.label + ' holds ' + P.PANTRY[i].items.length + ' products, expected ' + a.items.length);
+    }
+  });
+  if (P.PANTRY_TOTAL !== AISLE_TOTAL) return 'PANTRY_TOTAL is ' + P.PANTRY_TOTAL + ', expected ' + AISLE_TOTAL;
+  return true;
+});
+
+check('every product the mandate dictated is in the catalog, verbatim', () => {
+  const { P } = loadPantry('');
+  AISLES.forEach(a => {
+    const got = P.pantryAisle(a.key);
+    if (!got) throw new Error('no aisle ' + a.key);
+    a.items.forEach((title, i) => {
+      if (got.items[i] !== title) {
+        throw new Error(a.label + '[' + i + '] is "' + got.items[i] + '", expected "' + title + '"');
+      }
+    });
+  });
+  // ...and nothing was quietly added on top of the dictation
+  const extra = P.PANTRY.reduce((n, a) => n + a.items.length, 0) - AISLE_TOTAL;
+  return extra === 0 ? true : extra + ' products were invented';
+});
+
+check('the only repeated products are the mandate’s own two', () => {
+  const { P } = loadPantry('');
+  const seen = {}, dupes = [];
+  P.PANTRY.forEach(a => a.items.forEach(t => {
+    if (seen[t]) dupes.push(t);
+    seen[t] = true;
+  }));
+  const expected = ['חומוס', 'סויה'];
+  if (dupes.slice().sort().join('|') !== expected.slice().sort().join('|')) {
+    return 'repeated titles are ' + (dupes.join('|') || 'none') + ', expected ' + expected.join('|');
+  }
+  // and a repeat is one product with two shelves, never two lines in the list
+  const one = P.pantryToggle('', 'חומוס');
+  return P.pantryLines(one).length === 1 ? true : 'a duplicated title wrote two lines';
+});
+
+check('pantryToggle() adds, removes, and never disturbs a neighbour', () => {
+  const { P } = loadPantry('');
+  let text = P.pantryToggle('', 'טחינה');
+  if (text !== 'טחינה') return 'a first product came out as "' + text + '"';
+
+  text = P.pantryToggle(text, 'דבש');
+  if (text !== 'טחינה\nדבש') return 'the second product did not append: ' + JSON.stringify(text);
+
+  // a hand-typed line the catalog knows nothing about
+  text = text + '\nלחם משק';
+  text = P.pantryToggle(text, 'טחינה');
+  if (text !== 'דבש\nלחם משק') return 'removing one product disturbed the rest: ' + JSON.stringify(text);
+
+  text = P.pantryToggle(text, 'טחינה');
+  if (text !== 'דבש\nלחם משק\nטחינה') return 're-adding did not go to the end: ' + JSON.stringify(text);
+
+  // blank lines and stray spaces are the textarea's, not the list's
+  const messy = P.pantryToggle('  חלב  \n\n\nלחם\n', 'סוכר');
+  if (messy !== 'חלב\nלחם\nסוכר') return 'the field was not normalised: ' + JSON.stringify(messy);
+
+  // a toggle with nothing to toggle is a no-op, not a blank line
+  if (P.pantryToggle('חלב', '   ') !== 'חלב') return 'an empty title wrote a line';
+  if (P.pantryToggle(null, 'מלח') !== 'מלח') return 'a null field could not be added to';
+  return true;
+});
+
+check('a tick is read off the field, so a hand-typed product counts', () => {
+  const { P } = loadPantry('');
+  if (!P.pantryHas('חלב\nטחינה\nלחם', 'טחינה')) return 'a present product does not read as present';
+  if (P.pantryHas('חלב\nטחינה', 'טחינ')) return 'a partial line was mistaken for a product';
+  if (!P.pantryHas('  דבש  ', 'דבש')) return 'a padded line does not read as its product';
+  if (P.pantryHas('', 'דבש')) return 'an empty field claims to hold a product';
+
+  // the toggle and the store's own parser must agree on what a line is
+  const text = P.pantryToggle(P.pantryToggle('', 'מלח'), 'קפה');
+  const parsed = P.parseChecklist(text, 'li').map(i => i.title);
+  if (parsed.join('|') !== 'מלח|קפה') return 'parseChecklist() disagrees: ' + parsed.join('|');
+  return true;
+});
+
+check('חיפוש crosses every aisle and forgives the geresh', () => {
+  const { P } = loadPantry('');
+
+  // one word, three aisles — the reason search is not scoped to a shelf
+  const soap = P.pantrySearch('סבון').map(r => r.title);
+  if (soap.length !== 3) return 'סבון found ' + soap.length + ' products';
+
+  const coffee = P.pantrySearch('קפה');
+  if (coffee.length !== 4) return 'קפה found ' + coffee.length + ' products';
+  if (!coffee.every(r => r.cat === 'drinks')) return 'a coffee hit came from the wrong aisle';
+  if (coffee[0].label !== 'משקאות') return 'a hit does not carry its aisle label';
+
+  // the geresh nobody types on a phone
+  if (!P.pantrySearch('ציפס').some(r => r.title === 'צ׳יפס')) return 'ציפס does not find צ׳יפס';
+  if (!P.pantrySearch("צ'יפס").some(r => r.title === 'צ׳יפס')) return 'an ASCII apostrophe does not match';
+  if (!P.pantrySearch('סקוץ').some(r => r.title === 'סקוץ׳')) return 'סקוץ does not find סקוץ׳';
+  if (!P.pantrySearch('  גל כביסה  ').length) return 'whitespace is not folded';
+
+  // a duplicated product is found once per shelf, each naming its own
+  const humus = P.pantrySearch('חומוס');
+  if (humus.length !== 2) return 'חומוס found ' + humus.length + ' entries';
+  if (humus[0].label === humus[1].label) return 'both חומוס hits claim the same aisle';
+
+  if (P.pantrySearch('').length !== 0) return 'an empty query returned results';
+  if (P.pantrySearch('טרקטור').length !== 0) return 'a product that does not exist was found';
+  return true;
+});
+
+check('the chip grid ticks exactly what the items field holds', () => {
+  const { F, stub } = loadPantry('עדשים ירוקות\nמלח מהמדף של סבתא');
+  F.load();
+
+  // the first aisle, drawn with its own products
+  if (stub.grid.innerHTML.indexOf('data-pantryitem="עדשים כתומות"') === -1) {
+    return 'the opening aisle was not rendered';
+  }
+  // what the list already holds is ticked...
+  const on = stub.grid.innerHTML.match(/pn-chip is-on[^>]*data-pantryitem="([^"]+)"/g) || [];
+  if (on.length !== 1) return on.length + ' chips are ticked, expected 1';
+  if (stub.grid.innerHTML.indexOf('pn-chip is-on" type="button" data-pantryitem="עדשים ירוקות"') === -1) {
+    return 'the product already in the list is not ticked';
+  }
+  // ...and the summary counts the hand-typed line too, because it is a real item
+  if (stub.summary.textContent.indexOf('2 פריטים ברשימה') === -1) {
+    return 'the summary reads "' + stub.summary.textContent + '"';
+  }
+
+  // a tap writes the field and repaints from it
+  F.toggle('פול');
+  if (stub.items.value !== 'עדשים ירוקות\nמלח מהמדף של סבתא\nפול') {
+    return 'the tap wrote ' + JSON.stringify(stub.items.value);
+  }
+  if (stub.grid.innerHTML.indexOf('is-on" type="button" data-pantryitem="פול"') === -1) {
+    return 'the tapped product did not tick';
+  }
+  F.toggle('פול');
+  if (stub.items.value !== 'עדשים ירוקות\nמלח מהמדף של סבתא') return 'the second tap did not remove the line';
+  if (stub.grid.innerHTML.indexOf('is-on" type="button" data-pantryitem="פול"') !== -1) {
+    return 'the untapped product is still ticked';
+  }
+
+  // switching aisle repaints; searching crosses aisles and names them
+  F.setCat('spices');
+  if (stub.grid.innerHTML.indexOf('data-pantryitem="כורכום"') === -1) return 'the aisle did not switch';
+  if (stub.grid.innerHTML.indexOf('data-pantryitem="פול"') !== -1) return 'the previous aisle is still drawn';
+  if (stub.summary.textContent.indexOf('תבלינים') !== 0) return 'the summary does not name the open aisle';
+
+  F.setQuery('סבון');
+  if (stub.grid.innerHTML.indexOf('pn-aisle') === -1) return 'a search hit does not name its aisle';
+  if (stub.grid.innerHTML.indexOf('data-pantryitem="סבון גוף"') === -1) return 'the search drew no hits';
+  if (stub.cats.some(c => c.classList.contains('is-active'))) {
+    return 'an aisle still reads as open while a search is running';
+  }
+
+  // an unknown product does not blank the panel — it points at the textarea
+  F.setQuery('טרקטור');
+  if (stub.grid.innerHTML.indexOf('pn-empty') === -1) return 'a fruitless search rendered nothing at all';
+  if (stub.grid.innerHTML.indexOf('להקליד אותו ידנית') === -1) return 'the empty state does not offer the way out';
+
+  // and an aisle tap clears the query rather than filtering inside it
+  F.setCat('drinks');
+  if (F.query !== '') return 'the query survived an aisle tap';
+  if (stub.search.value !== '') return 'the search box still shows the old query';
+  return true;
+});
+
+check('the catalog is wired into the list form, and only the list form', () => {
+  const list = bodyOf(js, 'list: function ()');
+  if (!list || list.indexOf('pantryField()') === -1) return 'the list form does not carry the catalog';
+  ['event: function ()', 'task: function ()', 'note: function ()', 'client: function ()'].forEach(sig => {
+    if (bodyOf(js, sig).indexOf('pantryField()') !== -1) {
+      throw new Error(sig.split(':')[0] + ' was given a grocery catalog');
+    }
+  });
+
+  // it opens ticked: load() runs AFTER fillForm(), or an edited list opens blank
+  const open = bodyOf(js, 'function openForm(type, prefill, edit)');
+  if (open.indexOf('FormPantry.load()') === -1) return 'openForm() never loads the catalog';
+  if (open.indexOf('fillForm(type, edit)') > open.indexOf('FormPantry.load()')) {
+    return 'the catalog is loaded before the record is filled in';
+  }
+
+  // both controls are matched by the one delegate, ahead of tap-to-edit
+  const delegate = bodyOf(js, 'function onClick(e)');
+  ['[data-pantrycat]', '[data-pantryitem]'].forEach(sel => {
+    if (delegate.indexOf(sel) === -1) throw new Error(sel + ' is not matched by the delegate');
+  });
+  if (delegate.indexOf('FormPantry.setCat') === -1) return 'an aisle tap is never handled';
+  if (delegate.indexOf('FormPantry.toggle') === -1) return 'a product tap is never handled';
+
+  // the search box is the app's only keystroke listener, and it repaints the
+  // ticks when the textarea itself is edited
+  const input = bodyOf(js, 'function onInput(e)');
+  if (input.indexOf('FormPantry.setQuery') === -1) return 'the search box is not wired';
+  if (input.indexOf('FormPantry.paint') === -1) return 'typing into the items field does not re-tick the chips';
+  if (js.indexOf("addEventListener('input', onInput)") === -1) return 'the input delegate is never registered';
+  return true;
+});
+
+check('the search box never reaches the record', () => {
+  const { P } = loadPantry('');
+  const markup = P.pantryField();
+  // submitForm() sweeps #formFields for [name]; anything the catalog owns that
+  // carried one would land on the list as a phantom field
+  if (/data-pantrysearch[^>]*\sname=/.test(markup) || /\sname="[^"]*"[^>]*data-pantrysearch/.test(markup)) {
+    return 'the search box carries a name and would be saved onto the list';
+  }
+  if (markup.indexOf('name=') !== -1) return 'the catalog panel declares a form field of its own';
+  if (markup.indexOf('type="search"') === -1) return 'the search box is not a search input';
+  if (markup.indexOf('aria-label="חיפוש בקטלוג המצרכים"') === -1) return 'the search box is unlabelled';
+  // the list still saves through the one parser it always did
+  if (bodyOf(js, 'function submitForm(e)').indexOf("parseChecklist(v.items, 'li')") === -1) {
+    return 'the save path no longer goes through parseChecklist()';
+  }
+  return true;
+});
+
+check('the catalog panel is styled to the touch floor, with tokens only', () => {
+  ['.pn-field', '.pn-cats', '.pn-cat', '.pn-items', '.pn-chip', '.pn-empty', '.pn-summary']
+    .forEach(sel => {
+      if (css.indexOf(sel) === -1) throw new Error('no ' + sel + ' rule');
+    });
+
+  const rules = cssRules(css);
+  ['.pn-cat', '.pn-chip'].forEach(sel => {
+    const r = rules.filter(x => x.sel === sel)[0];
+    if (!r) throw new Error(sel + ' has no rule of its own');
+    if (r.body.replace(/\s/g, '').indexOf('min-height:var(--tap)') === -1) {
+      throw new Error(sel + ' does not clear the 44px floor');
+    }
+  });
+
+  // 161 products must not turn the sheet into a mile of form
+  const grid = rules.filter(x => x.sel === '.pn-items')[0];
+  if (grid.body.indexOf('max-height') === -1) return 'the chip grid is unbounded';
+  if (grid.body.indexOf('overflow-y:auto') === -1) return 'the chip grid does not scroll on its own';
+
+  // every colour is a token, so the light theme inherits the panel for free
+  const block = css.slice(css.indexOf('.pn-field{'), css.indexOf('.pn-summary{'));
+  if (/#[0-9a-f]{3,8}\b/i.test(block)) return 'the catalog declares a raw hex';
+  if (/rgba?\(/i.test(block)) return 'the catalog declares a raw rgb/rgba';
+  return true;
+});
+
+check('the shell was bumped to v21 for Sprint 15', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'(v(\d+))'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[2], 10) < 21) return 'the cache is still ' + m[1] + ' — returning phones keep the old shell';
+  if (html.indexOf('app.js?v=' + m[1]) === -1) return 'app.js is not busted to ' + m[1];
+  if (html.indexOf('styles.css?v=' + m[1]) === -1) return 'styles.css is not busted to ' + m[1];
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 15', () => {
+  const required = [
+    'Sprint 15', 'קטלוג המצרכים', 'PANTRY', 'pantryToggle', 'pantryNorm',
+    'data-pantryitem', 'data-pantrycat', 'pn-chip', 'v21'
   ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;

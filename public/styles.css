@@ -2208,6 +2208,86 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
 .al-summary{ margin-top:6px; }
 
 /* ==========================================================================
+   Sprint 15 — קטלוג המצרכים, the pantry catalog inside the list form
+
+   A hundred and sixty products cannot be a wall: the aisle strip scrolls
+   sideways, the chip grid scrolls on its own inside a bounded panel, and the
+   sheet around them keeps scrolling exactly as it did. A chosen product is
+   gold-filled so the answer to "מה כבר ברשימה" is readable at a glance,
+   without reading the textarea above.
+   ========================================================================== */
+
+/* the catalog is a block of its own, not a fifth control in the field stack */
+.pn-field{ margin-top:18px; padding-top:16px; border-top:1px solid var(--line-soft); }
+
+.pn-hint{ margin:0 0 10px; color:var(--faint); font-size:12px; line-height:1.6; }
+
+.pn-search{ margin-bottom:10px; }
+
+/* the aisles — one horizontal strip, never a second wall of buttons */
+.pn-cats{
+  display:flex; gap:8px;
+  overflow-x:auto; overscroll-behavior-x:contain;
+  padding-bottom:6px; margin-bottom:10px;
+  scrollbar-width:none;
+}
+.pn-cats::-webkit-scrollbar{ display:none; }
+
+.pn-cat{
+  flex:0 0 auto;
+  display:inline-flex; align-items:center; gap:6px;
+  min-height:var(--tap); padding:0 14px;
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:999px;
+  color:var(--muted); font-size:13px; font-weight:700;
+  cursor:pointer; white-space:nowrap;
+  transition:background .18s, color .18s, border-color .18s;
+}
+.pn-cat:hover{ color:var(--ink); }
+.pn-cat.is-active{
+  background:var(--gold-soft); border-color:var(--gold-edge); color:var(--gold);
+}
+.pn-n{ font-size:11px; font-weight:800; color:var(--faint); font-variant-numeric:tabular-nums; }
+.pn-cat.is-active .pn-n{ color:var(--gold); }
+
+/* the products — a bounded, scrollable grid so the form stays navigable */
+.pn-items{
+  display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:8px;
+  max-height:280px; overflow-y:auto; overscroll-behavior-y:contain;
+  padding:10px; border:1px solid var(--line-soft); border-radius:var(--r-lg);
+  background:var(--card-2);
+}
+
+.pn-chip{
+  display:flex; align-items:center; gap:8px;
+  min-height:var(--tap); padding:0 10px;
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:var(--r-md);
+  color:var(--ink); font-size:13px; font-weight:600; text-align:start;
+  cursor:pointer;
+  transition:background .18s, border-color .18s, color .18s;
+}
+.pn-chip:hover{ border-color:var(--gold-edge); }
+.pn-chip.is-on{
+  background:var(--gold-soft); border-color:var(--gold-edge); color:var(--gold);
+}
+
+.pn-tick{
+  flex:0 0 18px;
+  font-size:13px; font-weight:800; color:var(--faint); text-align:center;
+}
+.pn-chip.is-on .pn-tick{ color:var(--gold); }
+
+.pn-name{ flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* only ever drawn while searching: which aisle the hit came from */
+.pn-aisle{ flex:0 0 auto; font-size:10.5px; font-weight:700; color:var(--faint); }
+
+.pn-empty{ grid-column:1 / -1; margin:0; padding:8px 4px; color:var(--faint); font-size:12.5px; line-height:1.6; }
+
+.pn-summary{ margin:8px 4px 0; }
+
+/* ==========================================================================
    Desktop
    ========================================================================== */
 

@@ -224,7 +224,7 @@
   var THEME_DEFAULT = 'dark';
 
   /** the shell version — MUST match CACHE_VERSION in sw.js and the ?v= in index.html */
-  var APP_VERSION = 'v20';
+  var APP_VERSION = 'v21';
 
   /* --- client CRM (Sprint 4) --- */
   var CLIENT_STATUSES = ['lead', 'contacted', 'interested', 'quoted',
@@ -6344,7 +6344,9 @@
       return f('title', 'שם הרשימה', '<input class="input" name="title" placeholder="קניות לשבת…" required>') +
         f('date', 'תאריך (לא חובה — רשימה יכולה להיות ללא תאריך)', '<input class="input" type="date" name="date">') +
         f('clientId', 'שיוך ללקוח', clientPicker()) +
-        f('items', 'פריטים (שורה לכל פריט)', '<textarea class="textarea" name="items" placeholder="חלב&#10;לחם&#10;ביצים"></textarea>');
+        f('items', 'פריטים (שורה לכל פריט)', '<textarea class="textarea" name="items" placeholder="חלב&#10;לחם&#10;ביצים"></textarea>') +
+        // Sprint 15 — the same field, filled by tapping instead of by typing
+        pantryField();
     },
     note: function () {
       return f('title', 'כותרת', '<input class="input" name="title" placeholder="רעיון / תזכורת">') +
@@ -6691,6 +6693,259 @@
     }
   };
 
+  /* ==========================================================================
+     קטלוג המצרכים — the pantry catalog (Sprint 15 · mandate)
+
+     A shopping list is not free text that happens to have a title: it is the
+     same hundred-and-sixty products, typed again every single week. The mandate
+     hands that vocabulary over in ten aisles, and this is the whole of it.
+
+     Three rules keep it from becoming a second store:
+
+       * the textarea stays the single source of truth. A chip holds no state
+         of its own — it toggles a LINE and then reads its own tick back off
+         the field, so a product typed by hand ticks its chip, an edited list
+         opens with its ticks already on, and mergeChecklist() keeps every
+         item's progress exactly as it was.
+       * an aisle is a filter, never a container. חיפוש runs across all ten at
+         once, because "סבון" is a word before it is a shelf.
+       * nothing is ever auto-added. A new list opens empty — the catalog is a
+         keyboard, not a template.
+     ========================================================================== */
+
+  var PANTRY = [
+    {
+      key: 'legumes', label: 'קטניות',
+      items: ['עדשים ירוקות', 'עדשים כתומות', 'עדשים שחורות', 'חומוס', 'שעועית לבנה',
+        'שעועית אדומה', 'שעועית שחורה', 'אפונה יבשה', 'פול', 'סויה']
+    },
+    {
+      key: 'frozen', label: 'קפואים',
+      items: ['ירקות קפואים', 'אפונה קפואה', 'תירס קפוא', 'ברוקולי קפוא', 'כרובית קפואה',
+        'פיצה קפואה', 'בורקס קפוא', 'שניצל קפוא', 'צ׳יפס קפוא', 'גלידה', 'קוביות קרח']
+    },
+    {
+      key: 'canned', label: 'שימורים',
+      items: ['טונה', 'תירס', 'אפונה', 'פטריות', 'זיתים', 'מלפפון חמוץ', 'חמוצים',
+        'עגבניות מרוסקות', 'רסק עגבניות', 'שעועית', 'חומוס', 'עלי גפן']
+    },
+    {
+      key: 'spices', label: 'תבלינים',
+      items: ['מלח', 'פלפל שחור', 'פלפל לבן', 'פפריקה מתוקה', 'פפריקה חריפה', 'כורכום',
+        'כמון', 'קינמון', 'זעתר', 'אורגנו', 'בזיליקום', 'טימין', 'רוזמרין', 'אבקת שום',
+        'אבקת בצל', 'קארי', 'גראם מסאלה', 'מוסקט', 'הל', 'ציפורן', 'סומאק']
+    },
+    {
+      key: 'oils', label: 'שמנים ורטבים',
+      items: ['שמן זית', 'שמן קנולה', 'שמן חמניות', 'שמן קוקוס', 'חומץ', 'חומץ בלסמי',
+        'סויה', 'טריאקי', 'קטשופ', 'חרדל', 'מיונז', 'צ׳ילי מתוק', 'ברביקיו', 'טחינה',
+        'סילאן', 'דבש']
+    },
+    {
+      key: 'baking', label: 'אפייה',
+      items: ['קמח לבן', 'קמח מלא', 'קמח תופח', 'סוכר', 'סוכר חום', 'אבקת אפייה',
+        'סודה לשתייה', 'שמרים', 'קקאו', 'שוקולד לאפייה', 'תמצית וניל', 'סוכר וניל',
+        'קוקוס טחון']
+    },
+    {
+      key: 'snacks', label: 'חטיפים ומתוקים',
+      items: ['שוקולד', 'חטיפי שוקולד', 'וופלים', 'ביסקוויטים', 'במבה', 'ביסלי', 'צ׳יפס',
+        'פופקורן', 'בוטנים', 'פיסטוקים', 'קשיו', 'אגוזי מלך', 'אגוזי לוז', 'שקדים',
+        'גרעינים', 'סוכריות', 'מסטיקים']
+    },
+    {
+      key: 'drinks', label: 'משקאות',
+      items: ['מים מינרליים', 'מים מוגזים', 'קולה', 'דיאט קולה', 'זירו', 'ספרייט', 'פאנטה',
+        'אייס טי', 'מיץ תפוזים', 'מיץ ענבים', 'לימונדה', 'קפה', 'קפה נמס', 'קפה שחור',
+        'קפסולות קפה', 'תה', 'חליטות']
+    },
+    {
+      key: 'cleaning', label: 'ניקיון הבית',
+      items: ['נוזל כלים', 'טבליות למדיח', 'אבקת כביסה', 'ג׳ל כביסה', 'מרכך כביסה',
+        'מסיר כתמים', 'אקונומיקה', 'חומר לניקוי רצפות', 'חומר לניקוי אסלות',
+        'חומר לניקוי אמבטיה', 'חומר לניקוי חלונות', 'ספריי רב שימושי', 'סנט מוריץ',
+        'מטליות', 'ספוגים', 'סקוץ׳', 'כפפות', 'שקיות אשפה', 'נייר סופג', 'נייר אלומיניום',
+        'ניילון נצמד', 'נייר אפייה']
+    },
+    {
+      key: 'hygiene', label: 'היגיינה וטיפוח',
+      items: ['נייר טואלט', 'מגבונים לחים', 'שמפו', 'מרכך', 'מסכת שיער', 'סבון גוף',
+        'סבון ידיים', 'סבון פנים', 'משחת שיניים', 'מברשת שיניים', 'חוט דנטלי', 'מי פה',
+        'דאודורנט', 'קרם פנים', 'קרם גוף', 'קרם ידיים', 'קרם גילוח', 'קצף גילוח',
+        'סכיני גילוח', 'מקלות אוזניים', 'מגבונים להסרת איפור', 'צמר גפן']
+    }
+  ];
+
+  var PANTRY_TOTAL = PANTRY.reduce(function (n, a) { return n + a.items.length; }, 0);
+
+  function pantryAisle(key) {
+    for (var i = 0; i < PANTRY.length; i++) {
+      if (PANTRY[i].key === key) return PANTRY[i];
+    }
+    return null;
+  }
+
+  function pantryLabel(key) {
+    var a = pantryAisle(key);
+    return a ? a.label : '';
+  }
+
+  /** one aisle, in the row shape the chip grid renders */
+  function pantryAisleRows(key) {
+    var a = pantryAisle(key) || PANTRY[0];
+    return a.items.map(function (t) { return { cat: a.key, label: a.label, title: t }; });
+  }
+
+  /**
+   * Search is spelling-forgiving on purpose: the geresh in צ׳יפס / סקוץ׳ is a
+   * character nobody reaches for on a phone keyboard, so "ציפס" has to find it.
+   */
+  function pantryNorm(s) {
+    return String(s == null ? '' : s)
+      .replace(/[׳'’"״“”]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  /** every product whose name contains the query, across all ten aisles */
+  function pantrySearch(query) {
+    var q = pantryNorm(query);
+    if (!q) return [];
+    var out = [];
+    PANTRY.forEach(function (a) {
+      a.items.forEach(function (t) {
+        if (pantryNorm(t).indexOf(q) !== -1) out.push({ cat: a.key, label: a.label, title: t });
+      });
+    });
+    return out;
+  }
+
+  /* ---- the textarea, read and written as a set of lines ---- */
+
+  function pantryLines(text) {
+    return String(text == null ? '' : text).split('\n')
+      .map(function (s) { return s.trim(); })
+      .filter(Boolean);
+  }
+
+  function pantryHas(text, title) {
+    return pantryLines(text).indexOf(String(title == null ? '' : title).trim()) !== -1;
+  }
+
+  /**
+   * The whole interaction, as one pure function: a product that is not in the
+   * list is appended, a product that is in it is removed — and every OTHER
+   * line, typed by hand or added by another chip, comes back untouched and in
+   * the order it was written.
+   */
+  function pantryToggle(text, title) {
+    var t = String(title == null ? '' : title).trim();
+    var lines = pantryLines(text);
+    if (!t) return lines.join('\n');
+    var at = lines.indexOf(t);
+    if (at === -1) lines.push(t);
+    else lines.splice(at, 1);
+    return lines.join('\n');
+  }
+
+  function pantryField() {
+    var cats = PANTRY.map(function (a, i) {
+      var on = i === 0;
+      return '<button class="pn-cat' + (on ? ' is-active' : '') + '" type="button" ' +
+        'data-pantrycat="' + esc(a.key) + '" aria-pressed="' + (on ? 'true' : 'false') + '">' +
+        esc(a.label) + '<span class="pn-n">' + a.items.length + '</span></button>';
+    }).join('');
+
+    return '<div class="field pn-field">' +
+      '<label class="field-label" for="fld_pantrySearch">קטלוג מצרכים · ' +
+      PANTRY_TOTAL + ' מוצרים</label>' +
+      '<p class="pn-hint">הקשה על מוצר מוסיפה אותו לרשימה למעלה, הקשה נוספת מסירה אותו. ' +
+      'החיפוש עובר על כל המדפים יחד.</p>' +
+      '<input class="input pn-search" id="fld_pantrySearch" type="search" autocomplete="off" ' +
+      'data-pantrysearch="1" placeholder="חיפוש מוצר…" aria-label="חיפוש בקטלוג המצרכים">' +
+      '<div class="pn-cats" role="group" aria-label="מדפי הקטלוג">' + cats + '</div>' +
+      '<div class="pn-items" role="group" aria-label="מוצרים בקטלוג"></div>' +
+      '<p class="pn-summary block-meta"></p>' +
+      '</div>';
+  }
+
+  /** the catalog's state while a form is open — same shape as FormRemind */
+  var FormPantry = {
+    cat: PANTRY[0].key,
+    query: '',
+
+    /** the list's own items field: the thing every chip actually writes to */
+    field: function () { return rmEl('[name="items"]'); },
+
+    load: function () {
+      this.cat = PANTRY[0].key;
+      this.query = '';
+      var box = rmEl('.pn-search');
+      if (box) box.value = '';
+      this.paint();
+      return this;
+    },
+
+    setCat: function (key) {
+      if (!pantryAisle(key)) return;
+      this.cat = key;
+      // an aisle tap answers a different question than a search, so it clears
+      // the query rather than filtering the results of it
+      this.query = '';
+      var box = rmEl('.pn-search');
+      if (box) box.value = '';
+      this.paint();
+    },
+
+    setQuery: function (q) {
+      this.query = String(q == null ? '' : q);
+      this.paint();
+    },
+
+    toggle: function (title) {
+      var area = this.field();
+      if (!area) return;
+      area.value = pantryToggle(area.value, title);
+      this.paint();
+    },
+
+    paint: function () {
+      if (!rmEl('.pn-field')) return;
+      var area = this.field();
+      var text = area ? area.value : '';
+      var searching = pantryNorm(this.query) !== '';
+      var self = this;
+
+      rmAll('[data-pantrycat]').forEach(function (b) {
+        var on = !searching && b.dataset.pantrycat === self.cat;
+        b.classList.toggle('is-active', on);
+        b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      });
+
+      var rows = searching ? pantrySearch(this.query) : pantryAisleRows(this.cat);
+      var box = rmEl('.pn-items');
+      if (box) {
+        box.innerHTML = rows.length
+          ? rows.map(function (r) {
+            var on = pantryHas(text, r.title);
+            return '<button class="pn-chip' + (on ? ' is-on' : '') + '" type="button" ' +
+              'data-pantryitem="' + esc(r.title) + '" aria-pressed="' + (on ? 'true' : 'false') + '">' +
+              '<span class="pn-tick">' + (on ? '✓' : '+') + '</span>' +
+              '<span class="pn-name">' + esc(r.title) + '</span>' +
+              (searching ? '<span class="pn-aisle">' + esc(r.label) + '</span>' : '') +
+              '</button>';
+          }).join('')
+          : '<p class="pn-empty">אין מוצר כזה בקטלוג — אפשר להקליד אותו ידנית בשדה הפריטים.</p>';
+      }
+
+      var picked = pantryLines(text).length;
+      setText(rmEl('.pn-summary'), searching
+        ? plural(rows.length, 'תוצאה אחת', 'תוצאות') + ' · ' + picked + ' פריטים ברשימה'
+        : pantryLabel(this.cat) + ' · ' + rows.length + ' מוצרים · ' + picked + ' פריטים ברשימה');
+    }
+  };
+
   /**
    * Optional association. The client drawer's פגישות / משימות / רשימות tabs are
    * only as good as this select, so every creatable type that can belong to a
@@ -6929,6 +7184,10 @@
       FormAlert.load(heldSound ? heldSound.value : ALERT_SOUND_DEFAULT,
         heldVibe ? heldVibe.value : VIBE_DEFAULT);
     }
+
+    // ...and the catalog opens on its first aisle, ticking whatever the items
+    // field already holds — an edited list arrives with its products already on
+    if (rmEl('.pn-field')) FormPantry.load();
 
     $('#typeSheet').hidden = true;
     // the reader is what "עריכה" was tapped from; it must not stay layered
@@ -7970,6 +8229,8 @@
       // Sprint 13 — the settings drawer and the per-record alert picker
       '[data-settoggle],[data-setplay],[data-setdefault],[data-settheme],[data-setsync],' +
       '[data-alertsound],[data-alertvibe],' +
+      // Sprint 15 — the pantry catalog inside the list form
+      '[data-pantrycat],[data-pantryitem],' +
       '[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
       '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
       '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo],' +
@@ -8087,6 +8348,11 @@
 
     if (el.dataset.alertsound) { FormAlert.set('sound', el.dataset.alertsound); return; }
     if (el.dataset.alertvibe) { FormAlert.set('vibe', el.dataset.alertvibe); return; }
+
+    /* ---------- קטלוג המצרכים (Sprint 15) ---------- */
+
+    if (el.dataset.pantrycat) { FormPantry.setCat(el.dataset.pantrycat); return; }
+    if (el.dataset.pantryitem) { FormPantry.toggle(el.dataset.pantryitem); return; }
 
     /* ---------- client CRM ---------- */
 
@@ -8283,6 +8549,19 @@
     Store.save();
     Patch.apply('clients', c.id);
     toast('סטטוס: ' + CLIENT_STATUS_LABEL[normClientStatus(c.status)]);
+  }
+
+  /**
+   * The only keystroke the app listens to (Sprint 15). The catalog's search box
+   * carries no `name`, so submitForm()'s sweep never sees it — and a product
+   * typed straight into the items field is the same membership a chip toggles,
+   * so the ticks follow the FIELD rather than only the taps that changed it.
+   */
+  function onInput(e) {
+    var el = e.target;
+    if (!el || !el.dataset) return;
+    if (el.dataset.pantrysearch) { FormPantry.setQuery(el.value); return; }
+    if (el.name === 'items' && rmEl('.pn-field')) FormPantry.paint();
   }
 
   /* ==========================================================================
@@ -8567,6 +8846,7 @@
     Cal.init();
     document.addEventListener('click', onClick);
     document.addEventListener('change', onChange);
+    document.addEventListener('input', onInput);
     $('#entityForm').addEventListener('submit', submitForm);
     $('#backdrop').addEventListener('click', closeSheets);
     document.addEventListener('keydown', function (e) {
@@ -8916,7 +9196,21 @@
       parseChecklist: parseChecklist,
       listProgress: listProgress,
       progressOf: progressOf,
-      toggleItem: toggleItem
+      toggleItem: toggleItem,
+      // Sprint 15 — the pantry catalog. Everything above the UI module is pure,
+      // so the suite can search, toggle and count without a DOM at all.
+      PANTRY: PANTRY,
+      PANTRY_TOTAL: PANTRY_TOTAL,
+      pantryAisle: pantryAisle,
+      pantryLabel: pantryLabel,
+      pantryAisleRows: pantryAisleRows,
+      pantryNorm: pantryNorm,
+      pantrySearch: pantrySearch,
+      pantryLines: pantryLines,
+      pantryHas: pantryHas,
+      pantryToggle: pantryToggle,
+      pantryField: pantryField,
+      FormPantry: FormPantry
     },
 
     notes: {

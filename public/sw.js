@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v20';  // Sprint 14 — compact task rows, tap-to-expand detail reader
+var CACHE_VERSION = 'v21';  // Sprint 15 — קטלוג המצרכים inside the list form
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */
