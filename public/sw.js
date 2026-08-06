@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v22';  // Sprint 16 — רשימת קניות, a module of its own
+var CACHE_VERSION = 'v23';  // Sprint 17 — an editable מאגר, ± steppers, scroll reset
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */

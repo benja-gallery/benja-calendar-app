@@ -638,6 +638,10 @@ function loadApp(over) {
   sandbox.self = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(js, sandbox, { filename: 'app.js' });
+  // the sandbox's `document` is a COPY of whatever the caller passed, so a test
+  // that has to move focus after load (Sprint 17's caret guard) needs the real
+  // one rather than the literal it handed in
+  if (sandbox.APP) sandbox.APP.doc = sandbox.document;
   return sandbox.APP;
 }
 
@@ -7745,7 +7749,11 @@ function loadPantry() {
 function shopStub() {
   const noop = () => {};
   const mk = extra => Object.assign({
-    textContent: '', innerHTML: '', value: '', hidden: true,
+    textContent: '', innerHTML: '', value: '', hidden: true, placeholder: '',
+    // Sprint 17 — a real offset, so "the grid went back to the top" is an
+    // assertion about a value the module actually wrote rather than about a
+    // property that only ever existed because the module created it
+    scrollTop: 0,
     dataset: {}, attrs: {}, style: {},
     classList: {
       on: {},
@@ -7766,7 +7774,10 @@ function shopStub() {
   const el = {};
   ['shopSheet', 'shopSearch', 'shopNew', 'shopCats', 'shopItems', 'shopSummary',
     'shopList', 'shopMineSummary', 'shopCountCatalog', 'shopCountMine', 'shopCtaMeta',
-    'backdrop', 'typeSheet', 'formSheet', 'openSheet']
+    'backdrop', 'typeSheet', 'formSheet', 'openSheet',
+    // Sprint 17 — the מאגר's own toolbar, add field and rename bar
+    'shopPaneCatalog', 'shopManage', 'shopCatReset', 'shopCatalogAdd', 'shopNewProduct',
+    'shopRenameBar', 'shopRenameWho', 'shopRename']
     .forEach(id => { el[id] = mk(); });
 
   const tabs = ['catalog', 'mine'].map(k => mk({ dataset: { shoptab: k } }));
@@ -8335,6 +8346,539 @@ check('PROJECT_PLAN documents Sprint 16', () => {
   const required = [
     'Sprint 16', 'רשימת קניות', 'shop-main', 'shopToggle', 'shopGroups', 'shopSetQty',
     'data-shoptab', 'data-shopqty', 'shop-cta', 'קו חוצה', 'v22'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ==========================================================================
+   §49 — SPRINT 17 · the shopping-list field mandate
+
+   Three defects, one theme — the module was read-only where the field needed
+   it to be editable, and it repainted where the field needed it to hold still:
+
+     1. the master catalog could not be added to, renamed or pruned;
+     2. switching shelf kept the previous shelf's scroll offset;
+     3. reaching for a כמות lost the caret and jumped the layout, because the
+        sync heartbeat rebuilds #shopList a second after the finger lands.
+   ========================================================================== */
+
+/** the whole overlay layer is pure — no DOM, no store, so it needs no stub */
+function loadEdits() {
+  return loadApp().lists;
+}
+
+check('the master catalog takes an addition without touching the mandate', () => {
+  const P = loadEdits();
+  if (typeof P.pantryAddProduct !== 'function') return 'no APP.lists.pantryAddProduct export';
+
+  const blank = P.normPantryEdits(null);
+  if (JSON.stringify(blank) !== '{"add":{},"hide":[],"edit":{}}') {
+    return 'a blank overlay is ' + JSON.stringify(blank);
+  }
+  if (P.pantryEdited(blank)) return 'an untouched overlay claims to have been edited';
+
+  const one = P.pantryAddProduct(blank, 'baking', '  קמח   כוסמין  ');
+  if ((one.add.baking || []).join('|') !== 'קמח כוסמין') {
+    return 'the addition came out as ' + JSON.stringify(one.add.baking);
+  }
+  if (!P.pantryEdited(one)) return 'an overlay with a product in it reads as untouched';
+
+  // it is on the shelf, it is counted, and it knows it is the owner's own
+  const shelf = P.pantryApply(one).filter(a => a.key === 'baking')[0];
+  const base = P.pantryBase('baking').items.length;
+  if (shelf.items.length !== base + 1) return 'the shelf holds ' + shelf.items.length;
+  if (shelf.items[shelf.items.length - 1] !== 'קמח כוסמין') return 'the addition is not on the shelf';
+  if (!shelf.rows[shelf.rows.length - 1].custom) return 'an added product is not marked as the owner’s';
+  if (shelf.rows[0].custom) return 'a mandated product is marked as the owner’s';
+
+  // PANTRY itself is untouched — the overlay is a layer, never a rewrite
+  if (P.PANTRY.filter(a => a.key === 'baking')[0].items.length !== base) {
+    return 'the addition was written into PANTRY itself';
+  }
+  if (P.PANTRY_TOTAL !== P.PANTRY.reduce((n, a) => n + a.items.length, 0)) {
+    return 'PANTRY_TOTAL drifted from PANTRY';
+  }
+
+  // and the same product cannot be filed onto the same shelf twice
+  if (P.pantryAddProduct(one, 'baking', 'קמח כוסמין').add.baking.length !== 1) {
+    return 'a duplicate addition wrote a second row';
+  }
+  if (P.pantryAddProduct(one, 'baking', 'סוכר').add.baking.length !== 1) {
+    return 'a product the shelf already carries was added again';
+  }
+  if (P.pantryEdited(P.pantryAddProduct(blank, 'baking', '   '))) return 'a blank name became a product';
+  if (P.pantryEdited(P.pantryAddProduct(blank, 'nowhere', 'משהו'))) return 'an unknown shelf accepted a product';
+  return true;
+});
+
+check('a product is renamed on the shelf it sits on, and only there', () => {
+  const P = loadEdits();
+
+  // חומוס is on two shelves — the whole reason a ref is cat|title and not a title
+  let e = P.pantryRenameProduct(P.normPantryEdits(null), 'canned', 'חומוס', 'חומוס בקופסה');
+  const canned = P.pantryApply(e).filter(a => a.key === 'canned')[0];
+  const legumes = P.pantryApply(e).filter(a => a.key === 'legumes')[0];
+  if (canned.items.indexOf('חומוס בקופסה') === -1) return 'the rename did not land on שימורים';
+  if (legumes.items.indexOf('חומוס') === -1) return 'renaming one shelf renamed the other';
+  if (P.pantryTitleOf(e, 'canned', 'חומוס') !== 'חומוס בקופסה') return 'the row lost track of its original';
+
+  // renaming twice files against the ORIGINAL name, so it overwrites rather than stacks
+  e = P.pantryRenameProduct(e, 'canned', 'חומוס', 'חומוס ביתי');
+  if (Object.keys(e.edit).length !== 1) return 'a second rename stacked a second override';
+  if (P.pantryTitleOf(e, 'canned', 'חומוס') !== 'חומוס ביתי') return 'the second rename did not land';
+
+  // a collision on the same shelf is refused rather than merged
+  const clash = P.pantryRenameProduct(e, 'canned', 'טונה', 'חומוס ביתי');
+  if (P.pantryTitleOf(clash, 'canned', 'טונה') !== 'טונה') return 'two products were allowed the same name';
+
+  // an owner's own product is rewritten in place, not overridden
+  let own = P.pantryAddProduct(P.normPantryEdits(null), 'drinks', 'מיץ תפוחים');
+  own = P.pantryRenameProduct(own, 'drinks', 'מיץ תפוחים', 'מיץ אגסים');
+  if ((own.add.drinks || []).join('|') !== 'מיץ אגסים') return 'the owner’s product was not rewritten';
+  if (Object.keys(own.edit).length !== 0) return 'the owner’s product got a mandated-product override';
+
+  if (P.pantryEdited(P.pantryRenameProduct(P.normPantryEdits(null), 'canned', 'טרקטור', 'משהו'))) {
+    return 'a product that is not on the shelf was renamed anyway';
+  }
+  return true;
+});
+
+check('a deletion hides a mandated product and drops an owner’s outright', () => {
+  const P = loadEdits();
+
+  let e = P.pantryRemoveProduct(P.normPantryEdits(null), 'spices', 'סומאק');
+  if (e.hide.length !== 1) return 'the deletion wrote ' + e.hide.length + ' hide refs';
+  if (e.hide[0] !== P.pantryRef('spices', 'סומאק')) return 'the hide ref is ' + e.hide[0];
+
+  const spices = P.pantryApply(e).filter(a => a.key === 'spices')[0];
+  if (spices.items.indexOf('סומאק') !== -1) return 'the deleted product is still on the shelf';
+  if (spices.items.length !== P.pantryBase('spices').items.length - 1) return 'the shelf count did not move';
+  if (P.pantryTitleOf(e, 'spices', 'סומאק') !== '') return 'a deleted product still reports a name';
+
+  // deleting a RENAMED product drops the override with it — a hidden row needs no name
+  let r = P.pantryRenameProduct(P.normPantryEdits(null), 'spices', 'הל', 'הל ירוק');
+  r = P.pantryRemoveProduct(r, 'spices', 'הל');
+  if (Object.keys(r.edit).length !== 0) return 'a hidden product kept a live rename';
+  if (r.hide.length !== 1) return 'the renamed product was not hidden';
+
+  // an owner's own product simply leaves; nothing is hidden on its behalf
+  let own = P.pantryAddProduct(P.normPantryEdits(null), 'frozen', 'פירות קפואים');
+  own = P.pantryRemoveProduct(own, 'frozen', 'פירות קפואים');
+  if (own.hide.length !== 0) return 'removing an owner’s product wrote a hide ref';
+  if (P.pantryEdited(own)) return 'the overlay did not come back empty';
+
+  // ...and the whole thing is one assignment away from the mandate again
+  const back = P.pantryApply(P.normPantryEdits(null));
+  if (back.reduce((n, a) => n + a.items.length, 0) !== P.PANTRY_TOTAL) {
+    return 'שחזור המאגר does not restore the dictated catalog';
+  }
+  return true;
+});
+
+check('a stale or malformed overlay can never reach a render', () => {
+  const P = loadEdits();
+
+  const junk = P.normPantryEdits({
+    add: { spices: ['כמון', 'כמון', '', '   ', 'זעתר|מפוצל'], nosuchshelf: ['רפאים'], drinks: 'לא מערך' },
+    hide: ['spices|טרקטור', 'nosuchshelf|משהו', P.pantryRef('spices', 'הל'), P.pantryRef('spices', 'הל'), 7],
+    edit: { 'spices|טרקטור': 'רפאים', 'nope': 'רפאים' }
+  });
+
+  if ((junk.add.spices || []).join('|') !== 'כמון|זעתר מפוצל') {
+    return 'the add list came out as ' + JSON.stringify(junk.add.spices);
+  }
+  if ('nosuchshelf' in junk.add) return 'an unknown shelf survived normalisation';
+  if ('drinks' in junk.add) return 'a non-array add list survived normalisation';
+  if (junk.hide.join(',') !== P.pantryRef('spices', 'הל')) {
+    return 'the hide list came out as ' + JSON.stringify(junk.hide);
+  }
+  if (Object.keys(junk.edit).length !== 0) return 'a rename of a product that does not exist survived';
+
+  // a rename of something already deleted is noise and is dropped too
+  const both = P.normPantryEdits({ hide: [P.pantryRef('spices', 'מלח')], edit: { 'spices|מלח': 'מלח גס' } });
+  if (Object.keys(both.edit).length !== 0) return 'a hidden product kept its rename through normalisation';
+
+  // a name is one capped line — '|' is the ref separator and can never be in one
+  if (P.normProduct('  שני   רווחים  ') !== 'שני רווחים') return 'whitespace is not folded in a name';
+  if (P.normProduct('א|ב').indexOf('|') !== -1) return 'a name kept the ref separator';
+  if (P.normProduct('א'.repeat(80)).length !== P.PRODUCT_MAX) return 'a name is not capped at PRODUCT_MAX';
+  if (P.normProduct(null) !== '') return 'a null name is not empty';
+
+  // every write path normalises what it returns, so nothing hand-built leaks through
+  if (JSON.stringify(P.normPantryEdits(junk)) !== JSON.stringify(junk)) {
+    return 'normalisation is not idempotent';
+  }
+  return true;
+});
+
+check('the whole catalog — search, shelf and grouping — reads the overlay', () => {
+  const { L, Store, S, stub } = loadShop();
+
+  // one added, one renamed, one deleted
+  L.pantryWrite(L.pantryAddProduct(L.pantryEdits(), 'drinks', 'מי קוקוס'));
+  L.pantryWrite(L.pantryRenameProduct(L.pantryEdits(), 'drinks', 'קפה נמס', 'נס קפה'));
+  L.pantryWrite(L.pantryRemoveProduct(L.pantryEdits(), 'drinks', 'זירו'));
+
+  if (L.pantryTotal() !== L.PANTRY_TOTAL) return 'the live count is ' + L.pantryTotal() + ', expected no net change';
+  if (!L.pantrySearch('קוקוס').some(r => r.title === 'מי קוקוס')) return 'search cannot find an added product';
+  if (!L.pantrySearch('נס קפה').length) return 'search cannot find a product under its new name';
+  if (L.pantrySearch('קפה נמס').length) return 'search still finds the old name';
+  if (L.pantrySearch('זירו').length) return 'search still finds a deleted product';
+  if (L.pantryCatOf('מי קוקוס') !== 'drinks') return 'an added product knows no shelf';
+  if (L.pantryCatOf('זירו') !== '') return 'a deleted product still claims a shelf';
+
+  // an added product bands under its own shelf in tab 2, not under מוצרים משלי
+  S.setTab('mine');
+  S.toggle('מי קוקוס');
+  const groups = L.shopGroups(Store.find('lists', L.SHOP_LIST_ID).items);
+  if (groups.length !== 1 || groups[0].label !== 'משקאות') {
+    return 'the added product banded as ' + JSON.stringify(groups.map(g => g.label));
+  }
+
+  // ...and the counters and the aisle strip both read the live catalog
+  S.paint();
+  if (stub.el.shopCountCatalog.textContent !== String(L.pantryTotal())) {
+    return 'the catalog counter reads ' + stub.el.shopCountCatalog.textContent;
+  }
+  if (stub.el.shopCats.innerHTML.indexOf('data-pantrycat="drinks"') === -1) return 'the aisle strip is empty';
+
+  // the overlay is a pref, so it rides the SAME payload Store.save() writes to
+  // localStorage — no new key, no migration, nothing to forget to persist
+  const disk = JSON.parse(JSON.stringify(Store.data));
+  if (!disk.prefs || !disk.prefs.pantry) return 'the overlay is not inside the serialised store';
+  if ((disk.prefs.pantry.add.drinks || []).indexOf('מי קוקוס') === -1) {
+    return 'the serialised store does not carry the addition';
+  }
+  const rehydrated = L.normPantryEdits(disk.prefs.pantry);
+  if (JSON.stringify(rehydrated) !== JSON.stringify(Store.data.prefs.pantry)) {
+    return 'the overlay does not survive a JSON round-trip intact';
+  }
+
+  // ...and it is normalised on the way back in, never trusted
+  if (JSON.stringify(Store.blank().prefs.pantry) !== '{"add":{},"hide":[],"edit":{}}') {
+    return 'a blank store ships no empty overlay';
+  }
+  Store.data.prefs.pantry = 'גיבריש';
+  Store.load();
+  if (JSON.stringify(Store.data.prefs.pantry) !== '{"add":{},"hide":[],"edit":{}}') {
+    return 'load() did not normalise a corrupt overlay';
+  }
+  const loadSrc = bodyOf(js, 'load: function () {');
+  if (loadSrc.indexOf('normPantryEdits(d.prefs.pantry)') === -1) {
+    return 'load() does not normalise the overlay at all';
+  }
+  return true;
+});
+
+check('the module edits the מאגר end to end, and asks before it destroys one', () => {
+  const { L, Store, S, APP, stub } = loadShop();
+  const C = APP.ui.Confirm;
+
+  // עריכת המאגר is a MODE — the catalog opens as a keyboard, never as a workbench
+  if (S.manage) return 'the module opened straight into edit mode';
+  if (stub.el.shopItems.innerHTML.indexOf('pn-chip') === -1) return 'the catalog did not open as chips';
+  if (!stub.el.shopCatalogAdd.hidden) return 'the add field is offered outside edit mode';
+
+  S.setManage(true);
+  if (stub.el.shopCatalogAdd.hidden) return 'edit mode does not offer the add field';
+  if (stub.el.shopItems.innerHTML.indexOf('data-pnedit=') === -1) return 'edit mode drew no ✎';
+  if (stub.el.shopItems.innerHTML.indexOf('data-pndel=') === -1) return 'edit mode drew no ✕';
+  if (stub.el.shopItems.innerHTML.indexOf('pn-chip') !== -1) return 'edit mode still draws pickable chips';
+  if (!stub.el.shopItems.classList.contains('is-manage')) return 'the grid is not marked as being edited';
+
+  /* ---- הוספה ---- */
+  S.setCat('baking');
+  stub.el.shopNewProduct.value = 'קמח כוסמין';
+  S.catalogAdd();
+  if (!L.pantryHolds(L.pantryEdits(), 'baking', 'קמח כוסמין')) return 'the product never reached the overlay';
+  if (stub.el.shopNewProduct.value !== '') return 'the add field kept its text';
+  if (stub.el.shopItems.innerHTML.indexOf('קמח כוסמין') === -1) return 'the new product was not drawn';
+  if (stub.el.shopItems.innerHTML.indexOf('pn-own') === -1) return 'the owner’s product is not marked as theirs';
+
+  /* ---- עריכה, and the list row that follows it ---- */
+  S.toggle('קמח לבן');                       // already in the cart under the old name
+  const id = Store.find('lists', L.SHOP_LIST_ID).items[0].id;
+  S.check(id);
+  S.qty(id, '2');
+
+  S.setManage(true);
+  S.catalogEdit('baking|קמח לבן');
+  if (S.editing !== 'baking|קמח לבן') return 'the rename bar did not open on the product';
+  if (stub.el.shopRenameBar.hidden) return 'the rename bar stayed hidden';
+  if (stub.el.shopRename.value !== 'קמח לבן') return 'the rename bar was not pre-filled';
+  if (stub.el.shopItems.innerHTML.indexOf('pn-edit is-editing') === -1) return 'the row being renamed is not marked';
+
+  stub.el.shopRename.value = 'קמח חיטה מלא';
+  S.catalogSave(S.editing);
+  if (S.editing !== '') return 'the rename bar stayed open after saving';
+  if (!stub.el.shopRenameBar.hidden) return 'the rename bar is still on screen';
+  if (L.pantryTitleOf(L.pantryEdits(), 'baking', 'קמח לבן') !== 'קמח חיטה מלא') return 'the rename never landed';
+
+  const row = Store.find('lists', L.SHOP_LIST_ID).items[0];
+  if (row.title !== 'קמח חיטה מלא') return 'the list row kept the old name: ' + row.title;
+  if (!row.done || row.qty !== '2') return 'the renamed row lost its ✓ or its כמות';
+  if (row.id !== id) return 'the renamed row was rebuilt with a new id';
+
+  // a collision refuses rather than merges
+  stub.el.shopRename.value = 'סוכר';
+  S.catalogEdit('baking|קמח מלא');
+  stub.el.shopRename.value = 'סוכר';
+  S.catalogSave(S.editing);
+  if (L.pantryTitleOf(L.pantryEdits(), 'baking', 'קמח מלא') !== 'קמח מלא') return 'a duplicate name was accepted';
+  S.catalogCancel();
+  if (S.editing !== '' || !stub.el.shopRenameBar.hidden) return 'ביטול left the rename bar open';
+
+  /* ---- מחיקה — out of every future shop, so it asks ---- */
+  S.setManage(true);
+  S.catalogRemove('baking|סוכר חום');
+  if (!C.isOpen()) return 'deleting from the מאגר never asked';
+  C.dismiss();
+  if (!L.pantryHolds(L.pantryEdits(), 'baking', 'סוכר חום')) return 'ביטול deleted the product anyway';
+
+  S.catalogRemove('baking|סוכר חום');
+  C.accept();
+  if (L.pantryHolds(L.pantryEdits(), 'baking', 'סוכר חום')) return 'the confirmed deletion did not land';
+
+  /* ---- שחזור המאגר ---- */
+  if (stub.el.shopCatReset.hidden) return 'שחזור המאגר is hidden while the מאגר is edited';
+  S.catalogReset();
+  if (!C.isOpen()) return 'restoring the whole מאגר never asked';
+  C.accept();
+  if (L.pantryEdited(L.pantryEdits())) return 'the reset left edits behind';
+  if (L.pantryTotal() !== L.PANTRY_TOTAL) return 'the restored catalog is not the dictated one';
+  // the list keeps what it holds — a מאגר reset is not a reset of this week's shop
+  if (Store.find('lists', L.SHOP_LIST_ID).items.length !== 1) return 'שחזור המאגר emptied the shopping list';
+  return true;
+});
+
+check('every catalog-editing control is wired, and none of them is a form field', () => {
+  const sheet = (html.match(/<div class="sheet shop-sheet" id="shopSheet"[\s\S]*?\n<\/div>/) || [''])[0];
+  ['id="shopManage"', 'data-shopmanage="1"', 'id="shopCatReset"', 'data-shopcatreset="1"',
+    'id="shopCatalogAdd"', 'id="shopNewProduct"', 'data-shopnewproduct="1"', 'data-shopcatadd="1"',
+    'id="shopRenameBar"', 'id="shopRename"', 'data-shoprename="1"',
+    'data-pnsave="1"', 'data-pncancel="1"'].forEach(d => {
+      if (sheet.indexOf(d) === -1) throw new Error('the catalog is missing ' + d);
+    });
+  // still true after Sprint 17: submitForm() sweeps #formFields by name, and a
+  // stray name= in here would land on whatever record is open in the form
+  if (/<(input|select|textarea)[^>]*\sname=/.test(sheet)) {
+    return 'a control in the module declares a form field name';
+  }
+
+  // the delegate matches every new hook and routes it somewhere real
+  const delegate = bodyOf(js, 'function onClick(e)');
+  [['shopmanage', 'Shop.setManage'], ['shopcatadd', 'Shop.catalogAdd'],
+    ['shopcatreset', 'Shop.catalogReset'], ['pnedit', 'Shop.catalogEdit'],
+    ['pnsave', 'Shop.catalogSave'], ['pndel', 'Shop.catalogRemove'],
+    ['pncancel', 'Shop.catalogCancel'], ['shopstep', 'Shop.step']].forEach(([hook, fn]) => {
+      if (delegate.indexOf('[data-' + hook + ']') === -1) throw new Error('onClick() never matches data-' + hook);
+      if (delegate.indexOf(fn) === -1) throw new Error('data-' + hook + ' reaches no handler');
+    });
+
+  // ↵ fills a shelf and saves a rename, the same argument ↵ won in Sprint 16
+  const keys = bodyOf(js, 'function onKeydown(e)');
+  if (keys.indexOf('d.shopnewproduct') === -1) return '↵ does not add a product to the shelf';
+  if (keys.indexOf('Shop.catalogSave') === -1) return '↵ does not save a rename';
+  if (keys.indexOf('Shop.catalogCancel') === -1) return 'Escape does not cancel a rename before closing the sheet';
+  return true;
+});
+
+check('switching shelf puts the product grid back at the top', () => {
+  const { S, stub } = loadShop();
+
+  // somebody scrolled halfway down קטניות looking for סויה
+  stub.el.shopItems.scrollTop = 240;
+  stub.el.shopPaneCatalog.scrollTop = 120;
+
+  S.setCat('spices');
+  if (stub.el.shopItems.scrollTop !== 0) {
+    return 'the grid kept its offset (' + stub.el.shopItems.scrollTop + ') across an aisle switch';
+  }
+  if (stub.el.shopPaneCatalog.scrollTop !== 0) return 'the catalog pane kept its offset';
+
+  // ...and a new result set is a new list, so a search resets it too
+  stub.el.shopItems.scrollTop = 300;
+  S.setQuery('סבון');
+  if (stub.el.shopItems.scrollTop !== 0) return 'a search left the grid mid-scroll';
+
+  // entering edit mode swaps the whole grid for different rows — same rule
+  stub.el.shopItems.scrollTop = 180;
+  S.setManage(true);
+  if (stub.el.shopItems.scrollTop !== 0) return 'edit mode left the grid mid-scroll';
+
+  // the SHEET's own scroll is the finger's, not the tab strip's: resetting it
+  // would yank the grid off screen the moment somebody scrolled down to it
+  const body = bodyOf(js, 'scrollTop: function () {');
+  if (body.indexOf("$('#shopItems')") === -1) return 'the grid is not the thing being reset';
+  if (body.indexOf("$('#shopSheet')") !== -1) return 'the reset hijacks the sheet’s own scroll';
+  return true;
+});
+
+check('the ± pair moves a free-text amount without ever becoming a number', () => {
+  const P = loadEdits();
+  const cases = [
+    ['', 1, '1'], ['', -1, ''],
+    ['1', 1, '2'], ['2', -1, '1'], ['1', -1, ''],
+    ['500 גרם', 1, '501 גרם'], ['500 גרם', -1, '499 גרם'],
+    ['1 ק״ג', -1, ''],
+    ['×3', 1, '×4'], ['×2', -1, '×1'],
+    ['  2  ', 1, '3'],
+    ['קצת', 1, '2 קצת'], ['קצת', -1, 'קצת'],
+    ['999', 1, '999']
+  ];
+  cases.forEach(([from, d, want]) => {
+    const got = P.qtyStep(from, d);
+    if (got !== want) {
+      throw new Error(JSON.stringify(from) + (d > 0 ? ' ＋' : ' −') + ' → ' +
+        JSON.stringify(got) + ', expected ' + JSON.stringify(want));
+    }
+  });
+  // whatever it produces is a legal amount — same cap the typed field obeys
+  if (P.qtyStep('א'.repeat(20), 1).length > P.QTY_MAX) return 'the stepper produced an over-long amount';
+  if (P.qtyStep(null, 1) !== '1') return 'a null amount does not start at one';
+  return true;
+});
+
+check('a row carries the ± pair, and tapping it never rebuilds the list', () => {
+  const { L, Store, S, stub } = loadShop();
+  S.toggle('חלב סויה');
+  S.setTab('mine');
+  const id = Store.find('lists', L.SHOP_LIST_ID).items[0].id;
+
+  const markup = stub.el.shopList.innerHTML;
+  ['shop-qty-box', 'data-shopstep="-:' + id + '"', 'data-shopstep="+:' + id + '"',
+    'data-shopqty="' + id + '"'].forEach(d => {
+      if (markup.indexOf(d) === -1) throw new Error('the row is missing ' + d);
+    });
+  // the typed box survives — the mandate said "replace/enhance", and a free-text
+  // amount is the one thing a pair of counters cannot express
+  if (markup.indexOf('placeholder="כמות"') === -1) return 'the free-text amount was removed outright';
+
+  S.step(id, 1);
+  if (Store.find('lists', L.SHOP_LIST_ID).items[0].qty !== '1') return '＋ did not reach the record';
+  S.step(id, 1);
+  S.step(id, 1);
+  if (Store.find('lists', L.SHOP_LIST_ID).items[0].qty !== '3') return '＋ does not accumulate';
+  S.step(id, -1);
+  if (Store.find('lists', L.SHOP_LIST_ID).items[0].qty !== '2') return '− did not reach the record';
+
+  // a unit survives the counter, and counting to nothing clears the key rather
+  // than storing '0' or ''
+  S.qty(id, '500 גרם');
+  S.step(id, 1);
+  if (Store.find('lists', L.SHOP_LIST_ID).items[0].qty !== '501 גרם') return 'the unit did not survive ＋';
+  S.qty(id, '1');
+  S.step(id, -1);
+  if ('qty' in Store.find('lists', L.SHOP_LIST_ID).items[0]) return 'counting down to nothing stored an empty amount';
+
+  // the box is written in place: the whole point of the pair is that the row
+  // does not move under the finger
+  const body = bodyOf(js, 'step: function (id, delta) {');
+  if (body.indexOf("$('[data-shopqty=\"'") === -1) return 'the stepper does not reach for the box it owns';
+  if (body.indexOf('box.value = next') === -1) return 'the stepper repaints instead of writing the box';
+  if (body.indexOf('else this.paint()') === -1) return 'an off-screen row has no repaint fallback';
+  return true;
+});
+
+check('nothing rebuilds the list under a caret, or repaints it for nothing', () => {
+  const { L, Store, S, APP, stub } = loadShop();
+  S.toggle('מלח');
+  S.setTab('mine');
+  const id = Store.find('lists', L.SHOP_LIST_ID).items[0].id;
+
+  // an idempotent repaint writes nothing at all — which is what makes the 30s
+  // sync heartbeat harmless to whatever the finger is doing
+  const before = stub.el.shopList.innerHTML;
+  let writes = 0;
+  Object.defineProperty(stub.el.shopList, 'innerHTML', {
+    get() { return before; },
+    set() { writes++; },
+    configurable: true
+  });
+  S.paint();
+  S.paint();
+  if (writes !== 0) return 'an unchanged list was rebuilt ' + writes + ' times';
+
+  // ...and a repaint that WOULD have something to say still declines while a
+  // כמות box holds the focus: rebuilding it is what dropped the keyboard
+  APP.doc.activeElement = { dataset: { shopqty: id } };
+  S.qty(id, '3');
+  S.paint();
+  if (writes !== 0) return 'the list was rebuilt while the amount box had the focus';
+
+  // the moment the finger leaves, the pending change is drawn
+  APP.doc.activeElement = null;
+  S.paint();
+  if (writes !== 1) return 'the deferred repaint never happened (' + writes + ' writes)';
+
+  const guard = bodyOf(js, 'function shopFieldFocused()');
+  if (guard.indexOf('activeElement') === -1) return 'the guard does not look at the focused element';
+  ['shopqty', 'shoprename'].forEach(d => {
+    if (guard.indexOf(d) === -1) throw new Error('the guard ignores data-' + d);
+  });
+  const mine = bodyOf(js, 'paintMine: function (items, prog) {');
+  if (mine.indexOf('shopSignature(items)') === -1) return 'paintMine() does not compare before rebuilding';
+  if (mine.indexOf('shopFieldFocused()') === -1) return 'paintMine() rebuilds regardless of focus';
+  if (mine.indexOf('this.paintMeta(') === -1) return 'the derived text stopped being painted unconditionally';
+  return true;
+});
+
+check('the מאגר is styled to the touch floor, with tokens only', () => {
+  ['.pn-tools', '.pn-manage', '.pn-reset', '.pn-add', '.pn-new', '.pn-add-btn',
+    '.pn-items.is-manage', '.pn-edit', '.pn-own', '.pn-rename-bar', '.pn-rename', '.pn-act',
+    '.shop-qty-box', '.shop-step'].forEach(sel => {
+      if (css.indexOf(sel) === -1) throw new Error('no ' + sel + ' rule');
+    });
+
+  const rules = cssRules(css);
+  ['.pn-act', '.pn-edit', '.shop-step'].forEach(sel => {
+    const r = rules.filter(x => x.sel === sel)[0];
+    if (!r) throw new Error(sel + ' has no rule of its own');
+    if (r.body.replace(/\s/g, '').indexOf('min-height:var(--tap)') === -1) {
+      throw new Error(sel + ' does not clear the 44px floor');
+    }
+  });
+  // the two glyph buttons are hit targets in both directions
+  ['.pn-act', '.shop-step'].forEach(sel => {
+    const r = rules.filter(x => x.sel === sel)[0];
+    if (r.body.replace(/\s/g, '').indexOf('min-width:var(--tap)') === -1) {
+      throw new Error(sel + ' is under 44px wide');
+    }
+  });
+
+  // an inactive bar must LEAVE the flow, exactly like an inactive tab pane
+  ['.pn-add[hidden]', '.pn-rename-bar[hidden]', '.pn-reset[hidden]'].forEach(sel => {
+    const r = rules.filter(x => x.sel === sel)[0];
+    if (!r || !/display:\s*none/.test(r.body)) throw new Error(sel + ' is still in the flow');
+  });
+
+  // the row became a two-line grid so the ± pair could reach the floor without
+  // squeezing the product name off the screen
+  const row = rules.filter(x => x.sel === '.shop-row')[0];
+  if (row.body.indexOf('grid-template-areas') === -1) return 'the row is not laid out as named areas';
+  ['check', 'name', 'del', 'qty'].forEach(a => {
+    if (row.body.indexOf(a) === -1) throw new Error('the row has no ' + a + ' area');
+  });
+  return true;
+});
+
+check('the shell was bumped to v23 for Sprint 17', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'(v(\d+))'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[2], 10) < 23) return 'the cache is still ' + m[1] + ' — returning phones keep the old shell';
+  if (js.indexOf("APP_VERSION = '" + m[1] + "'") === -1) return 'app.js still reports a different version';
+  if (html.indexOf('app.js?v=' + m[1]) === -1) return 'app.js is not busted to ' + m[1];
+  if (html.indexOf('styles.css?v=' + m[1]) === -1) return 'styles.css is not busted to ' + m[1];
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 17', () => {
+  const required = [
+    'Sprint 17', 'עריכת המאגר', 'prefs.pantry', 'pantryApply', 'pantryAddProduct',
+    'pantryRenameProduct', 'pantryRemoveProduct', 'normPantryEdits', 'qtyStep',
+    'shopSignature', 'shopFieldFocused', 'data-shopstep', 'data-pnedit', 'scrollTop',
+    'v23'
   ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;

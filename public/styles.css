@@ -2284,6 +2284,69 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
 
 .pn-empty{ grid-column:1 / -1; margin:0; padding:8px 4px; color:var(--faint); font-size:12.5px; line-height:1.6; }
 
+/* --------------------------------------------------------------------------
+   Sprint 17 — עריכת המאגר
+
+   The catalog is a keyboard by default and a workbench on request. ✎ and ✕
+   cannot be nested inside a .pn-chip (a button inside a button), and a delete
+   sitting one tap away from a select is a delete somebody makes by accident —
+   so edit mode SWAPS the grid for full-width rows instead of decorating it.
+   -------------------------------------------------------------------------- */
+
+.pn-tools{ display:flex; gap:8px; margin-bottom:10px; }
+.pn-manage, .pn-reset{ flex:1 1 auto; width:auto; font-size:12.5px; }
+.pn-manage.is-on{
+  background:var(--gold-soft); border-color:var(--gold-edge); color:var(--gold);
+}
+.pn-reset[hidden]{ display:none; }
+
+.pn-add{ display:flex; gap:8px; margin-bottom:10px; }
+.pn-add[hidden]{ display:none; }
+.pn-new{ flex:1 1 auto; min-width:0; }
+.pn-add-btn{ flex:0 0 auto; width:auto; padding:0 16px; }
+
+/* the rename bar — one static control, never an input inside a rebuilt row */
+.pn-rename-bar{ margin-bottom:10px; }
+.pn-rename-bar[hidden]{ display:none; }
+.pn-rename-who{
+  display:block; margin-bottom:6px;
+  color:var(--gold); font-size:12px; font-weight:700;
+}
+.pn-rename-row{ display:flex; gap:8px; }
+.pn-rename{ flex:1 1 auto; min-width:0; }
+
+/* one product per line while the מאגר is open for editing */
+.pn-items.is-manage{ grid-template-columns:1fr; }
+
+.pn-edit{
+  display:flex; align-items:center; gap:6px;
+  min-height:var(--tap); padding:0 10px 0 2px;
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:var(--r-md);
+  color:var(--ink); font-size:13px; font-weight:600;
+}
+.pn-edit.is-editing{ background:var(--gold-soft); border-color:var(--gold-edge); }
+
+/* a product the owner added, marked so a deletion is never a surprise */
+.pn-own{
+  flex:0 0 auto; padding:2px 8px;
+  background:var(--gold-soft); border-radius:999px;
+  color:var(--gold); font-size:10.5px; font-weight:800;
+}
+
+.pn-act{
+  flex:0 0 auto;
+  display:grid; place-items:center;
+  min-height:var(--tap); min-width:var(--tap);
+  background:transparent; border:0;
+  color:var(--muted); font-size:14px; font-weight:700;
+  cursor:pointer;
+  transition:color .18s;
+}
+.pn-act:hover{ color:var(--gold); }
+.pn-act-ok{ color:var(--gold); }
+.pn-act-del:hover{ color:var(--danger); }
+
 .pn-summary{ margin:8px 4px 0; }
 
 /* ==========================================================================
@@ -2351,16 +2414,28 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
   font-variant-numeric:tabular-nums;
 }
 
+/* Sprint 17 — two lines, not one.
+   A single flex line had to hold a 44px ✓, an elastic name, a 76px amount and
+   a 44px ✕; on a 360px phone that squeezed the name to nothing and left the
+   amount box too narrow to hit without missing. As a two-row grid the name
+   keeps the full width and the ± pair gets a line of its own, at the touch
+   floor — which is what makes a כמות changeable without the keyboard at all. */
 .shop-row{
-  display:flex; align-items:center; gap:8px;
-  padding:4px 4px;
+  display:grid;
+  grid-template-columns:var(--tap) 1fr var(--tap);
+  grid-template-areas:
+    "check name del"
+    ".     qty  .";
+  align-items:center;
+  column-gap:8px; row-gap:2px;
+  padding:4px 4px 6px;
   border-radius:var(--r-sm);
   transition:background .16s;
 }
 .shop-row:hover{ background:var(--line-soft); }
 
 .shop-check{
-  flex:0 0 auto;
+  grid-area:check;
   display:grid; place-items:center;
   min-height:var(--tap); min-width:var(--tap);
   background:transparent; border:0;
@@ -2369,21 +2444,39 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
 .shop-row.is-done .cl-box{ background:var(--personal); border-color:var(--personal); }
 
 .shop-name{
-  flex:1 1 auto; min-width:0;
+  grid-area:name; min-width:0;
   font-size:14px; font-weight:600; line-height:1.45; color:var(--ink);
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 /* קו חוצה — the mandate's own word for "it is already in the cart" */
 .shop-row.is-done .shop-name{ color:var(--faint); text-decoration:line-through; }
 
+/* ---------- the amount: ＋ / − around the box, never instead of it ---------- */
+.shop-qty-box{
+  grid-area:qty; justify-self:start;
+  display:flex; align-items:center; gap:6px;
+}
+
+.shop-step{
+  flex:0 0 auto;
+  display:grid; place-items:center;
+  min-height:var(--tap); min-width:var(--tap);
+  background:var(--surface); border:1px solid var(--line-soft);
+  border-radius:var(--r-md);
+  color:var(--gold); font-size:18px; font-weight:800; line-height:1;
+  cursor:pointer; user-select:none;
+  transition:background .16s, border-color .16s;
+}
+.shop-step:hover{ background:var(--gold-soft); border-color:var(--gold-edge); }
+
 .shop-qty{
-  flex:0 0 auto; width:76px;
+  flex:0 0 auto; width:84px;
   padding:8px 10px;
   text-align:center;
 }
 
 .shop-del{
-  flex:0 0 auto;
+  grid-area:del;
   min-height:var(--tap); min-width:var(--tap);
   background:transparent; border:0;
   color:var(--faint); font-size:14px;

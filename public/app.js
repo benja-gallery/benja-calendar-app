@@ -224,7 +224,7 @@
   var THEME_DEFAULT = 'dark';
 
   /** the shell version — MUST match CACHE_VERSION in sw.js and the ?v= in index.html */
-  var APP_VERSION = 'v22';
+  var APP_VERSION = 'v23';
 
   /* --- client CRM (Sprint 4) --- */
   var CLIENT_STATUSES = ['lead', 'contacted', 'interested', 'quoted',
@@ -1685,6 +1685,10 @@
           // "רשימת הקניות שלי"; someone planning wants the catalog. The app is
           // not entitled to guess, so it remembers.
           shopTab: 'catalog',
+          // Sprint 17 — the owner's own edits to the master catalog, as an
+          // OVERLAY: PANTRY itself is never rewritten, so "שחזור המאגר" is one
+          // assignment and a future sprint can still add mandated products.
+          pantry: { add: {}, hide: [], edit: {} },
           // serverAt — when the Worker last accepted this device's push
           // subscription. '' means local-only delivery (Sprint 11).
           notify: { on: false, lead: 10, sound: true, serverAt: '' }, fired: {},
@@ -1772,6 +1776,12 @@
       // Sprint 16 — the shopping module's tab, absent in every store written
       // before the module existed
       if (SHOP_TABS.indexOf(d.prefs.shopTab) === -1) d.prefs.shopTab = SHOP_TABS[0];
+
+      // Sprint 17 — the catalog overlay, absent in every store written before
+      // the מאגר became editable. It is normalised rather than trusted, and a
+      // ref pointing at a product this build no longer ships is dropped, so an
+      // old overlay can never hide or rename something that is not there.
+      d.prefs.pantry = normPantryEdits(d.prefs.pantry);
 
       // reminder prefs may be absent in a store written before the PWA upgrade
       if (!d.prefs.notify || typeof d.prefs.notify !== 'object') {
@@ -6815,25 +6825,8 @@
     }
   ];
 
+  /** the vocabulary AS DICTATED — the floor every overlay below is laid over */
   var PANTRY_TOTAL = PANTRY.reduce(function (n, a) { return n + a.items.length; }, 0);
-
-  function pantryAisle(key) {
-    for (var i = 0; i < PANTRY.length; i++) {
-      if (PANTRY[i].key === key) return PANTRY[i];
-    }
-    return null;
-  }
-
-  function pantryLabel(key) {
-    var a = pantryAisle(key);
-    return a ? a.label : '';
-  }
-
-  /** one aisle, in the row shape the chip grid renders */
-  function pantryAisleRows(key) {
-    var a = pantryAisle(key) || PANTRY[0];
-    return a.items.map(function (t) { return { cat: a.key, label: a.label, title: t }; });
-  }
 
   /**
    * Search is spelling-forgiving on purpose: the geresh in צ׳יפס / סקוץ׳ is a
@@ -6847,14 +6840,308 @@
       .toLowerCase();
   }
 
+  /* ==========================================================================
+     המאגר, בעריכת הבעלים — the catalog overlay (Sprint 17 · field mandate)
+
+     "Add a new custom product under a chosen category. Edit or delete existing
+     products directly from the Master Catalog."
+
+     PANTRY above is left EXACTLY as the Sprint 15 mandate dictated it, and the
+     owner's changes live beside it as three small facts:
+
+       * add   — { aisleKey: [titles] }, products of the owner's own
+       * hide  — [ref], mandated products that were deleted
+       * edit  — { ref: title }, mandated products that were renamed
+
+     A `ref` is one product ON one shelf ("canned|חומוס"), never a bare title:
+     חומוס sits on two shelves and renaming the tinned one must not touch the
+     dry one. Three consequences fall out of the overlay shape for free —
+     שחזור המאגר is one assignment, a store written before this sprint needs no
+     migration, and a product a future mandate ADDS to PANTRY appears on the
+     shelf of somebody who has already been editing for months.
+     ========================================================================== */
+
+  /** how long a product name may get before it stops fitting a chip */
+  var PRODUCT_MAX = 24;
+
+  /** a product name as the catalog stores it: one line, trimmed, capped */
+  function normProduct(s) {
+    return String(s == null ? '' : s)
+      .replace(/[|\u0000-\u001f]/g, ' ')          // '|' is the ref separator
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, PRODUCT_MAX);
+  }
+
+  /** the stable handle for one product on one shelf */
+  function pantryRef(cat, title) {
+    return String(cat == null ? '' : cat) + '|' + pantryNorm(title);
+  }
+
+  /* the UI carries `cat|origTitle` on one attribute; these take it apart. The
+     title half keeps its original casing, so it is NOT a pantryRef(). */
+  function pantryRefCat(ref) { return String(ref == null ? '' : ref).split('|')[0]; }
+  function pantryRefOrig(ref) {
+    return String(ref == null ? '' : ref).split('|').slice(1).join('|');
+  }
+
+  /** the untouched shelf, straight off the mandate */
+  function pantryBase(key) {
+    for (var i = 0; i < PANTRY.length; i++) {
+      if (PANTRY[i].key === key) return PANTRY[i];
+    }
+    return null;
+  }
+
+  function pantryBaseHas(cat, title) {
+    var a = pantryBase(cat);
+    if (!a) return false;
+    var t = pantryNorm(title);
+    for (var i = 0; i < a.items.length; i++) {
+      if (pantryNorm(a.items[i]) === t) return true;
+    }
+    return false;
+  }
+
+  /** every ref the dictated catalog actually owns — the whitelist for hide/edit */
+  function pantryBaseRefs() {
+    var refs = {};
+    PANTRY.forEach(function (a) {
+      a.items.forEach(function (t) { refs[pantryRef(a.key, t)] = true; });
+    });
+    return refs;
+  }
+
+  /**
+   * Never trusted, always rebuilt: an unknown shelf, a blank title, a duplicate
+   * and a ref that points at a product this build no longer ships are all
+   * dropped here rather than allowed to reach a render.
+   */
+  function normPantryEdits(raw) {
+    var out = { add: {}, hide: [], edit: {} };
+    if (!raw || typeof raw !== 'object') return out;
+    var refs = pantryBaseRefs();
+
+    if (raw.add && typeof raw.add === 'object') {
+      PANTRY.forEach(function (a) {
+        var list = raw.add[a.key];
+        if (!Array.isArray(list)) return;
+        var seen = {}, keep = [];
+        list.forEach(function (t) {
+          var s = normProduct(t);
+          var k = pantryNorm(s);
+          if (!s || seen[k]) return;
+          seen[k] = true;
+          keep.push(s);
+        });
+        if (keep.length) out.add[a.key] = keep;
+      });
+    }
+
+    if (Array.isArray(raw.hide)) {
+      raw.hide.forEach(function (r) {
+        var s = String(r == null ? '' : r);
+        if (refs[s] && out.hide.indexOf(s) === -1) out.hide.push(s);
+      });
+    }
+
+    if (raw.edit && typeof raw.edit === 'object') {
+      Object.keys(raw.edit).forEach(function (k) {
+        var v = normProduct(raw.edit[k]);
+        // a rename that hides nothing and a rename of something already deleted
+        // are both noise; only a live mandated product carries an override
+        if (v && refs[k] && out.hide.indexOf(k) === -1) out.edit[k] = v;
+      });
+    }
+    return out;
+  }
+
+  function pantryClone(e) {
+    var out = { add: {}, hide: e.hide.slice(), edit: {} };
+    Object.keys(e.add).forEach(function (k) { out.add[k] = e.add[k].slice(); });
+    Object.keys(e.edit).forEach(function (k) { out.edit[k] = e.edit[k]; });
+    return out;
+  }
+
+  /**
+   * The catalog the app actually shows. Each row keeps `orig` — the name the
+   * mandate gave it — because that, not the name on screen, is what a second
+   * rename has to be filed against.
+   */
+  function pantryApply(edits) {
+    var e = normPantryEdits(edits);
+    return PANTRY.map(function (a) {
+      var rows = [];
+      a.items.forEach(function (t) {
+        var ref = pantryRef(a.key, t);
+        if (e.hide.indexOf(ref) !== -1) return;
+        rows.push({ title: e.edit[ref] || t, orig: t, custom: false });
+      });
+      (e.add[a.key] || []).forEach(function (t) {
+        rows.push({ title: t, orig: t, custom: true });
+      });
+      return {
+        key: a.key, label: a.label, rows: rows,
+        // `.items` stays the plain title list every caller since Sprint 15 reads
+        items: rows.map(function (r) { return r.title; })
+      };
+    });
+  }
+
+  /** true once the owner has changed anything at all — the gate on שחזור המאגר */
+  function pantryEdited(edits) {
+    var e = normPantryEdits(edits);
+    return e.hide.length > 0 || Object.keys(e.edit).length > 0 ||
+      Object.keys(e.add).length > 0;
+  }
+
+  /** the name a product wears right now, given the shelf and its original name */
+  function pantryTitleOf(edits, cat, orig) {
+    var list = pantryApply(edits);
+    var t = pantryNorm(orig);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].key !== cat) continue;
+      for (var j = 0; j < list[i].rows.length; j++) {
+        if (pantryNorm(list[i].rows[j].orig) === t) return list[i].rows[j].title;
+      }
+    }
+    return '';
+  }
+
+  /** does this shelf already show a product under that name? */
+  function pantryHolds(edits, cat, title) {
+    var list = pantryApply(edits);
+    var t = pantryNorm(title);
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].key !== cat) continue;
+      for (var j = 0; j < list[i].rows.length; j++) {
+        if (pantryNorm(list[i].rows[j].title) === t) return true;
+      }
+    }
+    return false;
+  }
+
+  /** הוספה — a product of the owner's own, filed under a shelf they chose */
+  function pantryAddProduct(edits, cat, title) {
+    var e = normPantryEdits(edits);
+    var t = normProduct(title);
+    if (!t || !pantryBase(cat)) return e;
+    if (pantryHolds(e, cat, t)) return e;              // one name, one shelf, once
+    var out = pantryClone(e);
+    if (!out.add[cat]) out.add[cat] = [];
+    out.add[cat].push(t);
+    return normPantryEdits(out);
+  }
+
+  /** עריכה — a mandated product gets an override, an owner's product is rewritten */
+  function pantryRenameProduct(edits, cat, orig, title) {
+    var e = normPantryEdits(edits);
+    var t = normProduct(title);
+    if (!t || !pantryBase(cat)) return e;
+    var was = pantryTitleOf(e, cat, orig);
+    if (!was) return e;                                // nothing there to rename
+    if (pantryNorm(t) !== pantryNorm(was) && pantryHolds(e, cat, t)) return e;
+
+    var out = pantryClone(e);
+    var ref = pantryRef(cat, orig);
+    if (pantryBaseHas(cat, orig)) {
+      out.edit[ref] = t;
+    } else {
+      out.add[cat] = (out.add[cat] || []).map(function (x) {
+        return pantryNorm(x) === pantryNorm(orig) ? t : x;
+      });
+    }
+    return normPantryEdits(out);
+  }
+
+  /** מחיקה — a mandated product is hidden, an owner's product simply leaves */
+  function pantryRemoveProduct(edits, cat, orig) {
+    var e = normPantryEdits(edits);
+    if (!pantryBase(cat) || !pantryTitleOf(e, cat, orig)) return e;
+
+    var out = pantryClone(e);
+    var ref = pantryRef(cat, orig);
+    delete out.edit[ref];                              // a hidden row needs no name
+    if (pantryBaseHas(cat, orig)) {
+      if (out.hide.indexOf(ref) === -1) out.hide.push(ref);
+    } else {
+      out.add[cat] = (out.add[cat] || []).filter(function (x) {
+        return pantryNorm(x) !== pantryNorm(orig);
+      });
+    }
+    return normPantryEdits(out);
+  }
+
+  /* ---- the store-backed readers every surface goes through ---- */
+
+  /**
+   * Memoised on the overlay itself rather than on a dirty flag: every write path
+   * assigns a NEW prefs.pantry, so a stale signature is impossible, and
+   * pantryCatOf() — called once per row of a shopping list — stops rebuilding
+   * the whole catalog each time.
+   */
+  var pantryMemo = { sig: '\u0000', aisles: null };
+
+  function pantryRaw() {
+    return Store.data && Store.data.prefs ? Store.data.prefs.pantry : null;
+  }
+
+  function pantryEdits() { return normPantryEdits(pantryRaw()); }
+
+  function pantryAisles() {
+    var raw = pantryRaw();
+    var sig = raw ? JSON.stringify(raw) : '';
+    if (pantryMemo.sig !== sig) {
+      pantryMemo.sig = sig;
+      pantryMemo.aisles = pantryApply(raw);
+    }
+    return pantryMemo.aisles;
+  }
+
+  /** how many products the catalog shows RIGHT NOW — additions and deletions in */
+  function pantryTotal() {
+    return pantryAisles().reduce(function (n, a) { return n + a.items.length; }, 0);
+  }
+
+  /** the one write path for the overlay: normalise, store, persist */
+  function pantryWrite(edits) {
+    if (!Store.data || !Store.data.prefs) return null;
+    Store.data.prefs.pantry = normPantryEdits(edits);
+    Store.save();
+    return Store.data.prefs.pantry;
+  }
+
+  function pantryAisle(key) {
+    var list = pantryAisles();
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].key === key) return list[i];
+    }
+    return null;
+  }
+
+  function pantryLabel(key) {
+    var a = pantryAisle(key);
+    return a ? a.label : '';
+  }
+
+  /** one aisle, in the row shape the chip grid renders */
+  function pantryAisleRows(key) {
+    var a = pantryAisle(key) || pantryAisles()[0];
+    return a.rows.map(function (r) {
+      return { cat: a.key, label: a.label, title: r.title, orig: r.orig, custom: r.custom };
+    });
+  }
+
   /** every product whose name contains the query, across all ten aisles */
   function pantrySearch(query) {
     var q = pantryNorm(query);
     if (!q) return [];
     var out = [];
-    PANTRY.forEach(function (a) {
-      a.items.forEach(function (t) {
-        if (pantryNorm(t).indexOf(q) !== -1) out.push({ cat: a.key, label: a.label, title: t });
+    pantryAisles().forEach(function (a) {
+      a.rows.forEach(function (r) {
+        if (pantryNorm(r.title).indexOf(q) !== -1) {
+          out.push({ cat: a.key, label: a.label, title: r.title, orig: r.orig, custom: r.custom });
+        }
       });
     });
     return out;
@@ -6864,9 +7151,10 @@
   function pantryCatOf(title) {
     var t = pantryNorm(title);
     if (!t) return '';
-    for (var i = 0; i < PANTRY.length; i++) {
-      for (var j = 0; j < PANTRY[i].items.length; j++) {
-        if (pantryNorm(PANTRY[i].items[j]) === t) return PANTRY[i].key;
+    var list = pantryAisles();
+    for (var i = 0; i < list.length; i++) {
+      for (var j = 0; j < list[i].rows.length; j++) {
+        if (pantryNorm(list[i].rows[j].title) === t) return list[i].key;
       }
     }
     return '';
@@ -6943,6 +7231,48 @@
       if (q) out.qty = q;
       return out;
     });
+  }
+
+  /** the ceiling a ± pair may count to — past this it is a typo, not a shop */
+  var QTY_STEP_MAX = 999;
+
+  /**
+   * ＋ / − over a FREE-TEXT amount (Sprint 17 · field mandate).
+   *
+   * The amount was never a number and must not become one: "500 גרם" and "×3"
+   * are both real shopping lines. So the stepper finds the first integer
+   * anywhere in the value and moves that, keeping whatever surrounds it —
+   * "500 גרם" ＋ → "501 גרם", "×3" − → "×2", "" ＋ → "1".
+   *
+   * Two deliberate refusals: counting down past one CLEARS the amount (nothing
+   * on a shopping line means "one of it"), and a value with no digits at all is
+   * never destroyed by −, because the text somebody typed is worth more than
+   * the stepper's opinion of it.
+   */
+  function qtyStep(qty, delta) {
+    var v = normQty(qty);
+    var d = delta < 0 ? -1 : 1;
+    var m = v.match(/^(\D*?)(\d+)([\s\S]*)$/);
+    if (!m) {
+      if (d < 0) return v ? v : '';
+      return v ? normQty('2 ' + v) : '1';
+    }
+    var n = parseInt(m[2], 10) + d;
+    if (n <= 0) return '';
+    if (n > QTY_STEP_MAX) n = QTY_STEP_MAX;
+    return normQty(m[1] + n + m[3]);
+  }
+
+  /**
+   * Everything a painted list row actually shows, in one string. A repaint that
+   * would redraw the identical markup is a repaint that only costs a caret, so
+   * paintMine() compares this first and declines.
+   */
+  function shopSignature(items) {
+    return (Array.isArray(items) ? items : []).filter(Boolean).map(function (r) {
+      return r.id + '\u0001' + r.title + '\u0001' + (r.done ? '1' : '0') +
+        '\u0001' + (r.qty || '');
+    }).join('\u0002');
   }
 
   /** "ניקוי הפריטים שנאספו" — everything already in the cart leaves the list */
@@ -7054,20 +7384,101 @@
     return l;
   }
 
+  /**
+   * A catalog rename follows the product into the list it is already on, so a
+   * ✓ and a כמות earned under the old name are not orphaned into מוצרים משלי.
+   * Declines when the new name is already a row of its own — merging two lines
+   * would silently pick one of their two amounts.
+   */
+  function shopRename(from, to) {
+    var l = shopList();
+    if (!l) return false;
+    var at = shopIndex(l.items, from);
+    if (at === -1 || shopIndex(l.items, to) !== -1) return false;
+    l.items = l.items.map(function (r, i) {
+      if (i !== at || !r) return r;
+      var out = { id: r.id, title: to, done: !!r.done };
+      if (r.qty) out.qty = r.qty;
+      return out;
+    });
+    l.updatedAt = Date.now();
+    Store.save();
+    Patch.record('lists', l.id);
+    return true;
+  }
+
+  /**
+   * True while a finger is inside a field the list owns. Sprint 16 knew that
+   * Shop.qty() must not repaint; what it could not know is that the 30-second
+   * sync heartbeat ends in render() → Patch.settle() → Shop.paint(), which
+   * rebuilt #shopList out from under the caret a second after it was placed —
+   * the focus loss, the keyboard collapse and the layout jump the field mandate
+   * reported. Nothing rebuilds the container while this is true.
+   */
+  function shopFieldFocused() {
+    var a = document && document.activeElement;
+    if (!a || !a.dataset) return false;
+    return !!(a.dataset.shopqty || a.dataset.shoprename);
+  }
+
   function shopRow(it) {
     var name = esc(it.title);
-    return '<div class="shop-row' + (it.done ? ' is-done' : '') + '" data-shoprow="' + esc(it.id) + '">' +
-      '<button class="shop-check" type="button" data-shopcheck="' + esc(it.id) + '" ' +
+    var id = esc(it.id);
+    return '<div class="shop-row' + (it.done ? ' is-done' : '') + '" data-shoprow="' + id + '">' +
+      '<button class="shop-check" type="button" data-shopcheck="' + id + '" ' +
       'aria-pressed="' + (it.done ? 'true' : 'false') + '" ' +
       'aria-label="' + name + ' — כבר בעגלה">' +
       '<span class="cl-box">' + (it.done ? '✓' : '') + '</span>' +
       '</button>' +
       '<span class="shop-name">' + name + '</span>' +
+      // Sprint 17 — the ± pair. A כמות is changed far more often than it is
+      // typed, and every tap that used to mean "open the keyboard on a 76px
+      // box" is now a 44px button that never moves the row.
+      '<div class="shop-qty-box">' +
+      '<button class="shop-step" type="button" data-shopstep="-:' + id + '" ' +
+      'aria-label="הפחתת הכמות של ' + name + '">−</button>' +
       '<input class="input shop-qty" type="text" autocomplete="off" maxlength="' + QTY_MAX + '" ' +
-      'data-shopqty="' + esc(it.id) + '" value="' + esc(it.qty || '') + '" ' +
+      'data-shopqty="' + id + '" value="' + esc(it.qty || '') + '" ' +
       'placeholder="כמות" aria-label="כמות עבור ' + name + '">' +
-      '<button class="shop-del" type="button" data-shopdel="' + esc(it.id) + '" ' +
+      '<button class="shop-step" type="button" data-shopstep="+:' + id + '" ' +
+      'aria-label="הגדלת הכמות של ' + name + '">+</button>' +
+      '</div>' +
+      '<button class="shop-del" type="button" data-shopdel="' + id + '" ' +
       'aria-label="הסרת ' + name + ' מהרשימה">✕</button>' +
+      '</div>';
+  }
+
+  /** one product of the master catalog, as a chip that picks it */
+  function pantryChip(r, on, searching) {
+    return '<button class="pn-chip' + (on ? ' is-on' : '') + '" type="button" ' +
+      'data-pantryitem="' + esc(r.title) + '" aria-pressed="' + (on ? 'true' : 'false') + '">' +
+      '<span class="pn-tick">' + (on ? '✓' : '+') + '</span>' +
+      '<span class="pn-name">' + esc(r.title) + '</span>' +
+      (searching ? '<span class="pn-aisle">' + esc(r.label) + '</span>' : '') +
+      '</button>';
+  }
+
+  /**
+   * The same product while the מאגר is being edited. A chip cannot carry ✎ and
+   * ✕ — they would be buttons inside a button — so edit mode swaps the whole
+   * grid rather than decorating it, which also makes an accidental "I meant to
+   * pick it" impossible while a deletion is one tap away.
+   *
+   * The row marks WHICH product is being renamed and nothing else: the name
+   * field itself is the static #shopRenameBar, because an input drawn into a
+   * container the catalog rebuilds is an input that loses its caret.
+   */
+  function pantryEditRow(r, editing) {
+    var ref = r.cat + '|' + r.orig;
+    var name = esc(r.title);
+    return '<div class="pn-edit' + (editing === ref ? ' is-editing' : '') +
+      '" data-pnrow="' + esc(ref) + '">' +
+      '<span class="pn-name">' + name + '</span>' +
+      (r.custom ? '<span class="pn-own">משלי</span>' : '') +
+      '<button class="pn-act" type="button" data-pnedit="' + esc(ref) + '" ' +
+      'aria-label="עריכת ' + name + '">✎</button>' +
+      '<button class="pn-act pn-act-del" type="button" data-pndel="' + esc(ref) + '" ' +
+      'aria-label="מחיקת ' + name + ' מהמאגר">✕</button>' +
       '</div>';
   }
 
@@ -7078,12 +7489,20 @@
     var p = progressOf(shopItems());
     setText(el, p.total
       ? plural(p.total, 'פריט אחד', 'פריטים') + ' · ' + p.done + ' כבר בעגלה'
-      : 'קטלוג של ' + PANTRY_TOTAL + ' מוצרים — בוחרים בהקשה');
+      : 'קטלוג של ' + pantryTotal() + ' מוצרים — בוחרים בהקשה');
   }
 
   var Shop = {
     cat: PANTRY[0].key,
     query: '',
+    // Sprint 17 — the catalog is a keyboard by default and a workbench on
+    // request. `manage` is the toggle; `editing` is the one ref being renamed.
+    manage: false,
+    editing: '',
+    // what the aisle strip and the list container were last painted FROM: both
+    // are rebuilt only when their own content actually changed
+    catsSig: '',
+    mineSig: '\u0000',
 
     isOpen: function () {
       var el = $('#shopSheet');
@@ -7101,10 +7520,18 @@
       // shelf you walk, not a search you left running last Tuesday
       this.cat = PANTRY[0].key;
       this.query = '';
+      // ...and never mid-edit: עריכת המאגר is something you go IN to, not a
+      // mode a previous visit can leave armed under a deletion button
+      this.manage = false;
+      this.editing = '';
+      this.catsSig = '';
+      this.mineSig = '\u0000';
       var box = $('#shopSearch');
       if (box) box.value = '';
       var add = $('#shopNew');
       if (add) add.value = '';
+      var np = $('#shopNewProduct');
+      if (np) np.value = '';
 
       $('#typeSheet').hidden = true;
       $('#formSheet').hidden = true;
@@ -7128,14 +7555,32 @@
       // an aisle tap answers a different question than a search, so it clears
       // the query rather than filtering the results of it
       this.query = '';
+      this.editing = '';
       var box = $('#shopSearch');
       if (box) box.value = '';
+      // Sprint 17 · field mandate — and it starts at the TOP of the new shelf.
+      // The grid scrolls inside itself, so without this the offset from the
+      // previous aisle survives and lands the finger halfway down a shelf
+      // nobody has looked at yet.
+      this.scrollTop();
       this.paint();
     },
 
     setQuery: function (q) {
       this.query = String(q == null ? '' : q);
+      this.editing = '';
+      // a new result set is a new list: same rule as an aisle switch
+      this.scrollTop();
       this.paintCatalog(shopItems());
+    },
+
+    /** the catalog grid, back at its first row. Never touches the sheet's own
+     *  scroll — that one belongs to the finger, not to the tab strip. */
+    scrollTop: function () {
+      var grid = $('#shopItems');
+      if (grid) grid.scrollTop = 0;
+      var pane = $('#shopPaneCatalog');
+      if (pane) pane.scrollTop = 0;
     },
 
     /* ---- the writes. Every one of them ends in the record, never in a draft ---- */
@@ -7158,8 +7603,12 @@
 
       var node = $('[data-shoprow="' + id + '"]');
       var row = shopItems().filter(function (r) { return r.id === id; })[0];
-      if (node && row) node.outerHTML = shopRow(row);
-      else this.paint();                    // not on screen — repaint properly
+      if (node && row) {
+        node.outerHTML = shopRow(row);
+        // the container now matches the record again, so the next repaint has
+        // nothing to do — which is what keeps the sync heartbeat off the caret
+        this.mineSig = shopSignature(shopItems());
+      } else this.paint();                  // not on screen — repaint properly
 
       var p = progressOf(shopItems());
       this.paintMeta(p);
@@ -7184,6 +7633,34 @@
       l.updatedAt = Date.now();
       Store.save();
       Patch.record('lists', l.id);
+    },
+
+    /**
+     * ＋ / − (Sprint 17 · field mandate). The record is written and the box is
+     * updated IN PLACE — not through a repaint, because a repaint is exactly
+     * the jitter the pair was added to remove. Only a row that is not on screen
+     * falls back to painting, which is the same rule check() has followed since
+     * Sprint 16.
+     */
+    step: function (id, delta) {
+      var l = shopList();
+      if (!l) return;
+      var row = shopItems().filter(function (r) { return r.id === id; })[0];
+      if (!row) return;
+
+      var next = qtyStep(row.qty, delta);
+      if (next === normQty(row.qty)) return;      // − on free text: nothing to do
+
+      l.items = shopSetQty(l.items, id, next);
+      l.updatedAt = Date.now();
+      Store.save();
+      Patch.record('lists', l.id);
+
+      var box = $('[data-shopqty="' + id + '"]');
+      if (box) {
+        box.value = next;
+        this.mineSig = shopSignature(shopItems());
+      } else this.paint();
     },
 
     /**
@@ -7232,6 +7709,118 @@
       });
     },
 
+    /* ---- עריכת המאגר (Sprint 17 · field mandate) ---------------------------
+       The catalog stopped being read-only vocabulary. Everything here writes
+       prefs.pantry — never PANTRY — through the one pantryWrite() path, and
+       every destructive one goes through confirmDelete(): a product removed
+       from the מאגר is gone from every future shop, not from one list.       */
+
+    setManage: function (on) {
+      this.manage = !!on;
+      this.editing = '';
+      this.scrollTop();
+      this.paintCatalog(shopItems());
+    },
+
+    /** הוספה — a product of the owner's own, on the shelf that is open */
+    catalogAdd: function () {
+      var box = $('#shopNewProduct');
+      var title = normProduct(box ? box.value : '');
+      var aisle = pantryAisle(this.cat);
+      if (!aisle) return;
+      if (!title) { warn('צריך שם מוצר'); return; }
+
+      var edits = pantryEdits();
+      if (pantryHolds(edits, this.cat, title)) {
+        toast('"' + title + '" כבר במדף ' + aisle.label);
+        return;
+      }
+      pantryWrite(pantryAddProduct(edits, this.cat, title));
+      if (box) { box.value = ''; box.focus(); }
+
+      // a search would hide the shelf the product just landed on
+      this.query = '';
+      var s = $('#shopSearch');
+      if (s) s.value = '';
+      this.paint();
+      toast('"' + title + '" נוסף ל' + aisle.label);
+    },
+
+    /** ✎ — the rename bar opens over the product it names, pre-filled */
+    catalogEdit: function (ref) {
+      var r = String(ref == null ? '' : ref);
+      var was = pantryTitleOf(pantryEdits(), pantryRefCat(r), pantryRefOrig(r));
+      if (!was) return;
+      this.editing = r;
+      this.paintCatalog(shopItems());
+      // the value is written HERE and never in paintCatalog(): a repaint that
+      // re-filled the box would undo whatever is half-typed in it
+      var box = $('#shopRename');
+      if (box) {
+        box.value = was;
+        if (box.focus) box.focus();
+      }
+    },
+
+    catalogCancel: function () {
+      this.editing = '';
+      var box = $('#shopRename');
+      if (box) box.value = '';
+      this.paintCatalog(shopItems());
+    },
+
+    /** עריכה — the new name, and the row in the list that is already wearing the old one */
+    catalogSave: function (ref) {
+      var r = String(ref == null ? '' : ref) || this.editing;
+      var cat = pantryRefCat(r), orig = pantryRefOrig(r);
+      var box = $('#shopRename');
+      var next = normProduct(box ? box.value : '');
+      if (!next) { warn('צריך שם מוצר'); return; }
+
+      var edits = pantryEdits();
+      var was = pantryTitleOf(edits, cat, orig);
+      if (!was) { this.catalogCancel(); return; }
+
+      if (pantryNorm(next) !== pantryNorm(was) && pantryHolds(edits, cat, next)) {
+        warn('כבר יש מוצר בשם הזה במדף');
+        return;
+      }
+      pantryWrite(pantryRenameProduct(edits, cat, orig, next));
+      if (was !== next) shopRename(was, next);
+      this.editing = '';
+      if (box) box.value = '';
+      this.paint();
+      toast('השם עודכן');
+    },
+
+    /** מחיקה — out of the מאגר, which is every future shop, so it asks first */
+    catalogRemove: function (ref) {
+      var r = String(ref == null ? '' : ref);
+      var cat = pantryRefCat(r), orig = pantryRefOrig(r);
+      var was = pantryTitleOf(pantryEdits(), cat, orig);
+      if (!was) return;
+
+      confirmDelete('"' + was + '" מתוך מאגר המוצרים', function () {
+        pantryWrite(pantryRemoveProduct(pantryEdits(), cat, orig));
+        Shop.editing = '';
+        Shop.paint();
+        // the row it may already own in the list is deliberately left alone:
+        // deleting a product from the מאגר is not deleting this week's shop
+        toast('המוצר הוסר מהמאגר');
+      });
+    },
+
+    /** שחזור המאגר — the whole overlay, in one assignment. Never a re-import. */
+    catalogReset: function () {
+      if (!pantryEdited(pantryEdits())) { toast('המאגר כבר במצבו המקורי'); return; }
+      confirmDelete('כל השינויים שנעשו במאגר המוצרים', function () {
+        pantryWrite(null);
+        Shop.editing = '';
+        Shop.paint();
+        toast('המאגר שוחזר למקור');
+      });
+    },
+
     /* ---- paint ---- */
 
     paint: function () {
@@ -7251,9 +7840,10 @@
         p.hidden = p.dataset.shoppane !== tab;
       });
 
-      // the catalog's count is fixed vocabulary; the list's is derived state and
-      // belongs to paintMeta(), which is the one place that owns it
-      setText($('#shopCountCatalog'), String(PANTRY_TOTAL));
+      // the catalog's count is vocabulary the owner now owns, so it is read
+      // live; the list's is derived state and belongs to paintMeta(), which is
+      // the one place that owns it
+      setText($('#shopCountCatalog'), String(pantryTotal()));
 
       this.paintCatalog(items);
       this.paintMine(items, prog);
@@ -7262,11 +7852,16 @@
     paintCatalog: function (items) {
       var self = this;
       var searching = pantryNorm(this.query) !== '';
+      var aisles = pantryAisles();
 
-      // the aisle strip is fixed vocabulary — built once, then only re-marked
+      // the aisle strip is vocabulary rather than state — but since Sprint 17
+      // the vocabulary itself can change, so it is rebuilt when its own counts
+      // move and only re-marked otherwise
       var cats = $('#shopCats');
-      if (cats && !cats.innerHTML) {
-        cats.innerHTML = PANTRY.map(function (a) {
+      var sig = aisles.map(function (a) { return a.key + ':' + a.items.length; }).join('|');
+      if (cats && sig !== this.catsSig) {
+        this.catsSig = sig;
+        cats.innerHTML = aisles.map(function (a) {
           return '<button class="pn-cat" type="button" data-pantrycat="' + esc(a.key) + '" ' +
             'aria-pressed="false">' + esc(a.label) +
             '<span class="pn-n">' + a.items.length + '</span></button>';
@@ -7278,21 +7873,45 @@
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
       });
 
+      /* ---- the עריכת המאגר toolbar ---- */
+      var mBtn = $('#shopManage');
+      if (mBtn) {
+        mBtn.classList.toggle('is-on', this.manage);
+        mBtn.setAttribute('aria-pressed', this.manage ? 'true' : 'false');
+        setText(mBtn, this.manage ? '✓ סיום עריכה' : '✎ עריכת המאגר');
+      }
+      var rBtn = $('#shopCatReset');
+      if (rBtn) rBtn.hidden = !(this.manage && pantryEdited(pantryEdits()));
+
+      // adding is offered only while editing, and only onto a NAMED shelf: a
+      // product has to land somewhere, and a running search names none
+      var addBox = $('#shopCatalogAdd');
+      if (addBox) addBox.hidden = !this.manage || searching;
+      var addField = $('#shopNewProduct');
+      if (addField) addField.placeholder = 'מוצר חדש במדף ' + pantryLabel(this.cat) + '…';
+
+      var rBar = $('#shopRenameBar');
+      if (rBar) rBar.hidden = !this.editing;
+      var who = $('#shopRenameWho');
+      if (who) {
+        setText(who, this.editing
+          ? 'שם חדש עבור "' + pantryTitleOf(pantryEdits(),
+            pantryRefCat(this.editing), pantryRefOrig(this.editing)) + '"'
+          : '');
+      }
+
       var rows = searching ? pantrySearch(this.query) : pantryAisleRows(this.cat);
       var box = $('#shopItems');
       if (box) {
+        box.classList.toggle('is-manage', this.manage);
         box.innerHTML = rows.length
           ? rows.map(function (r) {
-            var on = shopHas(items, r.title);
-            return '<button class="pn-chip' + (on ? ' is-on' : '') + '" type="button" ' +
-              'data-pantryitem="' + esc(r.title) + '" aria-pressed="' + (on ? 'true' : 'false') + '">' +
-              '<span class="pn-tick">' + (on ? '✓' : '+') + '</span>' +
-              '<span class="pn-name">' + esc(r.title) + '</span>' +
-              (searching ? '<span class="pn-aisle">' + esc(r.label) + '</span>' : '') +
-              '</button>';
+            return self.manage
+              ? pantryEditRow(r, self.editing)
+              : pantryChip(r, shopHas(items, r.title), searching);
           }).join('')
-          : '<p class="pn-empty">אין מוצר כזה בקטלוג — אפשר להוסיף אותו ידנית בלשונית ' +
-            '"רשימת הקניות שלי".</p>';
+          : '<p class="pn-empty">אין מוצר כזה בקטלוג — אפשר להוסיף אותו למאגר ' +
+            'דרך "✎ עריכת המאגר", או ידנית בלשונית "רשימת הקניות שלי".</p>';
       }
 
       var picked = progressOf(items).total;
@@ -7301,18 +7920,33 @@
         : pantryLabel(this.cat) + ' · ' + rows.length + ' מוצרים · ' + picked + ' פריטים ברשימה');
     },
 
+    /**
+     * Sprint 17 — the rebuild is now conditional, on two counts.
+     *
+     * A repaint that would produce byte-identical markup is a repaint that only
+     * costs a caret, and one that lands while a כמות box has the focus costs
+     * the keyboard with it: the sync heartbeat ends in render() → settle() →
+     * paint(), roughly a second after a finger reaches the amount field, which
+     * is precisely the "focus / re-render layout jump" the mandate reported.
+     * So the container is rebuilt only when the record it draws actually
+     * changed, and never while the finger is inside one of its own fields.
+     */
     paintMine: function (items, prog) {
       var box = $('#shopList');
       if (box) {
-        var groups = shopGroups(items);
-        box.innerHTML = groups.length
-          ? groups.map(function (g) {
-            return '<div class="shop-band">' + esc(g.label) +
-              '<span class="shop-band-n">' + g.rows.length + '</span></div>' +
-              g.rows.map(shopRow).join('');
-          }).join('')
-          : emptyState('הרשימה ריקה',
-            'אפשר לבחור מוצרים מהקטלוג בלשונית "בחירת מוצרים מתוך הרשימה", או להקליד כאן מוצר משלך.');
+        var sig = shopSignature(items);
+        if (sig !== this.mineSig && !shopFieldFocused()) {
+          this.mineSig = sig;
+          var groups = shopGroups(items);
+          box.innerHTML = groups.length
+            ? groups.map(function (g) {
+              return '<div class="shop-band">' + esc(g.label) +
+                '<span class="shop-band-n">' + g.rows.length + '</span></div>' +
+                g.rows.map(shopRow).join('');
+            }).join('')
+            : emptyState('הרשימה ריקה',
+              'אפשר לבחור מוצרים מהקטלוג בלשונית "בחירת מוצרים מתוך הרשימה", או להקליד כאן מוצר משלך.');
+        }
       }
       this.paintMeta(prog || progressOf(items));
     },
@@ -8614,6 +9248,9 @@
       // Sprint 15 — the pantry catalog; Sprint 16 — the module around it
       '[data-pantrycat],[data-pantryitem],' +
       '[data-shoptab],[data-shopcheck],[data-shopdel],[data-shopclear],[data-shopadd],' +
+      // Sprint 17 — the ± pair on a row, and עריכת המאגר inside the catalog
+      '[data-shopstep],[data-shopmanage],[data-shopcatadd],[data-shopcatreset],' +
+      '[data-pnedit],[data-pnsave],[data-pndel],[data-pncancel],' +
       '[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
       '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
       '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo],' +
@@ -8743,6 +9380,22 @@
     if (el.dataset.shopdel) { Shop.drop(el.dataset.shopdel); return; }
     if (el.dataset.shopclear) { Shop.clear(el.dataset.shopclear); return; }
     if (el.dataset.shopadd) { Shop.add(); return; }
+
+    /* ---------- Sprint 17 · the ± pair and עריכת המאגר ---------- */
+
+    if (el.dataset.shopstep) {
+      var st = el.dataset.shopstep.split(':');
+      Shop.step(st.slice(1).join(':'), st[0] === '-' ? -1 : 1);
+      return;
+    }
+    if (el.dataset.shopmanage) { Shop.setManage(!Shop.manage); return; }
+    if (el.dataset.shopcatadd) { Shop.catalogAdd(); return; }
+    if (el.dataset.shopcatreset) { Shop.catalogReset(); return; }
+    if (el.dataset.pnedit) { Shop.catalogEdit(el.dataset.pnedit); return; }
+    // the rename bar is static, so the ref it saves lives in Shop.editing
+    if (el.dataset.pnsave) { Shop.catalogSave(Shop.editing); return; }
+    if (el.dataset.pndel) { Shop.catalogRemove(el.dataset.pndel); return; }
+    if (el.dataset.pncancel) { Shop.catalogCancel(); return; }
 
     /* ---------- client CRM ---------- */
 
@@ -8960,12 +9613,22 @@
    * what makes people stop using the field at all.
    */
   function onKeydown(e) {
-    if (e.key === 'Escape') { closeSheets(); return; }
     var el = e.target;
-    if (!el || !el.dataset || !el.dataset.shopnew) return;
-    if (e.key !== 'Enter') return;
-    e.preventDefault();
-    Shop.add();
+    var d = el && el.dataset ? el.dataset : null;
+
+    if (e.key === 'Escape') {
+      // Sprint 17 — a rename in flight is its own layer: Escape puts the row
+      // back rather than closing the whole module around a half-typed name
+      if (d && d.shoprename && Shop.editing) { e.preventDefault(); Shop.catalogCancel(); return; }
+      closeSheets();
+      return;
+    }
+    if (!d || e.key !== 'Enter') return;
+
+    if (d.shopnew) { e.preventDefault(); Shop.add(); return; }
+    // ...and the same burst-typing argument applies to filling a shelf
+    if (d.shopnewproduct) { e.preventDefault(); Shop.catalogAdd(); return; }
+    if (d.shoprename) { e.preventDefault(); Shop.catalogSave(Shop.editing); }
   }
 
   /* ==========================================================================
@@ -9611,6 +10274,29 @@
       pantryNorm: pantryNorm,
       pantrySearch: pantrySearch,
       pantryCatOf: pantryCatOf,
+      // Sprint 17 — the catalog overlay. PANTRY above is still the dictated
+      // vocabulary; everything here is the owner's own layer over it, and all
+      // of it is pure: an overlay in, a new overlay (or a catalog) out.
+      PRODUCT_MAX: PRODUCT_MAX,
+      normProduct: normProduct,
+      normPantryEdits: normPantryEdits,
+      pantryRef: pantryRef,
+      pantryRefCat: pantryRefCat,
+      pantryRefOrig: pantryRefOrig,
+      pantryBase: pantryBase,
+      pantryApply: pantryApply,
+      pantryEdited: pantryEdited,
+      pantryTitleOf: pantryTitleOf,
+      pantryHolds: pantryHolds,
+      pantryAddProduct: pantryAddProduct,
+      pantryRenameProduct: pantryRenameProduct,
+      pantryRemoveProduct: pantryRemoveProduct,
+      pantryEdits: pantryEdits,
+      pantryAisles: pantryAisles,
+      pantryTotal: pantryTotal,
+      pantryWrite: pantryWrite,
+      pantryChip: pantryChip,
+      pantryEditRow: pantryEditRow,
       // Sprint 16 — the shopping list, as rows. Same deal: every one of these
       // is pure, so the suite drives a whole select → tick → count → clear
       // cycle without a DOM, and the module below is the only part that needs one.
@@ -9627,6 +10313,13 @@
       shopClearDone: shopClearDone,
       shopGroups: shopGroups,
       shopRow: shopRow,
+      // Sprint 17 — the ± pair over a free-text amount, the repaint guard that
+      // keeps a rebuild off the caret, and the rename that follows a catalog
+      // edit into the list
+      QTY_STEP_MAX: QTY_STEP_MAX,
+      qtyStep: qtyStep,
+      shopSignature: shopSignature,
+      shopRename: shopRename,
       shopList: shopList,
       shopItems: shopItems,
       shopEnsure: shopEnsure,

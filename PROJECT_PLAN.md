@@ -2017,6 +2017,129 @@ including the proof that typing an amount does not rebuild the list under the ca
 intact; the confirmations are driven through `Confirm.dismiss()` and `Confirm.accept()`; and
 the cache floor is raised to **v22**, with `APP_VERSION` asserted in step.
 
+### 7.4s עריכת המאגר, ± על הכמות, ואיפוס גלילה (shipped — Sprint 17)
+
+Field mandate, three defects in one module: *"add / edit / delete products directly from
+the Master Catalog"*, *"reset the list scroll container to the top on category switch"*, and
+*"fix the focus/re-render layout jump when tapping the quantity area — replace/enhance the
+quantity input with plus and minus stepper buttons"*. One theme runs through all three: the
+module was read-only where the field needed it editable, and it repainted where the field
+needed it to hold still. The shell ships as **v23** on both cache-busted URLs.
+
+#### §1 The catalog stopped being read-only vocabulary
+
+`PANTRY` is left **exactly** as §7.4q dictated it — ten shelves, 161 products, byte for
+byte. The owner's changes live beside it, in `prefs.pantry`, as three small facts:
+
+| key | shape | what it is |
+|---|---|---|
+| `add` | `{ aisleKey: [titles] }` | products of the owner's own |
+| `hide` | `[ref]` | mandated products that were deleted |
+| `edit` | `{ ref: title }` | mandated products that were renamed |
+
+A **ref** is one product *on one shelf* — `pantryRef('canned','חומוס')` → `canned|חומוס` —
+never a bare title. חומוס and סויה each sit on two shelves, and renaming the tinned one must
+not touch the dry one. Four things fall out of the overlay shape for free: `שחזור המאגר` is
+one assignment rather than a re-import; a store written before this sprint needs **no
+migration and no new key**, because the overlay rides the same `prefs` payload
+`Store.save()` already writes; a product a *future* mandate adds to `PANTRY` appears on the
+shelf of somebody who has been editing for months; and every edit is a *layer*, so no code
+path can ever corrupt the dictated vocabulary.
+
+| function | what it is |
+|---|---|
+| `normPantryEdits(raw)` | never trusted, always rebuilt — unknown shelf, blank title, duplicate, and any ref pointing at a product this build no longer ships are all dropped. Idempotent. |
+| `pantryApply(edits)` | the catalog actually shown. Each row keeps `orig`, the name the mandate gave it, because that is what a *second* rename files against |
+| `pantryAddProduct(edits, cat, title)` | one name, one shelf, once |
+| `pantryRenameProduct(edits, cat, orig, title)` | mandated → an override; the owner's own → rewritten in place. A collision on the same shelf is refused, never merged |
+| `pantryRemoveProduct(edits, cat, orig)` | mandated → hidden; the owner's own → simply leaves. Drops any live rename with it |
+| `pantryEdited(edits)` | the gate on `שחזור המאגר` |
+| `pantryTitleOf` / `pantryHolds` | the name a product wears now / does this shelf already show one |
+
+Every one of them is pure: an overlay in, a new overlay out, nothing mutated. Above them sit
+the store-backed readers — `pantryEdits()`, `pantryAisles()` (memoised on the overlay's own
+JSON, so `pantryCatOf()` stops rebuilding the catalog once per list row), `pantryTotal()`
+and the single write path `pantryWrite()`. `pantryAisle` / `pantryLabel` / `pantryAisleRows`
+/ `pantrySearch` / `pantryCatOf` all read the **effective** catalog, so an added product is
+searchable, bands under its own shelf in tab 2, and is counted on the היום שלי door.
+
+**The surface.** `✎ עריכת המאגר` (`#shopManage`, `data-shopmanage`) is a **mode**, not a
+decoration: ✎ and ✕ cannot be nested inside a `.pn-chip` (a button inside a button), and a
+delete sitting one tap from a select is a delete somebody makes by accident. Edit mode swaps
+the grid (`.pn-items.is-manage`) for full-width `.pn-edit` rows carrying `data-pnedit` and
+`data-pndel`, reveals `#shopCatalogAdd` (only onto a **named** shelf — a running search
+names none) and reveals `שחזור המאגר` once anything has actually been changed. The rename
+field is the *static* `#shopRenameBar`, never an input drawn into a row: a field inside a
+container the catalog rebuilds is a field that loses its caret. ↵ adds and saves, Escape
+cancels the rename before it closes the module.
+
+**Destruction is proportionate.** Deleting a product and restoring the whole מאגר both go
+through `confirmDelete()` — a product removed from the מאגר is gone from every *future* shop,
+not from one list. A rename follows the product into the list it is already on
+(`shopRename()`), so a ✓ and a כמות earned under the old name are not orphaned into
+`מוצרים משלי`; a deletion deliberately leaves the list row alone, because deleting from the
+מאגר is not deleting this week's shop.
+
+#### §2 A new shelf starts at the top of itself
+
+`.pn-items` scrolls inside itself (`max-height:280px; overflow-y:auto`, §7.4q), so switching
+aisle kept the *previous* aisle's offset and landed the finger halfway down a shelf nobody
+had looked at yet. `Shop.scrollTop()` zeroes `#shopItems` and `#shopPaneCatalog` and is
+called from `setCat()`, `setQuery()` (a new result set is a new list) and `setManage()` (edit
+mode swaps every row). It deliberately does **not** touch `#shopSheet`: that scroll belongs
+to the finger, and resetting it would yank the grid off screen the moment somebody scrolled
+down to reach it.
+
+#### §3 The כמות, and why it jumped
+
+Sprint 16 knew `Shop.qty()` must not repaint. What it could not know is that the 30-second
+sync heartbeat ends in `Sync.flush()` → `render()` → `Patch.settle()` → `Shop.paint()`,
+which rebuilt `#shopList` roughly a second after a finger reached the amount field — the
+focus loss, the keyboard collapse and the layout jump the mandate reported. Two guards, both
+in `paintMine()`:
+
+- **`shopSignature(items)`** — id · title · ✓ · כמות for every row. A repaint that would
+  produce byte-identical markup writes nothing at all, so the heartbeat is inert.
+- **`shopFieldFocused()`** — `document.activeElement` carrying `data-shopqty` or
+  `data-shoprename`. While it is true the container is left exactly as it is, and the pending
+  change is drawn the moment the finger leaves. The derived text (`paintMeta`) still runs
+  unconditionally, because it is cheap and touches no container.
+
+`Shop.check()` and `Shop.step()` both refresh `mineSig` after swapping in place, so the
+container and the record never drift apart.
+
+**The ± pair.** Each `.shop-row` now carries `.shop-qty-box` — `data-shopstep="-:id"`, the
+typed box, `data-shopstep="+:id"` — and `qtyStep(qty, delta)` moves the *first integer
+anywhere in the value*, keeping whatever surrounds it: `500 גרם` ＋ → `501 גרם`, `×3` − →
+`×2`, `''` ＋ → `1`. Two deliberate refusals: counting down past one **clears** the amount
+(nothing on a shopping line means "one of it"), and a value with no digits at all is never
+destroyed by −. The typed box stays — the mandate said *replace/enhance*, and a free-text
+amount is the one thing a pair of counters cannot express. `Shop.step()` writes the record
+and the box **in place**; only an off-screen row falls back to painting.
+
+The row became a two-row grid (`grid-template-areas: "check name del" / ". qty ."`): one
+flex line had to hold a 44px ✓, an elastic name, a 76px amount and a 44px ✕, which on a
+360px phone squeezed the name to nothing and left the amount too narrow to hit. Both
+steppers and both `.pn-act` glyphs clear `var(--tap)` in *both* directions, every hidden bar
+resets `display`, and every colour is a `var()` token.
+
+#### §4 Verification
+
+`healthcheck.js` §49 adds 14 checks. The overlay layer is driven purely — add / rename /
+delete / restore, the two-shelf חומוס case, the refused collision, and a deliberately
+malformed overlay proving that an unknown shelf, a blank title, a duplicate, a stale ref and
+a rename of something already deleted are all dropped before a render can see them. The
+module is then driven head-lessly over the stubbed document through a full
+`edit mode → add → rename → deletion → שחזור` cycle, with `Confirm.dismiss()` /
+`Confirm.accept()` on both destructive paths and the list row asserted to keep its ✓, its
+כמות and its id across a rename. `Shop.scrollTop()` is asserted to zero the grid on an aisle
+switch, a search and a mode swap — and asserted **not** to touch the sheet. `qtyStep()` is
+table-driven across fourteen cases; the ± pair is driven against the record; and the caret
+guard is proven by counting `innerHTML` writes: two idempotent repaints write nothing, a
+repaint with the amount box focused writes nothing, and the deferred write lands the moment
+focus leaves. The cache floor is raised to **v23** with `APP_VERSION` and both `?v=` URLs
+asserted in step.
+
 ### 7.4 General layout
 
 **Layout direction:** RTL by default (`dir="rtl"`), with LTR fallback driven by locale.

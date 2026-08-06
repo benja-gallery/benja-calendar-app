@@ -26,7 +26,7 @@
 <!-- ?v= MUST match CACHE_VERSION in sw.js. GitHub Pages serves these with
      max-age=600 and no content hash, so without the query an installed phone
      can keep serving the previous build out of its own HTTP cache. -->
-<link rel="stylesheet" href="styles.css?v=v22">
+<link rel="stylesheet" href="styles.css?v=v23">
 </head>
 <body>
 
@@ -465,10 +465,42 @@
     <p class="pn-hint">
       הקשה על מוצר מוסיפה אותו לרשימת הקניות שלך, הקשה נוספת מסירה אותו.
       החיפוש עובר על כל המדפים יחד, והבחירה נשמרת מיד.
+      ב"עריכת המאגר" אפשר להוסיף מוצר משלך למדף, לשנות שם או למחוק מוצר.
     </p>
     <input class="input pn-search" id="shopSearch" type="search" autocomplete="off"
            data-shopsearch="1" placeholder="חיפוש מוצר…" aria-label="חיפוש בקטלוג המצרכים">
     <div class="pn-cats" id="shopCats" role="group" aria-label="מדפי הקטלוג"></div>
+
+    <!-- Sprint 17 — the מאגר is editable. The toolbar is a MODE, not a
+         decoration on the chips: ✎ and ✕ cannot live inside a button that
+         already means "pick this", and a deletion one tap from a selection is
+         a deletion somebody makes by accident. -->
+    <div class="pn-tools">
+      <button class="btn btn-ghost pn-manage" id="shopManage" data-shopmanage="1"
+              type="button" aria-pressed="false" aria-controls="shopItems">✎ עריכת המאגר</button>
+      <button class="btn btn-ghost pn-reset" id="shopCatReset" data-shopcatreset="1"
+              type="button" hidden>שחזור המאגר</button>
+    </div>
+    <div class="pn-add" id="shopCatalogAdd" hidden>
+      <input class="input pn-new" id="shopNewProduct" type="text" autocomplete="off"
+             maxlength="24" data-shopnewproduct="1" placeholder="מוצר חדש במדף…"
+             aria-label="הוספת מוצר חדש למדף הפתוח">
+      <button class="btn btn-gold pn-add-btn" data-shopcatadd="1" type="button">הוספה למדף</button>
+    </div>
+
+    <!-- the rename bar is ONE static control rather than an input drawn into
+         whichever row is being edited: a field inside a container the catalog
+         rebuilds is a field that loses its caret to the next repaint. -->
+    <div class="pn-rename-bar" id="shopRenameBar" hidden>
+      <label class="pn-rename-who" id="shopRenameWho" for="shopRename"></label>
+      <div class="pn-rename-row">
+        <input class="input pn-rename" id="shopRename" type="text" autocomplete="off"
+               maxlength="24" data-shoprename="1" aria-label="שם חדש למוצר">
+        <button class="btn btn-gold pn-add-btn" data-pnsave="1" type="button">שמירה</button>
+        <button class="btn btn-ghost pn-add-btn" data-pncancel="1" type="button">ביטול</button>
+      </div>
+    </div>
+
     <div class="pn-items" id="shopItems" role="group" aria-label="מוצרים בקטלוג"></div>
     <p class="pn-summary block-meta" id="shopSummary"></p>
   </div>
@@ -761,6 +793,6 @@
   <button class="toast-undo" id="toastUndo" data-undo="1" type="button" hidden>אחזר</button>
 </div>
 
-<script src="app.js?v=v22"></script>
+<script src="app.js?v=v23"></script>
 </body>
 </html>
