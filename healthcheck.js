@@ -2833,7 +2833,9 @@ const CONTROLS = [
   // Sprint 11: the notification-permission banner's CTA
   'nfy-cta',
   // Sprint 15: the pantry catalog's aisle pills and product chips
-  'pn-cat', 'pn-chip'
+  'pn-cat', 'pn-chip',
+  // Sprint 16: the shopping module's door and its per-row controls
+  'shop-cta', 'shop-check', 'shop-del'
 ];
 
 /** chips that stay visually small and clear the floor with a hit expander */
@@ -7723,15 +7725,28 @@ const AISLES = [
 const AISLE_TOTAL = AISLES.reduce((n, a) => n + a.items.length, 0);
 
 /**
- * The form the catalog lives in, as a stub: a #formFields box that answers the
- * five selectors FormPantry reaches for. The textarea is a real value carrier,
- * which is the whole point — every assertion below reads the field back rather
- * than trusting the module's own memory.
+ * The catalog is pure data and pure string work — no DOM at any point — so the
+ * vocabulary checks below need nothing but the export.
  */
-function pantryStub(itemsText) {
+function loadPantry() {
+  return { P: loadApp().lists };
+}
+
+/**
+ * Sprint 16 — the module, as a stub.
+ *
+ * Every id Shop.paint() reaches for is a real value carrier, so the assertions
+ * read the RECORD back out of the rendered markup rather than trusting the
+ * module's own memory. Anything else a repaint happens to touch gets a
+ * throwaway element rather than a null (hidden by default, so no other layer
+ * of the app reports itself open), which is what lets a whole
+ * open → tick → count → clear cycle run without a browser.
+ */
+function shopStub() {
   const noop = () => {};
   const mk = extra => Object.assign({
-    textContent: '', innerHTML: '', value: '', dataset: {}, attrs: {},
+    textContent: '', innerHTML: '', value: '', hidden: true,
+    dataset: {}, attrs: {}, style: {},
     classList: {
       on: {},
       add(c) { this.on[c] = true; },
@@ -7740,42 +7755,51 @@ function pantryStub(itemsText) {
       contains(c) { return !!this.on[c]; }
     },
     setAttribute(k, v) { this.attrs[k] = v; },
-    getAttribute(k) { return this.attrs[k]; }
+    getAttribute(k) { return this.attrs[k]; },
+    addEventListener: noop,
+    focus: noop,
+    scrollIntoView: noop,
+    querySelector: () => mk(),
+    querySelectorAll: () => []
   }, extra || {});
 
-  const items = mk({ name: 'items', value: itemsText || '' });
-  const field = mk(), grid = mk(), summary = mk(), search = mk();
+  const el = {};
+  ['shopSheet', 'shopSearch', 'shopNew', 'shopCats', 'shopItems', 'shopSummary',
+    'shopList', 'shopMineSummary', 'shopCountCatalog', 'shopCountMine', 'shopCtaMeta',
+    'backdrop', 'typeSheet', 'formSheet', 'openSheet']
+    .forEach(id => { el[id] = mk(); });
+
+  const tabs = ['catalog', 'mine'].map(k => mk({ dataset: { shoptab: k } }));
+  const panes = ['catalog', 'mine'].map(k => mk({ dataset: { shoppane: k } }));
   const cats = AISLES.map(a => mk({ dataset: { pantrycat: a.key } }));
 
-  const box = mk({
-    querySelector(sel) {
-      if (sel === '.pn-field') return field;
-      if (sel === '[name="items"]') return items;
-      if (sel === '.pn-items') return grid;
-      if (sel === '.pn-summary') return summary;
-      if (sel === '.pn-search') return search;
-      return null;
-    },
-    querySelectorAll: sel => (sel === '[data-pantrycat]' ? cats : [])
-  });
-
   return {
-    items, grid, summary, search, cats,
+    el, tabs, panes, cats, mk,
     doc: {
-      readyState: 'loading',
+      readyState: 'loading',                 // keeps init() parked
       addEventListener: noop,
       body: { style: {} },
-      querySelector: sel => (sel === '#formFields' ? box : null),
-      querySelectorAll: () => []
+      // the stub is a registry, not a tree: an attribute selector can only be
+      // the module reaching for a row it rendered, and answering null is what
+      // the real DOM does whenever that row's tab is not the open one
+      querySelector: sel => (String(sel).charAt(0) === '[' ? null : (el[String(sel).slice(1)] || mk())),
+      querySelectorAll: sel => {
+        if (sel === '#shopSheet [data-shoptab]') return tabs;
+        if (sel === '#shopSheet [data-shoppane]') return panes;
+        if (sel === '#shopCats [data-pantrycat]') return cats;
+        return [];
+      }
     }
   };
 }
 
-/** the catalog module, wired to a stubbed form */
-function loadPantry(itemsText) {
-  const stub = pantryStub(itemsText);
+/** the module, loaded over a stubbed document and opened */
+function loadShop(open) {
+  const stub = shopStub();
   const APP = loadApp({ document: stub.doc });
-  return { P: APP.lists, F: APP.lists.FormPantry, stub };
+  APP.Store.load();
+  if (open !== false) APP.lists.Shop.open();
+  return { APP, L: APP.lists, Store: APP.Store, S: APP.lists.Shop, stub };
 }
 
 check('the catalog is the ten mandated aisles, in the mandated order', () => {
@@ -7820,48 +7844,88 @@ check('the only repeated products are the mandate’s own two', () => {
   if (dupes.slice().sort().join('|') !== expected.slice().sort().join('|')) {
     return 'repeated titles are ' + (dupes.join('|') || 'none') + ', expected ' + expected.join('|');
   }
-  // and a repeat is one product with two shelves, never two lines in the list
-  const one = P.pantryToggle('', 'חומוס');
-  return P.pantryLines(one).length === 1 ? true : 'a duplicated title wrote two lines';
+  // and a repeat is one product with two shelves, never two rows in the list
+  const one = P.shopToggle([], 'חומוס');
+  return one.length === 1 ? true : 'a duplicated title wrote ' + one.length + ' rows';
 });
 
-check('pantryToggle() adds, removes, and never disturbs a neighbour', () => {
-  const { P } = loadPantry('');
-  let text = P.pantryToggle('', 'טחינה');
-  if (text !== 'טחינה') return 'a first product came out as "' + text + '"';
-
-  text = P.pantryToggle(text, 'דבש');
-  if (text !== 'טחינה\nדבש') return 'the second product did not append: ' + JSON.stringify(text);
-
-  // a hand-typed line the catalog knows nothing about
-  text = text + '\nלחם משק';
-  text = P.pantryToggle(text, 'טחינה');
-  if (text !== 'דבש\nלחם משק') return 'removing one product disturbed the rest: ' + JSON.stringify(text);
-
-  text = P.pantryToggle(text, 'טחינה');
-  if (text !== 'דבש\nלחם משק\nטחינה') return 're-adding did not go to the end: ' + JSON.stringify(text);
-
-  // blank lines and stray spaces are the textarea's, not the list's
-  const messy = P.pantryToggle('  חלב  \n\n\nלחם\n', 'סוכר');
-  if (messy !== 'חלב\nלחם\nסוכר') return 'the field was not normalised: ' + JSON.stringify(messy);
-
-  // a toggle with nothing to toggle is a no-op, not a blank line
-  if (P.pantryToggle('חלב', '   ') !== 'חלב') return 'an empty title wrote a line';
-  if (P.pantryToggle(null, 'מלח') !== 'מלח') return 'a null field could not be added to';
+check('every product knows the shelf it came from, and only a real one', () => {
+  const { P } = loadPantry();
+  AISLES.forEach(a => a.items.forEach(title => {
+    const got = P.pantryCatOf(title);
+    if (!got) throw new Error(title + ' belongs to no shelf');
+    // חומוס and סויה each sit on two — the first shelf that holds one wins,
+    // deterministically, so a list never regroups itself between two repaints
+    const owners = AISLES.filter(x => x.items.indexOf(title) !== -1).map(x => x.key);
+    if (got !== owners[0]) throw new Error(title + ' filed under ' + got + ', expected ' + owners[0]);
+  }));
+  if (P.pantryCatOf('לחם משק') !== '') return 'a hand-typed product was filed under a shelf';
+  if (P.pantryCatOf('') !== '') return 'an empty title was given a shelf';
+  // the geresh forgiveness of the search applies here too, or "ציפס" would be
+  // grouped apart from the "צ׳יפס" it is
+  if (P.pantryCatOf('ציפס') !== 'snacks') return 'the geresh splits a product from its own shelf';
   return true;
 });
 
-check('a tick is read off the field, so a hand-typed product counts', () => {
-  const { P } = loadPantry('');
-  if (!P.pantryHas('חלב\nטחינה\nלחם', 'טחינה')) return 'a present product does not read as present';
-  if (P.pantryHas('חלב\nטחינה', 'טחינ')) return 'a partial line was mistaken for a product';
-  if (!P.pantryHas('  דבש  ', 'דבש')) return 'a padded line does not read as its product';
-  if (P.pantryHas('', 'דבש')) return 'an empty field claims to hold a product';
+check('shopToggle() adds, removes, and never disturbs a neighbour', () => {
+  const { P } = loadPantry();
 
-  // the toggle and the store's own parser must agree on what a line is
-  const text = P.pantryToggle(P.pantryToggle('', 'מלח'), 'קפה');
-  const parsed = P.parseChecklist(text, 'li').map(i => i.title);
-  if (parsed.join('|') !== 'מלח|קפה') return 'parseChecklist() disagrees: ' + parsed.join('|');
+  let rows = P.shopToggle([], 'טחינה');
+  if (rows.length !== 1 || rows[0].title !== 'טחינה') return 'a first product came out wrong';
+  if (rows[0].done !== false) return 'a fresh product arrived already ticked';
+  if (!rows[0].id) return 'a fresh product carries no id';
+
+  rows = P.shopToggle(rows, 'דבש');
+  if (rows.map(r => r.title).join('|') !== 'טחינה|דבש') return 'the second product did not append';
+
+  // a ticked row, an amount, and a product the catalog never heard of
+  rows[0].done = true;
+  rows[0].qty = '2';
+  rows = rows.concat([{ id: 'own', title: 'לחם משק', done: false }]);
+
+  const back = P.shopToggle(rows, 'דבש');
+  if (back.map(r => r.title).join('|') !== 'טחינה|לחם משק') return 'removing one product disturbed the rest';
+  if (back[0].done !== true || back[0].qty !== '2') return 'the survivor lost its tick or its amount';
+  if (back[0].id !== rows[0].id) return 'the survivor was rebuilt with a new id';
+
+  const again = P.shopToggle(back, 'דבש');
+  if (again[again.length - 1].title !== 'דבש') return 're-adding did not go to the end';
+
+  // a toggle with nothing to toggle is a no-op, not an empty row
+  if (P.shopToggle(back, '   ').length !== back.length) return 'an empty title wrote a row';
+  if (P.shopToggle(null, 'מלח').length !== 1) return 'a null list could not be added to';
+
+  // and the input is never mutated — every write path in the module rebuilds
+  if (rows.length !== 3) return 'shopToggle() mutated the array it was handed';
+  return true;
+});
+
+check('a tick is read off the record, so a hand-typed product counts', () => {
+  const { P } = loadPantry();
+  const rows = [
+    { id: 'a', title: 'חלב', done: false },
+    { id: 'b', title: 'טחינה', done: true },
+    { id: 'c', title: 'לחם משק', done: false }
+  ];
+  if (!P.shopHas(rows, 'טחינה')) return 'a present product does not read as present';
+  if (!P.shopHas(rows, 'לחם משק')) return 'a hand-typed product does not count';
+  if (P.shopHas(rows, 'טחינ')) return 'a partial title was mistaken for a product';
+  if (!P.shopHas(rows, '  חלב  ')) return 'a padded title does not read as its product';
+  if (P.shopHas([], 'דבש')) return 'an empty list claims to hold a product';
+  if (P.shopHas(rows, '')) return 'an empty title reads as present';
+
+  // ticking is per-row and leaves every other row alone
+  const ticked = P.shopCheck(rows, 'a');
+  if (ticked[0].done !== true) return 'the tick did not land';
+  if (ticked[1].done !== true || ticked[2].done !== false) return 'the tick spread to a neighbour';
+  if (P.shopCheck(ticked, 'a')[0].done !== false) return 'a row does not un-tick';
+  if (rows[0].done !== false) return 'shopCheck() mutated the array it was handed';
+
+  // and the module's rows are the store's rows: they survive normItems intact
+  const norm = P.normItems(P.shopSetQty(ticked, 'b', ' 2  ק״ג '), 'li');
+  if (norm[1].qty !== '2 ק״ג') return 'the amount did not normalise: ' + JSON.stringify(norm[1].qty);
+  if (norm[1].done !== true) return 'the round-trip through normItems un-ticked a row';
+  if ('qty' in norm[0]) return 'a row with no amount was given an empty one';
   return true;
 });
 
@@ -7893,117 +7957,8 @@ check('חיפוש crosses every aisle and forgives the geresh', () => {
   return true;
 });
 
-check('the chip grid ticks exactly what the items field holds', () => {
-  const { F, stub } = loadPantry('עדשים ירוקות\nמלח מהמדף של סבתא');
-  F.load();
-
-  // the first aisle, drawn with its own products
-  if (stub.grid.innerHTML.indexOf('data-pantryitem="עדשים כתומות"') === -1) {
-    return 'the opening aisle was not rendered';
-  }
-  // what the list already holds is ticked...
-  const on = stub.grid.innerHTML.match(/pn-chip is-on[^>]*data-pantryitem="([^"]+)"/g) || [];
-  if (on.length !== 1) return on.length + ' chips are ticked, expected 1';
-  if (stub.grid.innerHTML.indexOf('pn-chip is-on" type="button" data-pantryitem="עדשים ירוקות"') === -1) {
-    return 'the product already in the list is not ticked';
-  }
-  // ...and the summary counts the hand-typed line too, because it is a real item
-  if (stub.summary.textContent.indexOf('2 פריטים ברשימה') === -1) {
-    return 'the summary reads "' + stub.summary.textContent + '"';
-  }
-
-  // a tap writes the field and repaints from it
-  F.toggle('פול');
-  if (stub.items.value !== 'עדשים ירוקות\nמלח מהמדף של סבתא\nפול') {
-    return 'the tap wrote ' + JSON.stringify(stub.items.value);
-  }
-  if (stub.grid.innerHTML.indexOf('is-on" type="button" data-pantryitem="פול"') === -1) {
-    return 'the tapped product did not tick';
-  }
-  F.toggle('פול');
-  if (stub.items.value !== 'עדשים ירוקות\nמלח מהמדף של סבתא') return 'the second tap did not remove the line';
-  if (stub.grid.innerHTML.indexOf('is-on" type="button" data-pantryitem="פול"') !== -1) {
-    return 'the untapped product is still ticked';
-  }
-
-  // switching aisle repaints; searching crosses aisles and names them
-  F.setCat('spices');
-  if (stub.grid.innerHTML.indexOf('data-pantryitem="כורכום"') === -1) return 'the aisle did not switch';
-  if (stub.grid.innerHTML.indexOf('data-pantryitem="פול"') !== -1) return 'the previous aisle is still drawn';
-  if (stub.summary.textContent.indexOf('תבלינים') !== 0) return 'the summary does not name the open aisle';
-
-  F.setQuery('סבון');
-  if (stub.grid.innerHTML.indexOf('pn-aisle') === -1) return 'a search hit does not name its aisle';
-  if (stub.grid.innerHTML.indexOf('data-pantryitem="סבון גוף"') === -1) return 'the search drew no hits';
-  if (stub.cats.some(c => c.classList.contains('is-active'))) {
-    return 'an aisle still reads as open while a search is running';
-  }
-
-  // an unknown product does not blank the panel — it points at the textarea
-  F.setQuery('טרקטור');
-  if (stub.grid.innerHTML.indexOf('pn-empty') === -1) return 'a fruitless search rendered nothing at all';
-  if (stub.grid.innerHTML.indexOf('להקליד אותו ידנית') === -1) return 'the empty state does not offer the way out';
-
-  // and an aisle tap clears the query rather than filtering inside it
-  F.setCat('drinks');
-  if (F.query !== '') return 'the query survived an aisle tap';
-  if (stub.search.value !== '') return 'the search box still shows the old query';
-  return true;
-});
-
-check('the catalog is wired into the list form, and only the list form', () => {
-  const list = bodyOf(js, 'list: function ()');
-  if (!list || list.indexOf('pantryField()') === -1) return 'the list form does not carry the catalog';
-  ['event: function ()', 'task: function ()', 'note: function ()', 'client: function ()'].forEach(sig => {
-    if (bodyOf(js, sig).indexOf('pantryField()') !== -1) {
-      throw new Error(sig.split(':')[0] + ' was given a grocery catalog');
-    }
-  });
-
-  // it opens ticked: load() runs AFTER fillForm(), or an edited list opens blank
-  const open = bodyOf(js, 'function openForm(type, prefill, edit)');
-  if (open.indexOf('FormPantry.load()') === -1) return 'openForm() never loads the catalog';
-  if (open.indexOf('fillForm(type, edit)') > open.indexOf('FormPantry.load()')) {
-    return 'the catalog is loaded before the record is filled in';
-  }
-
-  // both controls are matched by the one delegate, ahead of tap-to-edit
-  const delegate = bodyOf(js, 'function onClick(e)');
-  ['[data-pantrycat]', '[data-pantryitem]'].forEach(sel => {
-    if (delegate.indexOf(sel) === -1) throw new Error(sel + ' is not matched by the delegate');
-  });
-  if (delegate.indexOf('FormPantry.setCat') === -1) return 'an aisle tap is never handled';
-  if (delegate.indexOf('FormPantry.toggle') === -1) return 'a product tap is never handled';
-
-  // the search box is the app's only keystroke listener, and it repaints the
-  // ticks when the textarea itself is edited
-  const input = bodyOf(js, 'function onInput(e)');
-  if (input.indexOf('FormPantry.setQuery') === -1) return 'the search box is not wired';
-  if (input.indexOf('FormPantry.paint') === -1) return 'typing into the items field does not re-tick the chips';
-  if (js.indexOf("addEventListener('input', onInput)") === -1) return 'the input delegate is never registered';
-  return true;
-});
-
-check('the search box never reaches the record', () => {
-  const { P } = loadPantry('');
-  const markup = P.pantryField();
-  // submitForm() sweeps #formFields for [name]; anything the catalog owns that
-  // carried one would land on the list as a phantom field
-  if (/data-pantrysearch[^>]*\sname=/.test(markup) || /\sname="[^"]*"[^>]*data-pantrysearch/.test(markup)) {
-    return 'the search box carries a name and would be saved onto the list';
-  }
-  if (markup.indexOf('name=') !== -1) return 'the catalog panel declares a form field of its own';
-  if (markup.indexOf('type="search"') === -1) return 'the search box is not a search input';
-  if (markup.indexOf('aria-label="חיפוש בקטלוג המצרכים"') === -1) return 'the search box is unlabelled';
-  // the list still saves through the one parser it always did
-  if (bodyOf(js, 'function submitForm(e)').indexOf("parseChecklist(v.items, 'li')") === -1) {
-    return 'the save path no longer goes through parseChecklist()';
-  }
-  return true;
-});
-
 check('the catalog panel is styled to the touch floor, with tokens only', () => {
-  ['.pn-field', '.pn-cats', '.pn-cat', '.pn-items', '.pn-chip', '.pn-empty', '.pn-summary']
+  ['.pn-hint', '.pn-search', '.pn-cats', '.pn-cat', '.pn-items', '.pn-chip', '.pn-empty', '.pn-summary']
     .forEach(sel => {
       if (css.indexOf(sel) === -1) throw new Error('no ' + sel + ' rule');
     });
@@ -8017,19 +7972,19 @@ check('the catalog panel is styled to the touch floor, with tokens only', () => 
     }
   });
 
-  // 161 products must not turn the sheet into a mile of form
+  // 161 products must not turn the sheet into a mile of scroll
   const grid = rules.filter(x => x.sel === '.pn-items')[0];
   if (grid.body.indexOf('max-height') === -1) return 'the chip grid is unbounded';
   if (grid.body.indexOf('overflow-y:auto') === -1) return 'the chip grid does not scroll on its own';
 
   // every colour is a token, so the light theme inherits the panel for free
-  const block = css.slice(css.indexOf('.pn-field{'), css.indexOf('.pn-summary{'));
+  const block = css.slice(css.indexOf('.pn-hint{'), css.indexOf('.pn-summary{'));
   if (/#[0-9a-f]{3,8}\b/i.test(block)) return 'the catalog declares a raw hex';
   if (/rgba?\(/i.test(block)) return 'the catalog declares a raw rgb/rgba';
   return true;
 });
 
-check('the shell was bumped to v21 for Sprint 15', () => {
+check('the shell was bumped past v21 for Sprint 15', () => {
   const m = sw.match(/CACHE_VERSION\s*=\s*'(v(\d+))'/);
   if (!m) return 'no CACHE_VERSION';
   if (parseInt(m[2], 10) < 21) return 'the cache is still ' + m[1] + ' — returning phones keep the old shell';
@@ -8040,8 +7995,346 @@ check('the shell was bumped to v21 for Sprint 15', () => {
 
 check('PROJECT_PLAN documents Sprint 15', () => {
   const required = [
-    'Sprint 15', 'קטלוג המצרכים', 'PANTRY', 'pantryToggle', 'pantryNorm',
+    'Sprint 15', 'קטלוג המצרכים', 'PANTRY', 'pantrySearch', 'pantryNorm',
     'data-pantryitem', 'data-pantrycat', 'pn-chip', 'v21'
+  ];
+  const missing = required.filter(s => plan.indexOf(s) === -1);
+  return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;
+});
+
+/* ==========================================================================
+   §48 — SPRINT 16
+   רשימת קניות as a module of its own: one door on the main screen, two tabs
+   over ONE record, and a list that finally survives the sheet being closed.
+   ========================================================================== */
+
+const SHOP_TAB_LABELS = ['בחירת מוצרים מתוך הרשימה', 'רשימת הקניות שלי'];
+
+check('the shopping list is one tap from the main screen, not three modals deep', () => {
+  const today = (html.match(/<section class="view is-active" id="view-today"[\s\S]*?<\/section>/) || [''])[0];
+  if (!today) return 'no #view-today section';
+  if (today.indexOf('id="shopCta"') === -1) return 'the main screen carries no shopping door';
+  if (today.indexOf('data-action="shopping"') === -1) return 'the door is not wired to an action';
+  if (today.indexOf('id="shopCtaMeta"') === -1) return 'the door carries no live count';
+  if (today.indexOf('aria-controls="shopSheet"') === -1) return 'the door names no panel';
+
+  // ...and a second one where somebody who came looking for "the list" looks
+  const listsPane = (html.match(/<div data-workpane="lists"[\s\S]*?\n      <\/div>/) || [''])[0];
+  if (listsPane.indexOf('data-action="shopping"') === -1) {
+    return 'the רשימות workspace has no door into the module';
+  }
+
+  // the delegate opens it, and the catalog is gone from every form
+  const delegate = bodyOf(js, 'function onClick(e)');
+  if (delegate.indexOf("el.dataset.action === 'shopping'") === -1) return 'the door is never handled';
+  if (delegate.indexOf('Shop.open()') === -1) return 'the door opens nothing';
+  ['list: function ()', 'event: function ()', 'task: function ()', 'note: function ()', 'client: function ()']
+    .forEach(sig => {
+      const body = bodyOf(js, sig);
+      if (/pantryField\(|pn-field/.test(body)) {
+        throw new Error(sig.split(':')[0] + ' still carries the catalog inside a form');
+      }
+    });
+  if (js.indexOf('FormPantry') !== -1) return 'the form-bound catalog was left behind as dead code';
+  return true;
+});
+
+check('the module ships the two mandated tabs, in the mandate’s own words', () => {
+  const sheet = (html.match(/<div class="sheet shop-sheet" id="shopSheet"[\s\S]*?\n<\/div>/) || [''])[0];
+  if (!sheet) return 'no #shopSheet';
+  if (sheet.indexOf('role="dialog"') === -1 || sheet.indexOf('aria-modal="true"') === -1) {
+    return 'the module is not a dialog';
+  }
+  if (sheet.indexOf('data-action="close-sheet"') === -1) return 'the module cannot be closed';
+
+  SHOP_TAB_LABELS.forEach(l => {
+    if (sheet.indexOf(l) === -1) throw new Error('missing tab label: ' + l);
+  });
+  ['data-shoptab="catalog"', 'data-shoptab="mine"',
+    'data-shoppane="catalog"', 'data-shoppane="mine"'].forEach(d => {
+      if (sheet.indexOf(d) === -1) throw new Error('missing ' + d);
+    });
+
+  // tab 1 is the whole catalog: search across every shelf, then the shelves
+  ['id="shopSearch"', 'data-shopsearch="1"', 'id="shopCats"', 'id="shopItems"',
+    'aria-label="חיפוש בקטלוג המצרכים"'].forEach(d => {
+      if (sheet.indexOf(d) === -1) throw new Error('tab 1 is missing ' + d);
+    });
+  // tab 2 is the list, the manual-add field and the two clears
+  ['id="shopList"', 'id="shopNew"', 'data-shopadd="1"',
+    'data-shopclear="done"', 'data-shopclear="all"'].forEach(d => {
+      if (sheet.indexOf(d) === -1) throw new Error('tab 2 is missing ' + d);
+    });
+
+  // nothing inside the module carries a name= — submitForm() sweeps by name and
+  // a stray one would land on whatever record happens to be open in the form
+  if (/<(input|select|textarea)[^>]*\sname=/.test(sheet)) {
+    return 'a control in the module declares a form field name';
+  }
+  return true;
+});
+
+check('a tap in tab 1 writes the record, so tab 2 is already right', () => {
+  const { L, Store, S, stub } = loadShop();
+
+  // nothing exists until a product does — opening the module to look must not
+  // leave an empty רשימת קניות behind in רשימות
+  if (L.shopList()) return 'the module created a list just by being opened';
+
+  S.toggle('טחינה');
+  const rec = Store.find('lists', L.SHOP_LIST_ID);
+  if (!rec) return 'the first product did not create the record';
+  if (rec.title !== L.SHOP_TITLE) return 'the record is titled ' + rec.title;
+  if (rec.items.length !== 1 || rec.items[0].title !== 'טחינה') return 'the product never reached the record';
+
+  // tab 1 repainted from the record — the module always opens on the first aisle
+  if (stub.el.shopItems.innerHTML.indexOf('data-pantryitem="עדשים כתומות"') === -1) {
+    return 'the opening aisle was not drawn';
+  }
+  S.setCat('oils');
+  if (stub.el.shopItems.innerHTML.indexOf('pn-chip is-on" type="button" data-pantryitem="טחינה"') === -1) {
+    return 'the chosen product is not ticked in the catalog';
+  }
+  // ...and tab 2 was painted from the same items[], with no save in between
+  if (stub.el.shopList.innerHTML.indexOf('data-shopcheck=') === -1) return 'tab 2 drew no row';
+  if (stub.el.shopList.innerHTML.indexOf('>טחינה<') === -1) return 'tab 2 does not list the product';
+  if (stub.el.shopCountMine.textContent !== '1') return 'the tab counter reads ' + stub.el.shopCountMine.textContent;
+  if (stub.el.shopCountCatalog.textContent !== String(L.PANTRY_TOTAL)) {
+    return 'the catalog counter does not name the whole catalog';
+  }
+
+  // a second tap takes it back out of both
+  S.toggle('טחינה');
+  if (Store.find('lists', L.SHOP_LIST_ID).items.length !== 0) return 'the second tap did not remove the row';
+  if (stub.el.shopItems.innerHTML.indexOf('pn-chip is-on') !== -1) return 'the chip is still ticked';
+
+  // and an aisle tap clears the query rather than filtering inside it
+  S.setQuery('סבון');
+  if (stub.el.shopItems.innerHTML.indexOf('pn-aisle') === -1) return 'a search hit does not name its aisle';
+  if (stub.cats.some(c => c.classList.contains('is-active'))) {
+    return 'an aisle still reads as open while a search is running';
+  }
+  S.setCat('drinks');
+  if (S.query !== '' || stub.el.shopSearch.value !== '') return 'the query survived an aisle tap';
+  return true;
+});
+
+check('a ✓ strikes the row through and an amount sticks to it', () => {
+  const { L, Store, S, stub } = loadShop();
+  S.toggle('קמח לבן');
+  S.setTab('mine');
+
+  const id = Store.find('lists', L.SHOP_LIST_ID).items[0].id;
+
+  S.check(id);
+  if (!Store.find('lists', L.SHOP_LIST_ID).items[0].done) return 'the ✓ did not stick to the record';
+  if (stub.el.shopList.innerHTML.indexOf('shop-row is-done') === -1) return 'the struck-through row is not marked';
+  if (stub.el.shopMineSummary.textContent.indexOf('1 בעגלה') === -1) {
+    return 'the summary reads "' + stub.el.shopMineSummary.textContent + '"';
+  }
+  // ticking changes no MEMBERSHIP, so the row under the finger is swapped in
+  // place; only a row that is not on screen falls back to a repaint
+  const body = bodyOf(js, 'check: function (id) {');
+  if (body.indexOf('[data-shoprow="') === -1) return 'a tick rebuilds the container instead of the row';
+  if (body.indexOf('node.outerHTML = shopRow(row)') === -1) return 'the row is not swapped in place';
+  if (body.indexOf('else this.paint()') === -1) return 'an off-screen row has no repaint fallback';
+
+  // the amount is a real per-row field, and writing it must NOT repaint the
+  // list: the box being typed into lives inside the container a repaint rebuilds
+  const before = stub.el.shopList.innerHTML;
+  S.qty(id, ' 2  ק״ג ');
+  if (stub.el.shopList.innerHTML !== before) return 'typing an amount rebuilt the list under the caret';
+  if (Store.find('lists', L.SHOP_LIST_ID).items[0].qty !== '2 ק״ג') {
+    return 'the amount did not reach the record';
+  }
+  // ...and it is on the row the next time the list IS painted
+  S.paint();
+  if (stub.el.shopList.innerHTML.indexOf('value="2 ק״ג"') === -1) return 'the amount is not on the repainted row';
+
+  // clearing the box drops the key rather than storing an empty string
+  S.qty(id, '   ');
+  if ('qty' in Store.find('lists', L.SHOP_LIST_ID).items[0]) return 'a cleared amount was stored as ""';
+
+  // a ✓ survives a reload, which is the whole reason the record replaced the textarea
+  const back = Store.data.lists.filter(l => l.id === L.SHOP_LIST_ID)[0];
+  if (!back.items[0].done) return 'the tick never reached the saved store';
+  return true;
+});
+
+check('the list groups by shelf, and a hand-typed product keeps its own band', () => {
+  const { L, Store, S, stub } = loadShop();
+  S.setTab('mine');
+
+  // one from the last aisle, one from the first, one the catalog never heard of
+  S.toggle('שמפו');
+  S.toggle('חומוס');
+  stub.el.shopNew.value = '  לחם משק  ';
+  S.add();
+
+  const items = Store.find('lists', L.SHOP_LIST_ID).items;
+  if (items.length !== 3) return 'the list holds ' + items.length + ' rows';
+  if (items[2].title !== 'לחם משק') return 'the typed product was not trimmed: ' + JSON.stringify(items[2].title);
+  if (stub.el.shopNew.value !== '') return 'the add field kept its text after adding';
+
+  // PANTRY order, not tap order — that is the order the aisles are walked
+  const groups = L.shopGroups(items).map(g => g.label);
+  if (groups.join('|') !== 'קטניות|היגיינה וטיפוח|' + L.SHOP_OTHER) {
+    return 'the bands came out as ' + groups.join('|');
+  }
+  if (stub.el.shopList.innerHTML.indexOf('shop-band') === -1) return 'the list is not banded at all';
+  if (stub.el.shopList.innerHTML.indexOf(L.SHOP_OTHER) === -1) {
+    return 'the hand-typed product has no band of its own';
+  }
+
+  // the same product twice is one row, from either door
+  S.toggle('חומוס');
+  S.toggle('חומוס');
+  stub.el.shopNew.value = 'חומוס';
+  S.add();
+  const dupes = Store.find('lists', L.SHOP_LIST_ID).items.filter(i => i.title === 'חומוס').length;
+  return dupes === 1 ? true : 'חומוס is in the list ' + dupes + ' times';
+});
+
+check('both bulk clears ask first — removing one row deliberately does not', () => {
+  const { L, Store, S, APP, stub } = loadShop();
+  const C = APP.ui.Confirm;
+  S.setTab('mine');
+  ['מלח', 'קפה', 'שמפו'].forEach(t => S.toggle(t));
+
+  const ids = Store.find('lists', L.SHOP_LIST_ID).items.map(i => i.id);
+  S.check(ids[0]);
+
+  // one row is one tap to put back, from either tab — a question in front of it
+  // would make the module unusable at the pace a shopping list is edited at
+  S.drop(ids[2]);
+  if (C.isOpen()) return 'removing one row asked a question';
+  if (Store.find('lists', L.SHOP_LIST_ID).items.length !== 2) return 'the single removal did not land';
+
+  // "ניקוי מה שנאסף" destroys a list somebody built, so it asks
+  S.clear('done');
+  if (!C.isOpen()) return 'clearing the collected items never asked';
+  C.dismiss();
+  if (Store.find('lists', L.SHOP_LIST_ID).items.length !== 2) return 'ביטול cleared the list anyway';
+
+  S.clear('done');
+  C.accept();
+  const left = Store.find('lists', L.SHOP_LIST_ID).items;
+  if (left.length !== 1 || left[0].done) return 'the confirmed clear removed the wrong rows';
+
+  // ...and so does "ניקוי הרשימה כולה"
+  S.clear('all');
+  if (!C.isOpen()) return 'emptying the whole list never asked';
+  C.accept();
+  if (Store.find('lists', L.SHOP_LIST_ID).items.length !== 0) return 'the confirmed clear left rows behind';
+
+  // a clear with nothing to clear is a message, not a question
+  S.clear('all');
+  if (C.isOpen()) return 'an empty list still asked to be emptied';
+  if (stub.el.shopList.innerHTML.indexOf('empty') === -1) return 'the emptied list has no empty state';
+  return true;
+});
+
+check('the open tab is remembered like every other sub-tab in the app', () => {
+  const { Store, S, L } = loadShop();
+  if (L.SHOP_TABS.join() !== 'catalog,mine') return 'the tab vocabulary is ' + L.SHOP_TABS.join();
+  if (S.tab() !== 'catalog') return 'the module does not open on the catalog';
+
+  S.setTab('mine');
+  if (Store.data.prefs.shopTab !== 'mine') return 'the tab was not written to prefs';
+  if (S.tab() !== 'mine') return 'the module did not switch';
+
+  S.setTab('גיבריש');
+  if (S.tab() !== 'mine') return 'an unknown tab was accepted';
+
+  // and a store written before the module existed opens on the catalog
+  Store.data.prefs.shopTab = 'nonsense';
+  Store.load();
+  return Store.data.prefs.shopTab === 'catalog' ? true : 'load() did not normalise the tab';
+});
+
+check('the module goes down with every other layer, and holds the scrim up', () => {
+  const close = bodyOf(js, 'function closeSheets()');
+  if (close.indexOf("$('#shopSheet')") === -1) return 'closeSheets() leaves the module open';
+  const any = bodyOf(js, 'function anySheetOpen()');
+  if (any.indexOf('Shop.isOpen()') === -1) return 'the module does not hold the backdrop up';
+  // it takes the layers it opened over down with it, rather than stacking on them
+  const open = bodyOf(js, 'open: function () {\n      if (!$(\'#shopSheet\'))');
+  ['#typeSheet', '#formSheet', '#openSheet', 'Detail.close()'].forEach(s => {
+    if (open.indexOf(s) === -1) throw new Error('opening the module leaves ' + s + ' layered behind it');
+  });
+  return true;
+});
+
+check('the shopping list is ONE record, with an id that survives the cloud', () => {
+  const { L, Store, S } = loadShop();
+  if (L.SHOP_LIST_ID !== 'shop-main') return 'the id is ' + L.SHOP_LIST_ID + ' — a generated one would fork per device';
+
+  S.toggle('דבש');
+  const id = Store.find('lists', L.SHOP_LIST_ID).items[0].id;
+  S.check(id);
+  S.qty(id, '2');
+
+  // opening it again finds the same record rather than making a second one
+  L.shopEnsure();
+  const mine = Store.data.lists.filter(l => l.id === L.SHOP_LIST_ID);
+  if (mine.length !== 1) return 'there are ' + mine.length + ' records claiming to be the shopping list';
+
+  // and the whole row survives the D1 serialiser, ticks and amounts included —
+  // items_json already carried the array, which is why no migration was needed
+  const Sync = loadApp().sync;
+  const row = Sync.toRow('lists', mine[0]);
+  const back = Sync.fromRow('lists', row);
+  if (back.id !== L.SHOP_LIST_ID) return 'the id did not round-trip';
+  if (back.items.length !== 1) return 'the items did not round-trip';
+  if (!back.items[0].done) return 'the ✓ did not survive the cloud';
+  if (back.items[0].qty !== '2') return 'the amount did not survive the cloud: ' + JSON.stringify(back.items[0].qty);
+  if (back.title !== L.SHOP_TITLE) return 'the title did not round-trip';
+  return true;
+});
+
+check('the module is styled to the touch floor, with tokens only', () => {
+  ['.shop-cta', '.shop-sheet', '.shop-pane', '.shop-add', '.shop-actions', '.shop-list',
+    '.shop-band', '.shop-row', '.shop-check', '.shop-name', '.shop-qty', '.shop-del', '.cl-qty']
+    .forEach(sel => {
+      if (css.indexOf(sel) === -1) throw new Error('no ' + sel + ' rule');
+    });
+
+  const rules = cssRules(css);
+  ['.shop-cta', '.shop-check', '.shop-del'].forEach(sel => {
+    const r = rules.filter(x => x.sel === sel)[0];
+    if (!r) throw new Error(sel + ' has no rule of its own');
+    if (r.body.replace(/\s/g, '').indexOf('min-height:var(--tap)') === -1) {
+      throw new Error(sel + ' does not clear the 44px floor');
+    }
+  });
+
+  // an inactive tab must LEAVE the flow, or both panes stack on top of each other
+  const pane = rules.filter(x => x.sel === '.shop-pane[hidden]')[0];
+  if (!pane || !/display:\s*none/.test(pane.body)) return 'a hidden tab pane is still in the flow';
+
+  // "קו חוצה" is the mandate's own word for a collected item
+  const struck = rules.filter(x => x.sel === '.shop-row.is-done .shop-name')[0];
+  if (!struck || struck.body.indexOf('line-through') === -1) return 'a collected item is not struck through';
+
+  const block = css.slice(css.indexOf('.shop-cta{'), css.indexOf('.cl-item.is-done .cl-qty{'));
+  if (!block) return 'the module has no style block of its own';
+  if (/#[0-9a-f]{3,8}\b/i.test(block)) return 'the module declares a raw hex';
+  if (/rgba?\(/i.test(block)) return 'the module declares a raw rgb/rgba';
+  return true;
+});
+
+check('the shell was bumped to v22 for Sprint 16', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'(v(\d+))'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[2], 10) < 22) return 'the cache is still ' + m[1] + ' — returning phones keep the old shell';
+  if (js.indexOf("APP_VERSION = '" + m[1] + "'") === -1) return 'app.js still reports a different version';
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 16', () => {
+  const required = [
+    'Sprint 16', 'רשימת קניות', 'shop-main', 'shopToggle', 'shopGroups', 'shopSetQty',
+    'data-shoptab', 'data-shopqty', 'shop-cta', 'קו חוצה', 'v22'
   ];
   const missing = required.filter(s => plan.indexOf(s) === -1);
   return missing.length ? 'missing spec sections: ' + missing.join(' | ') : true;

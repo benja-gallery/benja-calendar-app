@@ -26,7 +26,7 @@
 <!-- ?v= MUST match CACHE_VERSION in sw.js. GitHub Pages serves these with
      max-age=600 and no content hash, so without the query an installed phone
      can keep serving the previous build out of its own HTTP cache. -->
-<link rel="stylesheet" href="styles.css?v=v21">
+<link rel="stylesheet" href="styles.css?v=v22">
 </head>
 <body>
 
@@ -122,6 +122,24 @@
         <p class="summary-line" id="summaryLine"></p>
         <div class="summary-chips" id="summaryChips"></div>
       </div>
+
+      <!-- 1b. רשימת קניות — the module's front door (Sprint 16 · field mandate)
+           The catalog used to live at the bottom of "רשימה חדשה": ＋ → רשימה →
+           past four fields. That is three modals deep for the one list in this
+           app that is opened standing in a supermarket. It is a module now, and
+           this is the whole distance to it — one tap, from the screen the app
+           opens on. Deliberately ABOVE the attention strip and below the
+           summary: it is a standing destination, not an alert. -->
+      <button class="shop-cta card" id="shopCta" data-action="shopping" type="button"
+              aria-haspopup="dialog" aria-controls="shopSheet">
+        <span class="shop-cta-ico" aria-hidden="true">🛒</span>
+        <span class="shop-cta-body">
+          <b class="shop-cta-title">רשימת קניות</b>
+          <small class="shop-cta-meta" id="shopCtaMeta"></small>
+        </span>
+        <!-- RTL: the chevron points the way the sheet arrives from -->
+        <span class="shop-cta-go" aria-hidden="true">‹</span>
+      </button>
 
       <!-- 4. Attention cards -->
       <div class="attention" id="attentionCards"></div>
@@ -273,9 +291,15 @@
             <span class="block-meta" id="listsMeta"></span>
           </div>
           <p class="trash-hint">
-            רשימות ציוד לסטודיו, רשימות קניות ותתי־משימות לפרויקט. כל רשימה יכולה
-            להיות ללא תאריך, ואפשר לקשר אותה ישירות לכרטיס לקוח קיים.
+            רשימות ציוד לסטודיו, רשימות קניות לאירוע וצ׳ק־ליסטים לפרויקט. כל רשימה
+            יכולה להיות ללא תאריך, ואפשר לקשר אותה ישירות לכרטיס לקוח קיים.
+            רשימת הקניות השבועית קיבלה מודול משלה — היא מופיעה כאן כרשימה רגילה,
+            אבל נערכת משם.
           </p>
+          <!-- the second door into the module. The first is on היום שלי; this
+               one is where somebody who came looking for "the list" will look. -->
+          <button class="btn btn-ghost shop-door" data-action="shopping" type="button"
+                  aria-haspopup="dialog" aria-controls="shopSheet">🛒 פתיחת רשימת הקניות</button>
           <div class="card" id="listsList"></div>
         </div>
       </div>
@@ -411,6 +435,68 @@
   </div>
   <p class="block-meta open-meta" id="openMeta"></p>
   <div class="todo card open-list" id="openList"></div>
+  <div class="sheet-tail"></div>
+</div>
+
+<!-- ============ רשימת קניות — THE DEDICATED MODULE (Sprint 16) ============
+     Two tabs over ONE record. Tab 1 is the 161-product catalog that used to
+     hang off the bottom of "רשימה חדשה"; tab 2 is the list it writes into,
+     grouped by shelf, each row carrying its own ✓ and its own כמות. A tap in tab 1
+     writes the record, not a draft — which is why tab 2 needs no "save" and why
+     closing the sheet loses nothing. -->
+<div class="sheet shop-sheet" id="shopSheet" role="dialog" aria-modal="true"
+     aria-labelledby="shopSheetTitle" hidden>
+  <div class="sheet-grab" aria-hidden="true"></div>
+  <div class="sheet-head">
+    <h2 id="shopSheetTitle">🛒 רשימת קניות</h2>
+    <button class="sheet-x" data-action="close-sheet" type="button" aria-label="סגירה">✕</button>
+  </div>
+
+  <div class="segmented shop-tabs" role="tablist" aria-label="מצב רשימת הקניות">
+    <button class="seg is-active" role="tab" aria-selected="true" data-shoptab="catalog"
+            aria-controls="shopPaneCatalog" type="button">בחירת מוצרים מתוך הרשימה <b class="seg-count" id="shopCountCatalog">0</b></button>
+    <button class="seg" role="tab" aria-selected="false" data-shoptab="mine"
+            aria-controls="shopPaneMine" type="button">רשימת הקניות שלי <b class="seg-count" id="shopCountMine">0</b></button>
+  </div>
+
+  <!-- ---- TAB 1 · בחירת מוצרים מתוך הרשימה ---- -->
+  <div class="shop-pane" id="shopPaneCatalog" role="tabpanel"
+       aria-label="בחירת מוצרים מתוך הרשימה" data-shoppane="catalog">
+    <p class="pn-hint">
+      הקשה על מוצר מוסיפה אותו לרשימת הקניות שלך, הקשה נוספת מסירה אותו.
+      החיפוש עובר על כל המדפים יחד, והבחירה נשמרת מיד.
+    </p>
+    <input class="input pn-search" id="shopSearch" type="search" autocomplete="off"
+           data-shopsearch="1" placeholder="חיפוש מוצר…" aria-label="חיפוש בקטלוג המצרכים">
+    <div class="pn-cats" id="shopCats" role="group" aria-label="מדפי הקטלוג"></div>
+    <div class="pn-items" id="shopItems" role="group" aria-label="מוצרים בקטלוג"></div>
+    <p class="pn-summary block-meta" id="shopSummary"></p>
+  </div>
+
+  <!-- ---- TAB 2 · רשימת הקניות שלי ---- -->
+  <div class="shop-pane" id="shopPaneMine" role="tabpanel"
+       aria-label="רשימת הקניות שלי" data-shoppane="mine" hidden>
+    <p class="pn-hint">
+      הקשה על הריבוע מסמנת שהמוצר כבר בעגלה (קו חוצה). בשדה שלצדו אפשר לרשום כמות —
+      "2", "500 גרם", "×3".
+    </p>
+
+    <div class="shop-add">
+      <input class="input shop-new" id="shopNew" type="text" autocomplete="off"
+             data-shopnew="1" placeholder="הוספת מוצר משלי…"
+             aria-label="הוספת מוצר שאינו בקטלוג">
+      <button class="btn btn-gold shop-add-btn" data-shopadd="1" type="button">הוספה</button>
+    </div>
+
+    <div class="shop-actions">
+      <button class="btn btn-ghost" data-shopclear="done" type="button">ניקוי מה שנאסף</button>
+      <button class="btn btn-ghost" data-shopclear="all"  type="button">ניקוי הרשימה כולה</button>
+    </div>
+
+    <div class="shop-list card" id="shopList"></div>
+    <p class="pn-summary block-meta" id="shopMineSummary"></p>
+  </div>
+
   <div class="sheet-tail"></div>
 </div>
 
@@ -675,6 +761,6 @@
   <button class="toast-undo" id="toastUndo" data-undo="1" type="button" hidden>אחזר</button>
 </div>
 
-<script src="app.js?v=v21"></script>
+<script src="app.js?v=v22"></script>
 </body>
 </html>

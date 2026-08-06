@@ -2208,17 +2208,16 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
 .al-summary{ margin-top:6px; }
 
 /* ==========================================================================
-   Sprint 15 — קטלוג המצרכים, the pantry catalog inside the list form
+   Sprint 15 — קטלוג המצרכים, the pantry catalog
+   (Sprint 16 · it moved from the list form into the רשימת קניות module below;
+    the panel itself did not change, only the surface it is mounted on)
 
    A hundred and sixty products cannot be a wall: the aisle strip scrolls
    sideways, the chip grid scrolls on its own inside a bounded panel, and the
    sheet around them keeps scrolling exactly as it did. A chosen product is
    gold-filled so the answer to "מה כבר ברשימה" is readable at a glance,
-   without reading the textarea above.
+   without opening the other tab.
    ========================================================================== */
-
-/* the catalog is a block of its own, not a fifth control in the field stack */
-.pn-field{ margin-top:18px; padding-top:16px; border-top:1px solid var(--line-soft); }
 
 .pn-hint{ margin:0 0 10px; color:var(--faint); font-size:12px; line-height:1.6; }
 
@@ -2286,6 +2285,122 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
 .pn-empty{ grid-column:1 / -1; margin:0; padding:8px 4px; color:var(--faint); font-size:12.5px; line-height:1.6; }
 
 .pn-summary{ margin:8px 4px 0; }
+
+/* ==========================================================================
+   Sprint 16 — רשימת קניות, the dedicated module
+
+   Three surfaces, one record:
+
+     .shop-cta    the front door on היום שלי. A card, not a pill: it is a
+                  standing destination and it carries a live count, so it reads
+                  as a place rather than as a button.
+     .shop-sheet  the module. Taller than an ordinary sheet (a shopping list is
+                  the one surface here you scroll for a while) and its two panes
+                  are exclusive, so only one tab is ever in the flow.
+     .shop-row    one line of the list: tick · name · amount · remove. The
+                  amount box is deliberately narrow and deliberately an .input —
+                  it inherits the 16px iOS zoom lock like every other field.
+   ========================================================================== */
+
+/* ---------- the door on My Day ---------- */
+.shop-cta{
+  display:flex; align-items:center; gap:14px; width:100%;
+  min-height:var(--tap); padding:14px 16px; margin-bottom:14px;
+  border:1px solid var(--gold-edge);
+  text-align:start; cursor:pointer;
+  transition:background .18s, border-color .18s;
+}
+.shop-cta:hover{ background:var(--gold-soft); }
+.shop-cta-ico{ flex:0 0 auto; font-size:22px; line-height:1; }
+.shop-cta-body{ flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:3px; }
+.shop-cta-title{ font-size:15.5px; font-weight:800; color:var(--gold); }
+.shop-cta-meta{ font-size:12px; font-weight:600; color:var(--faint); line-height:1.5; }
+.shop-cta-go{ flex:0 0 auto; font-size:18px; color:var(--faint); }
+
+/* the second door, inside the רשימות workspace */
+.shop-door{ display:block; width:100%; flex:0 0 auto; margin-bottom:12px; }
+
+/* ---------- the module ---------- */
+.shop-sheet{ max-height:92vh; }
+.shop-tabs{ margin-top:0; }
+.shop-tabs .seg{ font-size:13px; line-height:1.35; }
+
+/* exclusive panes: a hidden tab must leave the flow, not merely go invisible */
+.shop-pane{ display:block; margin-top:14px; }
+.shop-pane[hidden]{ display:none; }
+
+/* ---------- tab 2: adding a product the catalog never heard of ---------- */
+.shop-add{ display:flex; gap:8px; margin-bottom:10px; }
+.shop-new{ flex:1 1 auto; min-width:0; }
+.shop-add-btn{ flex:0 0 auto; width:auto; padding:0 20px; }
+
+.shop-actions{ display:flex; gap:8px; margin-bottom:12px; }
+.shop-actions .btn{ font-size:13px; }
+
+/* ---------- tab 2: the list ---------- */
+.shop-list{ padding:6px; }
+
+.shop-band{
+  display:flex; align-items:center; gap:8px;
+  padding:10px 8px 6px;
+  font-size:12px; font-weight:800; color:var(--gold);
+  letter-spacing:.02em;
+}
+.shop-band-n{
+  font-size:11px; font-weight:800; color:var(--faint);
+  font-variant-numeric:tabular-nums;
+}
+
+.shop-row{
+  display:flex; align-items:center; gap:8px;
+  padding:4px 4px;
+  border-radius:var(--r-sm);
+  transition:background .16s;
+}
+.shop-row:hover{ background:var(--line-soft); }
+
+.shop-check{
+  flex:0 0 auto;
+  display:grid; place-items:center;
+  min-height:var(--tap); min-width:var(--tap);
+  background:transparent; border:0;
+  cursor:pointer;
+}
+.shop-row.is-done .cl-box{ background:var(--personal); border-color:var(--personal); }
+
+.shop-name{
+  flex:1 1 auto; min-width:0;
+  font-size:14px; font-weight:600; line-height:1.45; color:var(--ink);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+/* קו חוצה — the mandate's own word for "it is already in the cart" */
+.shop-row.is-done .shop-name{ color:var(--faint); text-decoration:line-through; }
+
+.shop-qty{
+  flex:0 0 auto; width:76px;
+  padding:8px 10px;
+  text-align:center;
+}
+
+.shop-del{
+  flex:0 0 auto;
+  min-height:var(--tap); min-width:var(--tap);
+  background:transparent; border:0;
+  color:var(--faint); font-size:14px;
+  cursor:pointer;
+  transition:color .18s;
+}
+.shop-del:hover{ color:var(--danger); }
+
+/* the amount, worn by the same row inside רשימות (Sprint 16) */
+.cl-qty{
+  flex:0 0 auto; margin-inline-start:auto;
+  padding:2px 8px;
+  background:var(--gold-soft); border-radius:999px;
+  color:var(--gold); font-size:11px; font-weight:800;
+  font-variant-numeric:tabular-nums;
+}
+.cl-item.is-done .cl-qty{ color:var(--faint); background:var(--line-soft); }
 
 /* ==========================================================================
    Desktop

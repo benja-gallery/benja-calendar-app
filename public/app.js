@@ -224,7 +224,7 @@
   var THEME_DEFAULT = 'dark';
 
   /** the shell version — MUST match CACHE_VERSION in sw.js and the ?v= in index.html */
-  var APP_VERSION = 'v21';
+  var APP_VERSION = 'v22';
 
   /* --- client CRM (Sprint 4) --- */
   var CLIENT_STATUSES = ['lead', 'contacted', 'interested', 'quoted',
@@ -1006,16 +1006,35 @@
   function isClosed(status) { return CLOSED_STATUSES.indexOf(normStatus(status)) !== -1; }
 
   /** {id,title,done} rows out of whatever a store ever held (v1 kept raw strings) */
+  /** how long a written amount may get before it stops being an amount */
+  var QTY_MAX = 12;
+
+  /**
+   * A free-text amount — "2", "500 גרם", "×3". Deliberately not a number: the
+   * unit is half the information on a shopping line, and a stepper that can only
+   * count whole units would force "חלב" and "קמח" into the same shape.
+   */
+  function normQty(v) {
+    return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, QTY_MAX);
+  }
+
   function normItems(items, prefix) {
     return (Array.isArray(items) ? items : [])
       .map(function (it) {
         if (typeof it === 'string') return { id: uid(prefix), title: it.trim(), done: false };
         if (!it || typeof it !== 'object') return null;
-        return {
+        var row = {
           id: it.id || uid(prefix),
           title: String(it.title == null ? '' : it.title).trim(),
           done: !!it.done
         };
+        // Sprint 16 — a quantity belongs to the shopping module and to nothing
+        // else, so it is carried only where one was actually written: a subtask
+        // never grows a field it has no use for, and every store written before
+        // this sprint round-trips byte-identical.
+        var qty = normQty(it.qty);
+        if (qty) row.qty = qty;
+        return row;
       })
       .filter(function (it) { return it && it.title; });
   }
@@ -1662,6 +1681,10 @@
           // Sprint 12 — the quick filter of the "פתוחות" sheet, remembered
           // exactly like every other sub-tab in the app
           openFilter: 'all',
+          // Sprint 16 — which tab רשימת קניות opens on. Someone mid-shop wants
+          // "רשימת הקניות שלי"; someone planning wants the catalog. The app is
+          // not entitled to guess, so it remembers.
+          shopTab: 'catalog',
           // serverAt — when the Worker last accepted this device's push
           // subscription. '' means local-only delivery (Sprint 11).
           notify: { on: false, lead: 10, sound: true, serverAt: '' }, fired: {},
@@ -1745,6 +1768,10 @@
       // Sprint 12 — the "פתוחות" sheet's quick filter, absent in every store
       // written before the sheet existed
       if (OPEN_FILTERS.indexOf(d.prefs.openFilter) === -1) d.prefs.openFilter = 'all';
+
+      // Sprint 16 — the shopping module's tab, absent in every store written
+      // before the module existed
+      if (SHOP_TABS.indexOf(d.prefs.shopTab) === -1) d.prefs.shopTab = SHOP_TABS[0];
 
       // reminder prefs may be absent in a store written before the PWA upgrade
       if (!d.prefs.notify || typeof d.prefs.notify !== 'object') {
@@ -3252,6 +3279,10 @@
           ' aria-pressed="' + (it.done ? 'true' : 'false') + '">' +
           '<span class="cl-box">' + (it.done ? '✓' : '') + '</span>' +
           '<span class="cl-title">' + esc(it.title) + '</span>' +
+          // Sprint 16 — only the shopping module writes amounts, but the row it
+          // writes them onto is an ordinary checklist row, so רשימות shows them
+          // rather than hiding half the line behind a module
+          (it.qty ? '<span class="cl-qty">' + esc(it.qty) + '</span>' : '') +
           '</button>';
       }).join('') +
       '</div>';
@@ -4475,6 +4506,7 @@
     renderArchive();
     renderArchiveBar();
     renderOpenSheet();
+    Shop.paint();
     if (Detail.isOpen()) Detail.paint();
     if (Settings.isOpen()) Settings.paint();
     Sync.paint();
@@ -4629,6 +4661,10 @@
          they obey the same rule: derived text always, a container rebuild only
          where MEMBERSHIP moved. Both decline to paint while they are closed. */
       renderOpenSheet(sameKeys(domKeys('#openList'), openKeys()));
+      // Sprint 16 — the shopping module is a list surface too, and it obeys the
+      // same rule: while it is closed this collapses to one line of counter text
+      // on the היום שלי door, and touches nothing else
+      Shop.paint();
       if (Detail.isOpen()) Detail.paint();
       Sync.paint();
       markEntering();
@@ -5849,6 +5885,7 @@
     $('#confirmSheet').hidden = true;
     $('#trashSheet').hidden = true;
     if ($('#openSheet')) $('#openSheet').hidden = true;
+    if ($('#shopSheet')) $('#shopSheet').hidden = true;
     Detail.close();
     Settings.close();
     // a selection belongs to the bin that is open — closing it ends the mode,
@@ -5865,7 +5902,7 @@
   function anySheetOpen() {
     return !$('#typeSheet').hidden || !$('#formSheet').hidden ||
       !$('#trashSheet').hidden || openSheetOpen() || Detail.isOpen() ||
-      Drawer.isOpen() || Settings.isOpen();
+      Drawer.isOpen() || Settings.isOpen() || Shop.isOpen();
   }
 
   /** סל מחזור — opened from the header pill, painted fresh every time */
@@ -6344,9 +6381,11 @@
       return f('title', 'שם הרשימה', '<input class="input" name="title" placeholder="קניות לשבת…" required>') +
         f('date', 'תאריך (לא חובה — רשימה יכולה להיות ללא תאריך)', '<input class="input" type="date" name="date">') +
         f('clientId', 'שיוך ללקוח', clientPicker()) +
-        f('items', 'פריטים (שורה לכל פריט)', '<textarea class="textarea" name="items" placeholder="חלב&#10;לחם&#10;ביצים"></textarea>') +
-        // Sprint 15 — the same field, filled by tapping instead of by typing
-        pantryField();
+        // Sprint 16 — the 161-product catalog used to hang off the bottom of
+        // this form. It is a module of its own now (רשימת קניות, one tap from
+        // היום שלי), so what is left here is what a generic checklist actually
+        // needs: a title, a date, a client and its lines.
+        f('items', 'פריטים (שורה לכל פריט)', '<textarea class="textarea" name="items" placeholder="חלב&#10;לחם&#10;ביצים"></textarea>');
     },
     note: function () {
       return f('title', 'כותרת', '<input class="input" name="title" placeholder="רעיון / תזכורת">') +
@@ -6700,17 +6739,17 @@
      same hundred-and-sixty products, typed again every single week. The mandate
      hands that vocabulary over in ten aisles, and this is the whole of it.
 
-     Three rules keep it from becoming a second store:
+     Two rules keep it from becoming a second store:
 
-       * the textarea stays the single source of truth. A chip holds no state
-         of its own — it toggles a LINE and then reads its own tick back off
-         the field, so a product typed by hand ticks its chip, an edited list
-         opens with its ticks already on, and mergeChecklist() keeps every
-         item's progress exactly as it was.
        * an aisle is a filter, never a container. חיפוש runs across all ten at
          once, because "סבון" is a word before it is a shelf.
-       * nothing is ever auto-added. A new list opens empty — the catalog is a
+       * nothing is ever auto-added. The list opens empty — the catalog is a
          keyboard, not a template.
+
+     Sprint 16 moved the SURFACE this vocabulary is tapped on (out of the list
+     form and into the רשימת קניות module below), but not one product of the
+     vocabulary itself: everything from here to pantrySearch() is the Sprint 15
+     data, unchanged and still pure.
      ========================================================================== */
 
   var PANTRY = [
@@ -6821,70 +6860,266 @@
     return out;
   }
 
-  /* ---- the textarea, read and written as a set of lines ---- */
-
-  function pantryLines(text) {
-    return String(text == null ? '' : text).split('\n')
-      .map(function (s) { return s.trim(); })
-      .filter(Boolean);
+  /** which shelf a product came from — '' for anything typed by hand */
+  function pantryCatOf(title) {
+    var t = pantryNorm(title);
+    if (!t) return '';
+    for (var i = 0; i < PANTRY.length; i++) {
+      for (var j = 0; j < PANTRY[i].items.length; j++) {
+        if (pantryNorm(PANTRY[i].items[j]) === t) return PANTRY[i].key;
+      }
+    }
+    return '';
   }
 
-  function pantryHas(text, title) {
-    return pantryLines(text).indexOf(String(title == null ? '' : title).trim()) !== -1;
+  /* ==========================================================================
+     רשימת קניות — the list itself, as rows rather than as text (Sprint 16)
+
+     Sprint 15 kept the catalog honest by making a TEXTAREA the single source of
+     truth: a chip toggled a line and read its own tick back off the field. That
+     was the right answer while the catalog lived inside "רשימה חדשה", and it is
+     the wrong answer now that it does not. A textarea cannot hold a tick, cannot
+     hold an amount, and stops existing the moment the form closes.
+
+     So the source of truth moved down one level, to the items[] of ONE record —
+     which is what buys the three things the field mandate asks for: a ✓ that
+     survives a reload, a כמות per line, and the same list on every device the
+     account is open on, because items_json already round-trips through D1.
+
+     Everything in this block is pure: no DOM, no store, no clock beyond uid().
+     ========================================================================== */
+
+  /** the row index of a product, matched on its exact title. -1 when absent. */
+  function shopIndex(items, title) {
+    var t = String(title == null ? '' : title).trim();
+    var rows = Array.isArray(items) ? items : [];
+    if (!t) return -1;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] && String(rows[i].title).trim() === t) return i;
+    }
+    return -1;
+  }
+
+  function shopHas(items, title) { return shopIndex(items, title) !== -1; }
+
+  /**
+   * The whole of tab 1, as one pure function: a product the list does not hold
+   * is appended, a product it holds is removed — and every OTHER row comes back
+   * carrying its own id, its own tick and its own amount, because those are the
+   * three things a repaint must never be allowed to reset.
+   */
+  function shopToggle(items, title) {
+    var rows = (Array.isArray(items) ? items : []).filter(Boolean);
+    var t = String(title == null ? '' : title).trim();
+    if (!t) return rows.slice();
+    var at = shopIndex(rows, t);
+    if (at !== -1) {
+      return rows.filter(function (r, i) { return i !== at; });
+    }
+    return rows.concat([{ id: uid('li'), title: t, done: false }]);
+  }
+
+  function shopDrop(items, id) {
+    return (Array.isArray(items) ? items : [])
+      .filter(function (r) { return r && r.id !== id; });
+  }
+
+  /** ticking one row without disturbing the identity or the amount of any row */
+  function shopCheck(items, id) {
+    return (Array.isArray(items) ? items : []).map(function (r) {
+      if (!r || r.id !== id) return r;
+      var out = { id: r.id, title: r.title, done: !r.done };
+      if (r.qty) out.qty = r.qty;
+      return out;
+    });
+  }
+
+  /** the amount field. A cleared box drops the key rather than storing '' */
+  function shopSetQty(items, id, qty) {
+    var q = normQty(qty);
+    return (Array.isArray(items) ? items : []).map(function (r) {
+      if (!r || r.id !== id) return r;
+      var out = { id: r.id, title: r.title, done: !!r.done };
+      if (q) out.qty = q;
+      return out;
+    });
+  }
+
+  /** "ניקוי הפריטים שנאספו" — everything already in the cart leaves the list */
+  function shopClearDone(items) {
+    return (Array.isArray(items) ? items : [])
+      .filter(function (r) { return r && !r.done; });
+  }
+
+  /** anything typed by hand collects here rather than under a shelf it never came from */
+  var SHOP_OTHER = 'מוצרים משלי';
+
+  /**
+   * Tab 2, grouped. A product keeps the shelf it was picked from, and the
+   * groups come back in PANTRY order — which is the order the aisles are
+   * actually walked, not the order the products happened to be tapped in.
+   */
+  function shopGroups(items) {
+    var bag = {}, other = [];
+    (Array.isArray(items) ? items : []).filter(Boolean).forEach(function (r) {
+      var key = pantryCatOf(r.title);
+      if (!key) { other.push(r); return; }
+      if (!bag[key]) bag[key] = [];
+      bag[key].push(r);
+    });
+
+    var out = [];
+    PANTRY.forEach(function (a) {
+      if (bag[a.key]) out.push({ key: a.key, label: a.label, rows: bag[a.key] });
+    });
+    if (other.length) out.push({ key: 'other', label: SHOP_OTHER, rows: other });
+    return out;
+  }
+
+  /* ==========================================================================
+     רשימת קניות — the module (Sprint 16 · field mandate)
+
+     WHY IT LEFT THE FORM
+
+     The catalog shipped inside "רשימה חדשה": to reach 161 products you opened
+     ＋, chose רשימה, scrolled past four fields, and whatever you ticked belonged
+     to that one list and to no other. But the weekly shop is not a document you
+     author once — it is a surface you open on the way out of the house, tick
+     halfway down an aisle, and come back to next week. Three modals deep is the
+     wrong place for it.
+
+     So it is a module: ONE door on היום שלי, two tabs, one record behind both.
+
+       * בחירת מוצרים מתוך הרשימה — the ten aisles and the search across them.
+         A tap writes the RECORD, not a draft, which is the whole reason tab 2
+         is already correct before it is ever opened.
+       * רשימת הקניות שלי — the same items[], grouped by the shelf each product
+         came from, every row carrying its own ✓ and its own כמות.
+
+     WHAT OWNS WHAT
+
+       * the open aisle and the query are the module's, and die with the sheet —
+         next week's shop does not start where last week's search left off.
+       * the open TAB is a pref, like every other sub-tab in the app.
+       * every item is the record's. Nothing here holds a copy of one.
+     ========================================================================== */
+
+  var SHOP_TABS = ['catalog', 'mine'];
+
+  /**
+   * A constant id, not a generated one. It is what makes this the SAME list on
+   * the phone and on the laptop the moment the outbox replays: the sync engine
+   * matches on id, and a per-device uid() would have produced two lists that
+   * both call themselves רשימת קניות and never merge.
+   */
+  var SHOP_LIST_ID = 'shop-main';
+  var SHOP_TITLE = 'רשימת קניות';
+
+  function shopList() { return Store.find('lists', SHOP_LIST_ID); }
+  function shopItems() {
+    var l = shopList();
+    return l && Array.isArray(l.items) ? l.items : [];
   }
 
   /**
-   * The whole interaction, as one pure function: a product that is not in the
-   * list is appended, a product that is in it is removed — and every OTHER
-   * line, typed by hand or added by another chip, comes back untouched and in
-   * the order it was written.
+   * Created by the first product, never by the way in: someone who opened the
+   * module only to look must not find an empty רשימת קניות waiting for them in
+   * רשימות afterwards.
    */
-  function pantryToggle(text, title) {
-    var t = String(title == null ? '' : title).trim();
-    var lines = pantryLines(text);
-    if (!t) return lines.join('\n');
-    var at = lines.indexOf(t);
-    if (at === -1) lines.push(t);
-    else lines.splice(at, 1);
-    return lines.join('\n');
+  function shopEnsure() {
+    var l = shopList();
+    if (l) return l;
+    return Store.add('lists', {
+      type: 'list', id: SHOP_LIST_ID, title: SHOP_TITLE,
+      category: 'personal', items: [], date: '', clientId: ''
+    });
   }
 
-  function pantryField() {
-    var cats = PANTRY.map(function (a, i) {
-      var on = i === 0;
-      return '<button class="pn-cat' + (on ? ' is-active' : '') + '" type="button" ' +
-        'data-pantrycat="' + esc(a.key) + '" aria-pressed="' + (on ? 'true' : 'false') + '">' +
-        esc(a.label) + '<span class="pn-n">' + a.items.length + '</span></button>';
-    }).join('');
+  /**
+   * The one write path. Local-first like every other mutation in the app: the
+   * record, then localStorage + the outbox, then the surfaces.
+   *
+   * Patch.record() is called rather than Patch.apply() on purpose — the list's
+   * row lives in the רשימות workspace, which is behind the sheet and usually
+   * off-screen, and apply() answers "not on screen" with a full render() the
+   * module does not need.
+   */
+  function shopWrite(items) {
+    var l = shopEnsure();
+    l.items = normItems(items, 'li');
+    l.updatedAt = Date.now();
+    Store.save();
+    Patch.record('lists', l.id);
+    Patch.settle();                 // ...which is what repaints the module itself
+    return l;
+  }
 
-    return '<div class="field pn-field">' +
-      '<label class="field-label" for="fld_pantrySearch">קטלוג מצרכים · ' +
-      PANTRY_TOTAL + ' מוצרים</label>' +
-      '<p class="pn-hint">הקשה על מוצר מוסיפה אותו לרשימה למעלה, הקשה נוספת מסירה אותו. ' +
-      'החיפוש עובר על כל המדפים יחד.</p>' +
-      '<input class="input pn-search" id="fld_pantrySearch" type="search" autocomplete="off" ' +
-      'data-pantrysearch="1" placeholder="חיפוש מוצר…" aria-label="חיפוש בקטלוג המצרכים">' +
-      '<div class="pn-cats" role="group" aria-label="מדפי הקטלוג">' + cats + '</div>' +
-      '<div class="pn-items" role="group" aria-label="מוצרים בקטלוג"></div>' +
-      '<p class="pn-summary block-meta"></p>' +
+  function shopRow(it) {
+    var name = esc(it.title);
+    return '<div class="shop-row' + (it.done ? ' is-done' : '') + '" data-shoprow="' + esc(it.id) + '">' +
+      '<button class="shop-check" type="button" data-shopcheck="' + esc(it.id) + '" ' +
+      'aria-pressed="' + (it.done ? 'true' : 'false') + '" ' +
+      'aria-label="' + name + ' — כבר בעגלה">' +
+      '<span class="cl-box">' + (it.done ? '✓' : '') + '</span>' +
+      '</button>' +
+      '<span class="shop-name">' + name + '</span>' +
+      '<input class="input shop-qty" type="text" autocomplete="off" maxlength="' + QTY_MAX + '" ' +
+      'data-shopqty="' + esc(it.id) + '" value="' + esc(it.qty || '') + '" ' +
+      'placeholder="כמות" aria-label="כמות עבור ' + name + '">' +
+      '<button class="shop-del" type="button" data-shopdel="' + esc(it.id) + '" ' +
+      'aria-label="הסרת ' + name + ' מהרשימה">✕</button>' +
       '</div>';
   }
 
-  /** the catalog's state while a form is open — same shape as FormRemind */
-  var FormPantry = {
+  /** the front door on היום שלי — a live count, so the card is never just a link */
+  function renderShopCta() {
+    var el = $('#shopCtaMeta');
+    if (!el) return;
+    var p = progressOf(shopItems());
+    setText(el, p.total
+      ? plural(p.total, 'פריט אחד', 'פריטים') + ' · ' + p.done + ' כבר בעגלה'
+      : 'קטלוג של ' + PANTRY_TOTAL + ' מוצרים — בוחרים בהקשה');
+  }
+
+  var Shop = {
     cat: PANTRY[0].key,
     query: '',
 
-    /** the list's own items field: the thing every chip actually writes to */
-    field: function () { return rmEl('[name="items"]'); },
+    isOpen: function () {
+      var el = $('#shopSheet');
+      return !!el && !el.hidden;
+    },
 
-    load: function () {
+    tab: function () {
+      var t = Store.data && Store.data.prefs ? Store.data.prefs.shopTab : '';
+      return SHOP_TABS.indexOf(t) === -1 ? SHOP_TABS[0] : t;
+    },
+
+    open: function () {
+      if (!$('#shopSheet')) return false;
+      // every visit starts on the first aisle with no query: the module is a
+      // shelf you walk, not a search you left running last Tuesday
       this.cat = PANTRY[0].key;
       this.query = '';
-      var box = rmEl('.pn-search');
+      var box = $('#shopSearch');
       if (box) box.value = '';
+      var add = $('#shopNew');
+      if (add) add.value = '';
+
+      $('#typeSheet').hidden = true;
+      $('#formSheet').hidden = true;
+      if ($('#openSheet')) $('#openSheet').hidden = true;
+      Detail.close();
+      openSheet('shopSheet');
       this.paint();
-      return this;
+      return true;
+    },
+
+    setTab: function (key) {
+      if (SHOP_TABS.indexOf(key) === -1) return;
+      Store.data.prefs.shopTab = key;
+      Store.save();
+      this.paint();
     },
 
     setCat: function (key) {
@@ -6893,42 +7128,162 @@
       // an aisle tap answers a different question than a search, so it clears
       // the query rather than filtering the results of it
       this.query = '';
-      var box = rmEl('.pn-search');
+      var box = $('#shopSearch');
       if (box) box.value = '';
       this.paint();
     },
 
     setQuery: function (q) {
       this.query = String(q == null ? '' : q);
-      this.paint();
+      this.paintCatalog(shopItems());
     },
 
-    toggle: function (title) {
-      var area = this.field();
-      if (!area) return;
-      area.value = pantryToggle(area.value, title);
-      this.paint();
+    /* ---- the writes. Every one of them ends in the record, never in a draft ---- */
+
+    toggle: function (title) { shopWrite(shopToggle(shopItems(), title)); },
+
+    /**
+     * Ticking is the one write here that does not change MEMBERSHIP, so it gets
+     * the same treatment every other state change in the app gets (Sprint 7):
+     * the row under the finger is swapped in place, and the container around it
+     * is left alone. Rebuilding it would destroy the button mid-press.
+     */
+    check: function (id) {
+      var l = shopList();
+      if (!l) return;
+      l.items = shopCheck(l.items, id);
+      l.updatedAt = Date.now();
+      Store.save();
+      Patch.record('lists', l.id);
+
+      var node = $('[data-shoprow="' + id + '"]');
+      var row = shopItems().filter(function (r) { return r.id === id; })[0];
+      if (node && row) node.outerHTML = shopRow(row);
+      else this.paint();                    // not on screen — repaint properly
+
+      var p = progressOf(shopItems());
+      this.paintMeta(p);
+      renderShopCta();
+      if (p.total && p.done === p.total) {
+        Haptics.done();
+        toast('הכול בעגלה 🎉');
+      }
     },
+
+    drop: function (id) { shopWrite(shopDrop(shopItems(), id)); },
+
+    /**
+     * The one write that deliberately does NOT repaint: the box being typed
+     * into lives inside the container a repaint rebuilds, and rebuilding it
+     * mid-keystroke would take the caret with it.
+     */
+    qty: function (id, v) {
+      var l = shopList();
+      if (!l) return;
+      l.items = shopSetQty(l.items, id, v);
+      l.updatedAt = Date.now();
+      Store.save();
+      Patch.record('lists', l.id);
+    },
+
+    /**
+     * A product the catalog has never heard of, typed straight into tab 2. It
+     * goes through shopToggle() rather than around it, so a manual product and a
+     * tapped chip produce the identical row — and the duplicate is caught first,
+     * because here a second "חומוס" is a typo rather than an un-tick.
+     */
+    add: function () {
+      var box = $('#shopNew');
+      var title = box ? String(box.value || '').trim() : '';
+      if (!title) { warn('צריך שם מוצר'); return; }
+      if (shopHas(shopItems(), title)) {
+        if (box) box.value = '';
+        toast('המוצר כבר ברשימה');
+        return;
+      }
+      shopWrite(shopToggle(shopItems(), title));
+      if (box) { box.value = ''; box.focus(); }
+    },
+
+    /**
+     * The two bulk clears ask first, because they destroy a list somebody
+     * built. Removing ONE row does not: it is a single tap to put back, from
+     * either tab, and a question in front of it would make the module unusable
+     * at the pace a shopping list is actually edited at.
+     */
+    clear: function (what) {
+      var items = shopItems();
+      if (!items.length) { toast('הרשימה כבר ריקה'); return; }
+
+      if (what === 'done') {
+        var left = shopClearDone(items);
+        var gone = items.length - left.length;
+        if (!gone) { toast('אין פריטים מסומנים לניקוי'); return; }
+        confirmDelete(SHOP_TITLE + ' · ' + gone + ' פריטים שכבר נאספו', function () {
+          shopWrite(shopClearDone(shopItems()));
+          toast('הפריטים שנאספו נוקו');
+        });
+        return;
+      }
+
+      confirmDelete(SHOP_TITLE + ' · כל ' + items.length + ' הפריטים', function () {
+        shopWrite([]);
+        toast('הרשימה רוקנה');
+      });
+    },
+
+    /* ---- paint ---- */
 
     paint: function () {
-      if (!rmEl('.pn-field')) return;
-      var area = this.field();
-      var text = area ? area.value : '';
-      var searching = pantryNorm(this.query) !== '';
-      var self = this;
+      renderShopCta();
+      if (!this.isOpen()) return;
 
-      rmAll('[data-pantrycat]').forEach(function (b) {
+      var tab = this.tab();
+      var items = shopItems();
+      var prog = progressOf(items);
+
+      $$('#shopSheet [data-shoptab]').forEach(function (b) {
+        var on = b.dataset.shoptab === tab;
+        b.classList.toggle('is-active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      $$('#shopSheet [data-shoppane]').forEach(function (p) {
+        p.hidden = p.dataset.shoppane !== tab;
+      });
+
+      // the catalog's count is fixed vocabulary; the list's is derived state and
+      // belongs to paintMeta(), which is the one place that owns it
+      setText($('#shopCountCatalog'), String(PANTRY_TOTAL));
+
+      this.paintCatalog(items);
+      this.paintMine(items, prog);
+    },
+
+    paintCatalog: function (items) {
+      var self = this;
+      var searching = pantryNorm(this.query) !== '';
+
+      // the aisle strip is fixed vocabulary — built once, then only re-marked
+      var cats = $('#shopCats');
+      if (cats && !cats.innerHTML) {
+        cats.innerHTML = PANTRY.map(function (a) {
+          return '<button class="pn-cat" type="button" data-pantrycat="' + esc(a.key) + '" ' +
+            'aria-pressed="false">' + esc(a.label) +
+            '<span class="pn-n">' + a.items.length + '</span></button>';
+        }).join('');
+      }
+      $$('#shopCats [data-pantrycat]').forEach(function (b) {
         var on = !searching && b.dataset.pantrycat === self.cat;
         b.classList.toggle('is-active', on);
         b.setAttribute('aria-pressed', on ? 'true' : 'false');
       });
 
       var rows = searching ? pantrySearch(this.query) : pantryAisleRows(this.cat);
-      var box = rmEl('.pn-items');
+      var box = $('#shopItems');
       if (box) {
         box.innerHTML = rows.length
           ? rows.map(function (r) {
-            var on = pantryHas(text, r.title);
+            var on = shopHas(items, r.title);
             return '<button class="pn-chip' + (on ? ' is-on' : '') + '" type="button" ' +
               'data-pantryitem="' + esc(r.title) + '" aria-pressed="' + (on ? 'true' : 'false') + '">' +
               '<span class="pn-tick">' + (on ? '✓' : '+') + '</span>' +
@@ -6936,13 +7291,40 @@
               (searching ? '<span class="pn-aisle">' + esc(r.label) + '</span>' : '') +
               '</button>';
           }).join('')
-          : '<p class="pn-empty">אין מוצר כזה בקטלוג — אפשר להקליד אותו ידנית בשדה הפריטים.</p>';
+          : '<p class="pn-empty">אין מוצר כזה בקטלוג — אפשר להוסיף אותו ידנית בלשונית ' +
+            '"רשימת הקניות שלי".</p>';
       }
 
-      var picked = pantryLines(text).length;
-      setText(rmEl('.pn-summary'), searching
+      var picked = progressOf(items).total;
+      setText($('#shopSummary'), searching
         ? plural(rows.length, 'תוצאה אחת', 'תוצאות') + ' · ' + picked + ' פריטים ברשימה'
         : pantryLabel(this.cat) + ' · ' + rows.length + ' מוצרים · ' + picked + ' פריטים ברשימה');
+    },
+
+    paintMine: function (items, prog) {
+      var box = $('#shopList');
+      if (box) {
+        var groups = shopGroups(items);
+        box.innerHTML = groups.length
+          ? groups.map(function (g) {
+            return '<div class="shop-band">' + esc(g.label) +
+              '<span class="shop-band-n">' + g.rows.length + '</span></div>' +
+              g.rows.map(shopRow).join('');
+          }).join('')
+          : emptyState('הרשימה ריקה',
+            'אפשר לבחור מוצרים מהקטלוג בלשונית "בחירת מוצרים מתוך הרשימה", או להקליד כאן מוצר משלך.');
+      }
+      this.paintMeta(prog || progressOf(items));
+    },
+
+    /** the derived text: cheap, idempotent, and safe to run without a rebuild */
+    paintMeta: function (prog) {
+      var p = prog || progressOf(shopItems());
+      setText($('#shopCountMine'), String(p.total));
+      setText($('#shopMineSummary'), p.total
+        ? plural(p.total, 'פריט אחד', 'פריטים') + ' · ' + p.done + ' בעגלה · ' +
+          (p.total - p.done) + ' נותרו'
+        : 'אין עדיין פריטים ברשימה');
     }
   };
 
@@ -7059,7 +7441,11 @@
       for (var i = 0; i < pool.length; i++) {
         if (pool[i].title === row.title) {
           var keep = pool.splice(i, 1)[0];
-          return { id: keep.id, title: row.title, done: !!keep.done };
+          var back = { id: keep.id, title: row.title, done: !!keep.done };
+          // an amount is progress too: editing the שם of a list must not quietly
+          // wipe "2 ק״ג" off every line that survived the edit
+          if (keep.qty) back.qty = keep.qty;
+          return back;
         }
       }
       return row;
@@ -7184,10 +7570,6 @@
       FormAlert.load(heldSound ? heldSound.value : ALERT_SOUND_DEFAULT,
         heldVibe ? heldVibe.value : VIBE_DEFAULT);
     }
-
-    // ...and the catalog opens on its first aisle, ticking whatever the items
-    // field already holds — an edited list arrives with its products already on
-    if (rmEl('.pn-field')) FormPantry.load();
 
     $('#typeSheet').hidden = true;
     // the reader is what "עריכה" was tapped from; it must not stay layered
@@ -8229,8 +8611,9 @@
       // Sprint 13 — the settings drawer and the per-record alert picker
       '[data-settoggle],[data-setplay],[data-setdefault],[data-settheme],[data-setsync],' +
       '[data-alertsound],[data-alertvibe],' +
-      // Sprint 15 — the pantry catalog inside the list form
+      // Sprint 15 — the pantry catalog; Sprint 16 — the module around it
       '[data-pantrycat],[data-pantryitem],' +
+      '[data-shoptab],[data-shopcheck],[data-shopdel],[data-shopclear],[data-shopadd],' +
       '[data-cycle],[data-subtask],[data-listitem],[data-pin],[data-convert],' +
       '[data-clientfilter],[data-clientopen],[data-clienttab],[data-contact],[data-clientadd],' +
       '[data-nextaction],[data-clientnote],[data-clientnotedel],[data-undo],' +
@@ -8294,6 +8677,8 @@
     }
 
     if (el.dataset.action === 'master-add') { openTypeSheet(); return; }
+    // Sprint 16 — the module's front door, from anywhere that cares to carry it
+    if (el.dataset.action === 'shopping') { Shop.open(); return; }
     if (el.dataset.action === 'close-sheet') { closeSheets(); return; }
     if (el.dataset.action === 'close-drawer') { closeSheets(); return; }
     if (el.dataset.type) { openForm(el.dataset.type); return; }
@@ -8349,10 +8734,15 @@
     if (el.dataset.alertsound) { FormAlert.set('sound', el.dataset.alertsound); return; }
     if (el.dataset.alertvibe) { FormAlert.set('vibe', el.dataset.alertvibe); return; }
 
-    /* ---------- קטלוג המצרכים (Sprint 15) ---------- */
+    /* ---------- רשימת קניות (Sprint 15 catalog · Sprint 16 module) ---------- */
 
-    if (el.dataset.pantrycat) { FormPantry.setCat(el.dataset.pantrycat); return; }
-    if (el.dataset.pantryitem) { FormPantry.toggle(el.dataset.pantryitem); return; }
+    if (el.dataset.pantrycat) { Shop.setCat(el.dataset.pantrycat); return; }
+    if (el.dataset.pantryitem) { Shop.toggle(el.dataset.pantryitem); return; }
+    if (el.dataset.shoptab) { Shop.setTab(el.dataset.shoptab); return; }
+    if (el.dataset.shopcheck) { Shop.check(el.dataset.shopcheck); return; }
+    if (el.dataset.shopdel) { Shop.drop(el.dataset.shopdel); return; }
+    if (el.dataset.shopclear) { Shop.clear(el.dataset.shopclear); return; }
+    if (el.dataset.shopadd) { Shop.add(); return; }
 
     /* ---------- client CRM ---------- */
 
@@ -8552,16 +8942,30 @@
   }
 
   /**
-   * The only keystroke the app listens to (Sprint 15). The catalog's search box
-   * carries no `name`, so submitForm()'s sweep never sees it — and a product
-   * typed straight into the items field is the same membership a chip toggles,
-   * so the ticks follow the FIELD rather than only the taps that changed it.
+   * The two keystrokes the app listens to, both of them the shopping module's:
+   * the catalog search box and the per-row amount. Neither carries a `name`, so
+   * submitForm()'s sweep of #formFields can never see either of them.
    */
   function onInput(e) {
     var el = e.target;
     if (!el || !el.dataset) return;
-    if (el.dataset.pantrysearch) { FormPantry.setQuery(el.value); return; }
-    if (el.name === 'items' && rmEl('.pn-field')) FormPantry.paint();
+    if (el.dataset.shopsearch) { Shop.setQuery(el.value); return; }
+    if (el.dataset.shopqty) { Shop.qty(el.dataset.shopqty, el.value); return; }
+  }
+
+  /**
+   * The keyboard, in one place. Escape has closed every layer in the app since
+   * Wave 1; Sprint 16 adds ↵ inside "הוספת מוצר משלי", because a shopping list
+   * is typed in bursts and reaching for a button between every two products is
+   * what makes people stop using the field at all.
+   */
+  function onKeydown(e) {
+    if (e.key === 'Escape') { closeSheets(); return; }
+    var el = e.target;
+    if (!el || !el.dataset || !el.dataset.shopnew) return;
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    Shop.add();
   }
 
   /* ==========================================================================
@@ -8849,9 +9253,7 @@
     document.addEventListener('input', onInput);
     $('#entityForm').addEventListener('submit', submitForm);
     $('#backdrop').addEventListener('click', closeSheets);
-    document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') closeSheets();
-    });
+    document.addEventListener('keydown', onKeydown);
     setFilter(Store.data.prefs.filter);
     setView('today');
     Fab.init();                       // the CTA ducks while the page scrolls
@@ -9193,6 +9595,8 @@
     lists: {
       migrateList: migrateList,
       normItems: normItems,
+      normQty: normQty,
+      QTY_MAX: QTY_MAX,
       parseChecklist: parseChecklist,
       listProgress: listProgress,
       progressOf: progressOf,
@@ -9206,11 +9610,28 @@
       pantryAisleRows: pantryAisleRows,
       pantryNorm: pantryNorm,
       pantrySearch: pantrySearch,
-      pantryLines: pantryLines,
-      pantryHas: pantryHas,
-      pantryToggle: pantryToggle,
-      pantryField: pantryField,
-      FormPantry: FormPantry
+      pantryCatOf: pantryCatOf,
+      // Sprint 16 — the shopping list, as rows. Same deal: every one of these
+      // is pure, so the suite drives a whole select → tick → count → clear
+      // cycle without a DOM, and the module below is the only part that needs one.
+      SHOP_LIST_ID: SHOP_LIST_ID,
+      SHOP_TITLE: SHOP_TITLE,
+      SHOP_TABS: SHOP_TABS,
+      SHOP_OTHER: SHOP_OTHER,
+      shopIndex: shopIndex,
+      shopHas: shopHas,
+      shopToggle: shopToggle,
+      shopDrop: shopDrop,
+      shopCheck: shopCheck,
+      shopSetQty: shopSetQty,
+      shopClearDone: shopClearDone,
+      shopGroups: shopGroups,
+      shopRow: shopRow,
+      shopList: shopList,
+      shopItems: shopItems,
+      shopEnsure: shopEnsure,
+      shopWrite: shopWrite,
+      Shop: Shop
     },
 
     notes: {

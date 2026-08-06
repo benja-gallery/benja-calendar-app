@@ -1873,25 +1873,18 @@ membership is by title, so ticking one ticks its twin, and the list still holds 
 No record, no migration and no D1 column was added: the catalog ships inside `app.js`, and
 what a list stores is what it always stored — `items`, through `parseChecklist()`.
 
-#### §2 The textarea is the single source of truth
+#### §2 The textarea is the single source of truth — *superseded by Sprint 16 (§7.4r)*
 
-`pantryField()` renders under `f('items', …)`: a `type="search"` box, the aisle strip
-(`.pn-cat`, `data-pantrycat`), the chip grid (`.pn-chip`, `data-pantryitem`) and a summary
-line. A chip holds **no state of its own**. `pantryToggle(text, title)` is a pure function
-over the field's lines — absent → appended, present → removed, every other line returned
-untouched and in order — and `FormPantry.paint()` reads each chip's tick straight back off
-the field with `pantryHas()`.
+The chip grid held **no state of its own**: it toggled a LINE of the list form's `items`
+textarea and read its own tick straight back off the field, so a product typed by hand
+ticked its chip and `mergeChecklist()` kept every item's progress across an edit. The
+search box carried no `name`, so `submitForm()`'s `[name]` sweep never saw it.
 
-That one rule buys three behaviours for free:
-
-* a product typed by hand into the textarea ticks its own chip (`onInput` → `paint()`, the
-  app's only keystroke listener);
-* opening an existing list for edit (`openForm()` → `FormPantry.load()`, after
-  `fillForm()`) shows its products already ticked;
-* saving goes through the unchanged `parseChecklist()` / `mergeChecklist()` path, so
-  editing a ten-item list does **not** un-tick the items already bought.
-
-The search box carries no `name`, so `submitForm()`'s `[name]` sweep never sees it.
+That was the right answer while the catalog lived inside "רשימה חדשה" and the wrong one
+the moment it stopped: a textarea cannot hold a ✓, cannot hold a כמות, and stops existing
+when the form closes. **§7.4r replaced the surface and the source of truth together** — the
+catalog moved into a module of its own, and the list it writes into is now the `items[]` of
+one record. The vocabulary in §1 and the search behaviour in §3 carried over unchanged.
 
 #### §3 An aisle is a filter, never a container
 
@@ -1900,9 +1893,9 @@ each hit wears its aisle name (`.pn-aisle`). `pantryNorm()` strips the geresh an
 whitespace, so `ציפס` finds `צ׳יפס` and `סקוץ` finds `סקוץ׳`, which is the difference
 between a search box and a spelling test on a phone keyboard. Tapping an aisle clears the
 query; an empty query returns to the aisle. A query with no hits says so, and points at the
-textarea — the catalog never blocks a product it does not know.
+manual-add field — the catalog never blocks a product it does not know.
 
-Nothing is ever auto-added: a new list opens empty.
+Nothing is ever auto-added: the list opens empty.
 
 #### §4 Layout
 
@@ -1914,13 +1907,115 @@ never turn the sheet into a mile of form. A chosen product is gold-filled (`.pn-
 
 #### §5 Verification
 
-`healthcheck.js` §47 adds 12 checks that execute the engine rather than pattern-matching it:
-the ten aisles and all 161 titles are asserted against the mandate verbatim (including both
-deliberate duplicates), `pantryToggle()` is driven through add / remove / re-add / hand-typed
-neighbours / blank lines, `pantrySearch()` is driven across aisles and through the geresh
-fold, the rendered chip grid is asserted to tick exactly what the field holds, the delegate
-and `openForm()` wiring is asserted, `submitForm()` is proven to ignore the search box, and
-the cache floor is raised to **v21**.
+`healthcheck.js` §47 executes the engine rather than pattern-matching it: the ten aisles and
+all 161 titles are asserted against the mandate verbatim (including both deliberate
+duplicates), `pantrySearch()` is driven across aisles and through the geresh fold,
+`pantryCatOf()` is asserted to file every product under the first shelf that holds it, the
+chip grid's styling is held to the 44px floor and to `var()` tokens only, and the cache
+floor is held at **v21** or higher. The toggle-engine checks moved to §48 with the engine
+itself.
+
+### 7.4r רשימת קניות — a module of its own (shipped — Sprint 16)
+
+Field mandate: *"Move the Shopping List out of the buried 'Add List' form and create a
+dedicated, top-level רשימת קניות module accessible directly from the main screen."* Two
+tabs — `בחירת מוצרים מתוך הרשימה` and `רשימת הקניות שלי` — a ✓ with a `קו חוצה`, a כמות
+per line, and state that persists. The shell ships as **v22** on both cache-busted URLs.
+
+#### §1 Why it left the form
+
+The catalog shipped inside "רשימה חדשה": to reach 161 products you opened ＋, chose רשימה,
+scrolled past four fields, and whatever you ticked belonged to that one list and to no
+other. The weekly shop is not a document you author once — it is a surface you open on the
+way out of the house, tick halfway down an aisle, and come back to next week. Three modals
+deep is the wrong place for it.
+
+**Two doors, both one tap:** `.shop-cta` on היום שלי (`#shopCta`, `data-action="shopping"`,
+directly under the smart summary and above the attention strip — it is a standing
+destination, not an alert) carries a live count, so it reads as a place rather than as a
+button. A second `data-action="shopping"` sits in the רשימות workspace, where somebody who
+came looking for "the list" will look. The five-item bottom bar and the desktop rail were
+left exactly as they are: the raised ＋ is dead-centre of five and cannot stay centred as a
+sixth item is added, and the Sprint 13 header is deliberately two controls.
+
+#### §2 One record, not a draft
+
+The source of truth moved down one level, from a textarea to the `items[]` of **one record**
+— a `lists` row with the constant id **`shop-main`** and the title `רשימת קניות`, created by
+the first product and never merely by opening the module. A constant id is what makes this
+the *same* list on the phone and on the laptop: the sync engine matches on id, and a
+per-device `uid()` would have produced two lists that both call themselves רשימת קניות and
+never merge.
+
+Nothing else changed underneath it. `items_json` already round-trips the whole array through
+D1, so **no migration and no new column** was needed; the row shows up in רשימות like any
+other list, and `listProgress()` / `toggleItem()` / `mergeChecklist()` keep working on it.
+The one shape change is `qty`, carried by `normItems()` **only where one was actually
+written** (`normQty()`, trimmed and capped at 12 chars) — so a subtask never grows a field it
+has no use for and every pre-Sprint-16 store round-trips byte-identical.
+
+| function | what it is |
+|---|---|
+| `shopToggle(items, title)` | absent → appended, present → removed; every other row keeps its id, its ✓ and its qty |
+| `shopCheck(items, id)` | one row ticks; no neighbour moves |
+| `shopSetQty(items, id, qty)` | a cleared box drops the key rather than storing `''` |
+| `shopClearDone(items)` | everything already in the cart leaves |
+| `shopGroups(items)` | bands in `PANTRY` order, then `מוצרים משלי` |
+| `pantryCatOf(title)` | which shelf a product came from; `''` for anything typed by hand |
+
+Every one of them is pure and returns a new array — none mutates what it was handed.
+
+#### §3 The two tabs are one list
+
+**Tab 1 · בחירת מוצרים מתוך הרשימה** — the whole 161-product catalog: `#shopSearch` across
+all ten shelves, the aisle strip (`data-pantrycat`) and the chip grid (`data-pantryitem`),
+all unchanged from §7.4q. A tap writes the **record**, not a draft, which is the entire
+reason tab 2 is already correct before it is ever opened and closing the sheet loses nothing.
+
+**Tab 2 · רשימת הקניות שלי** — the same `items[]`, banded by shelf. Each `.shop-row` carries
+its ✓ (`data-shopcheck` → `.shop-row.is-done .shop-name { text-decoration: line-through }`,
+the mandate's `קו חוצה`), a free-text amount (`data-shopqty` — "2", "500 גרם", "×3"; not a
+number, because the unit is half the information on a shopping line) and a ✕. Above the list:
+`#shopNew` + `data-shopadd` for a product the catalog never heard of (↵ works, because a
+shopping list is typed in bursts), and the two clears.
+
+**Ownership:** the open aisle and the query are the module's and die with the sheet — next
+week's shop does not start where last week's search left off. The open **tab** is
+`prefs.shopTab`, remembered and normalised on load exactly like every other sub-tab.
+Every item belongs to the record; nothing here holds a copy of one.
+
+**Writes** go through one path — `shopWrite()` → `normItems()` → `Store.save()` →
+`Patch.record()` + `Patch.settle()` — local-first, network never between a tap and a repaint.
+The one exception is `Shop.qty()`, which deliberately does **not** repaint: the box being
+typed into lives inside the container a repaint rebuilds, and rebuilding it mid-keystroke
+would take the caret with it.
+
+**Destruction is proportionate.** `ניקוי מה שנאסף` and `ניקוי הרשימה כולה` both go through
+`confirmDelete()` — they destroy a list somebody built. Removing one row does not ask: it is
+a single tap to put back from either tab, and a question in front of it would make the module
+unusable at the pace a shopping list is actually edited at.
+
+#### §4 Layout
+
+`.shop-sheet` is taller than an ordinary sheet (`max-height:92vh` — it is the one surface
+here you scroll for a while) and its two `.shop-pane`s are exclusive: `.shop-pane[hidden]`
+resets `display`, so an inactive tab leaves the flow instead of stacking. `.shop-qty` is a
+narrow `.input`, so it inherits the 16px iOS zoom lock like every other field. `.shop-cta`,
+`.shop-check` and `.shop-del` all clear the 44px floor, an amount is echoed inside רשימות as
+a `.cl-qty` pill, and every colour is a `var()` token so the light theme inherits the module
+for free.
+
+#### §5 Verification
+
+`healthcheck.js` §48 adds 11 checks and drives the module head-lessly over a stubbed
+document: both doors are asserted present and wired and the catalog is asserted **gone** from
+every form (`FormPantry` must not survive anywhere as dead code); the two mandated tab labels
+and every `data-shoptab` / `data-shoppane` / `data-shopqty` hook are asserted in the markup;
+a real `open → toggle → tick → amount → group → clear` cycle is executed against the record,
+including the proof that typing an amount does not rebuild the list under the caret; the
+`shop-main` row is round-tripped through `toRow()` / `fromRow()` with its ✓ and its כמות
+intact; the confirmations are driven through `Confirm.dismiss()` and `Confirm.accept()`; and
+the cache floor is raised to **v22**, with `APP_VERSION` asserted in step.
 
 ### 7.4 General layout
 
