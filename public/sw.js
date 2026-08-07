@@ -14,7 +14,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v23';  // Sprint 17 — an editable מאגר, ± steppers, scroll reset
+var CACHE_VERSION = 'v24';  // Sprint 18 — the full-screen alarm, tappable calendar titles
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */

@@ -26,7 +26,7 @@
 <!-- ?v= MUST match CACHE_VERSION in sw.js. GitHub Pages serves these with
      max-age=600 and no content hash, so without the query an installed phone
      can keep serving the previous build out of its own HTTP cache. -->
-<link rel="stylesheet" href="styles.css?v=v23">
+<link rel="stylesheet" href="styles.css?v=v24">
 </head>
 <body>
 
@@ -787,12 +787,40 @@
   <button class="batch-btn is-quiet"  data-batch="exit"   type="button">סיום בחירה</button>
 </div>
 
+<!-- ============ מסך שעון מעורר — THE ALARM SCREEN (Sprint 18 §1) ============
+     The loudest surface in the app, and the only one that covers everything
+     else including the sheets. It goes up when a reminder falls due and it
+     does not come down for a timeout, a navigation or a swipe — only for
+     "ביטול התראה / כבה". role="alertdialog" is the honest role: it is a
+     dialog that interrupts, and aria-live="assertive" is what makes a screen
+     reader say so the moment it appears. -->
+<div class="alarm" id="alarmScreen" role="alertdialog" aria-modal="true"
+     aria-labelledby="alarmTitle" aria-live="assertive" hidden>
+  <div class="alarm-card">
+    <p class="alarm-kicker" id="alarmKicker">⏰ תזכורת</p>
+    <p class="alarm-clock" id="alarmClock">--:--</p>
+    <h2 class="alarm-title" id="alarmTitle"></h2>
+    <p class="alarm-when" id="alarmWhen"></p>
+    <div class="alarm-tags" id="alarmTags"></div>
+    <!-- two reminders in the same minute are two things owed; the second waits
+         here and takes the screen the moment the first is dismissed -->
+    <p class="alarm-queue" id="alarmQueue" hidden></p>
+
+    <div class="alarm-acts">
+      <button class="btn btn-gold alarm-off" id="alarmDismiss" data-alarm="dismiss"
+              type="button">🔕 ביטול התראה / כבה</button>
+      <button class="btn btn-ghost alarm-more" data-alarm="open"
+              type="button">📄 פתיחת פרטי הפריט</button>
+    </div>
+  </div>
+</div>
+
 <!-- toast · doubles as the undo safety net: deleting arms [אחזר] for 5 seconds -->
 <div class="toast" id="toast" role="status" aria-live="polite" hidden>
   <span class="toast-text" id="toastText"></span>
   <button class="toast-undo" id="toastUndo" data-undo="1" type="button" hidden>אחזר</button>
 </div>
 
-<script src="app.js?v=v23"></script>
+<script src="app.js?v=v24"></script>
 </body>
 </html>

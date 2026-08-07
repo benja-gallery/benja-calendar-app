@@ -1179,12 +1179,17 @@ body.is-selecting .toast{ bottom:calc(var(--bar-h) + var(--safe-b) + 132px); }
 
 .cal-grid{ display:grid; grid-template-columns:repeat(7,1fr); gap:4px; }
 
+/* Sprint 18 — the cell is a role="button" <div> rather than a <button>, so
+   that the record titles inside it can be real buttons of their own (a button
+   may not contain a button). Everything a <button> gave it for free is
+   restored here: the pointer, the reset text alignment, and the font. */
 .cal-cell{
   display:flex; flex-direction:column; align-items:center; gap:4px;
   min-width:0;                        /* 7 columns must survive a 320px screen */
-  min-height:60px; padding:7px 2px;
+  min-height:74px; padding:7px 2px;
   background:transparent; border:1px solid transparent;
   border-radius:var(--r-sm);
+  font:inherit; color:inherit; text-align:center; cursor:pointer;
   transition:background .16s, border-color .16s;
 }
 .cal-cell:hover{ background:var(--line-soft); border-color:var(--gold-edge); }
@@ -1197,7 +1202,26 @@ body.is-selecting .toast{ bottom:calc(var(--bar-h) + var(--safe-b) + 132px); }
 .dot{ display:block; width:6px; height:6px; border-radius:50%; }
 .dot-personal{ background:var(--personal); }
 .dot-business{ background:var(--business); }
-.cal-more{ font-size:10px; font-weight:800; color:var(--faint); }
+/* Sprint 18 — the overflow count is a control now: it opens that day in the
+   day view, which is where the records it stands for actually are */
+.cal-more{
+  padding:1px 6px; border:0; border-radius:5px;
+  background:transparent; color:var(--gold);
+  font-family:inherit; font-size:10px; font-weight:800; cursor:pointer;
+}
+.cal-more:hover{ background:var(--gold-soft); }
+
+/* the titles a month cell carries — the tap target that opens the record (§2) */
+.cal-chips{ display:flex; flex-direction:column; gap:2px; width:100%; min-width:0; }
+.cal-chip{
+  display:block; width:100%; min-width:0;
+  padding:1px 4px; border:0; border-radius:5px;
+  font-family:inherit; font-size:9.5px; font-weight:700; line-height:1.5;
+  text-align:center; cursor:pointer;
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.cal-chip-personal{ color:var(--personal); background:var(--personal-soft); }
+.cal-chip-business{ color:var(--business); background:var(--business-soft); }
 
 /* ---------- week grid ---------- */
 .cal-week{
@@ -1218,6 +1242,7 @@ body.is-selecting .toast{ bottom:calc(var(--bar-h) + var(--safe-b) + 132px); }
   font-variant-numeric:tabular-nums;
   border-inline-end:1px solid var(--line-soft);
 }
+/* Sprint 18 — a role="button" <div>, for the same reason .cal-cell is one */
 .wk-cell{
   display:flex; flex-direction:column; gap:2px;
   min-width:0; min-height:var(--tap);
@@ -1226,19 +1251,21 @@ body.is-selecting .toast{ bottom:calc(var(--bar-h) + var(--safe-b) + 132px); }
   border:0;
   border-bottom:1px solid var(--line-soft);
   border-inline-end:1px solid var(--line-soft);
+  font:inherit; color:inherit; text-align:start; cursor:pointer;
 }
 .wk-cell:hover{ background:var(--line-soft); }
 .wk-cell.is-today{ background:var(--gold-soft); }
 .wk-allday .wk-cell{ min-height:var(--tap); }
 
 .wk-chip{
-  display:block; max-width:100%;
-  padding:2px 5px; border-radius:6px;
-  font-size:10.5px; font-weight:700; line-height:1.5;
+  display:block; width:100%; max-width:100%; min-width:0;
+  padding:2px 5px; border:0; border-radius:6px;
+  font-family:inherit; font-size:10.5px; font-weight:700; line-height:1.5;
+  text-align:center; cursor:pointer;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
-.wk-personal{ color:var(--personal); background:var(--personal-soft); }
-.wk-business{ color:var(--business); background:var(--business-soft); }
+.wk-chip-personal{ color:var(--personal); background:var(--personal-soft); }
+.wk-chip-business{ color:var(--business); background:var(--business-soft); }
 
 /* ---------- day timeline (00:00 → 23:59) ---------- */
 .cal-day{
@@ -1270,6 +1297,8 @@ body.is-selecting .toast{ bottom:calc(var(--bar-h) + var(--safe-b) + 132px); }
 }
 .dv-slot:hover{ background:var(--line-soft); }
 
+/* Sprint 18 — the block IS the title on the daily timeline, so it is the
+   button that opens the record's reader rather than a decorative div (§2) */
 .dv-block{
   position:absolute; z-index:2;
   overflow:hidden;
@@ -1278,6 +1307,7 @@ body.is-selecting .toast{ bottom:calc(var(--bar-h) + var(--safe-b) + 132px); }
   border-radius:var(--r-sm);
   border-inline-start:3px solid var(--gold);
   box-shadow:var(--shadow-sm);
+  font-family:inherit; color:inherit; text-align:start; cursor:pointer;
 }
 .dv-block b{ display:block; font-size:12.5px; font-weight:700; line-height:1.4;
   overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -2059,6 +2089,9 @@ button:active, .tap:active, .qa:active, .cl-open:active, .att:active,
 /* the calendar stage owns the horizontal axis — its swipe navigation must not
    be handed to the browser by the blanket touch-action above */
 .cal-stage button{ touch-action:pan-y; }
+/* Sprint 18 — the month and week cells are role="button" divs now, and the
+   blanket rule above only ever named real <button> elements */
+.cal-stage [data-calslot]{ touch-action:pan-y; }
 
 button:focus-visible, a:focus-visible, .tap:focus-visible,
 .input:focus-visible, .textarea:focus-visible, .select:focus-visible{
@@ -2562,9 +2595,10 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
   .client-tabs .seg{ flex:1 1 0; font-size:13.5px; }
 
   /* calendar gets the extra room a desktop canvas offers */
-  .cal-cell{ min-height:92px; padding:10px 4px; }
+  .cal-cell{ min-height:106px; padding:10px 4px; }
   .cal-num{ font-size:15px; }
   .cal-dow span{ font-size:12.5px; }
+  .cal-chip{ font-size:11px; padding:2px 6px; }
   .wk-head, .wk-body{ grid-template-columns:52px repeat(7,1fr); }
   .wk-cell{ min-height:54px; }
   .wk-chip{ font-size:11.5px; }
@@ -2581,6 +2615,71 @@ button:focus:not(:focus-visible), a:focus:not(:focus-visible){ outline:none; }
     border:1px solid var(--line);
   }
   @keyframes slideUp{ from{ transform:translateY(24px); opacity:0; } to{ transform:none; opacity:1; } }
+}
+
+/* ==========================================================================
+   מסך שעון מעורר — the alarm screen (Sprint 18 · mandate §1)
+
+   The one surface in the app that outranks everything else. z-index 120 puts
+   it over the sheets (60), the confirmation (80) and the batch bars, because
+   an alarm that a half-open form can hide is an alarm that was missed.
+
+   High contrast is the point, not the styling: the card is the deepest surface
+   the palette has, the clock is the largest type in the app, and the dismiss
+   button is the only gold thing on screen.
+   ========================================================================== */
+.alarm{
+  position:fixed; inset:0; z-index:120;
+  display:flex; align-items:center; justify-content:center;
+  padding:24px;
+  background:var(--surface);
+  animation:alarmIn .18s ease-out both;
+}
+/* a display above would otherwise defeat the hidden attribute permanently */
+.alarm[hidden]{ display:none; }
+
+@keyframes alarmIn{ from{ opacity:0; } to{ opacity:1; } }
+
+.alarm-card{
+  display:flex; flex-direction:column; align-items:center; gap:10px;
+  width:100%; max-width:480px;
+  padding:30px 22px calc(30px + var(--safe-b));
+  text-align:center;
+  background:var(--card);
+  border:1px solid var(--gold-edge);
+  border-radius:var(--r-xl);
+  box-shadow:var(--glow-gold);
+}
+
+/* the pulse is the screen's own heartbeat: it says "still ringing" without
+   making a single sound, which is what a muted phone in a meeting needs */
+.alarm-kicker{
+  font-size:14px; font-weight:800; color:var(--gold); letter-spacing:.02em;
+  animation:alarmPulse 1.4s ease-in-out infinite;
+}
+@keyframes alarmPulse{ 0%,100%{ opacity:1; } 50%{ opacity:.35; } }
+.alarm-clock{
+  font-size:56px; font-weight:800; line-height:1.05; color:var(--ink);
+  font-variant-numeric:tabular-nums;
+}
+.alarm-title{ font-size:22px; font-weight:800; line-height:1.35; color:var(--ink); }
+.alarm-when{ font-size:14.5px; color:var(--muted); line-height:1.6; }
+.alarm-tags{ display:flex; flex-wrap:wrap; gap:6px; justify-content:center; }
+.alarm-queue{ font-size:13px; font-weight:700; color:var(--waiting); }
+.alarm-queue[hidden]{ display:none; }
+
+.alarm-acts{ display:flex; flex-direction:column; gap:10px; width:100%; margin-top:12px; }
+/* the one control that stops the ringing — it gets the whole width and the
+   largest hit area of any button in the app */
+.alarm-off{ min-height:60px; font-size:17px; }
+.alarm-more{ min-height:var(--tap); }
+
+@media (min-width:720px){
+  .alarm-clock{ font-size:72px; }
+  .alarm-title{ font-size:26px; }
+  .alarm-acts{ flex-direction:row-reverse; justify-content:center; }
+  .alarm-off{ flex:2 1 0; }
+  .alarm-more{ flex:1 1 0; }
 }
 
 @media (prefers-reduced-motion:reduce){

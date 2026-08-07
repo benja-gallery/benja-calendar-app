@@ -634,6 +634,12 @@ function loadApp(over) {
   };
   if (over && over.AudioContext) sandbox.AudioContext = over.AudioContext;
   if (over && over.matchMedia) sandbox.matchMedia = over.matchMedia;
+  /* Sprint 18 adds `over.setInterval` / `over.clearInterval`: the alarm rings
+     by re-arming a real interval, and the only honest way to prove it keeps
+     ringing rather than stopping after one cycle is to hold the callback the
+     app registered and fire it. */
+  if (over && over.setInterval) sandbox.setInterval = over.setInterval;
+  if (over && over.clearInterval) sandbox.clearInterval = over.clearInterval;
   sandbox.window = sandbox;
   sandbox.self = sandbox;
   vm.createContext(sandbox);
@@ -9048,6 +9054,712 @@ checkAsync('a dead endpoint is an outcome, never an exception', async () => {
   );
   if (bad.ok !== false) return 'a malformed subscription reported success';
   if (bad.gone !== false) return 'a malformed subscription was mistaken for a retired one';
+  return true;
+});
+
+/* ==========================================================================
+   §50 — SPRINT 18 · the persistent alarm clock and the openable calendar
+
+   Two halves of one field mandate:
+
+     §1  a reminder that falls due raises a FULL-SCREEN ALARM — a high-contrast
+         overlay, a ring that re-arms forever, the mandated vibration pattern,
+         a screen wake lock, and one dismiss button that stops all of it;
+     §2  every event and task TITLE in every calendar view opens the record's
+         detail reader, instead of the month/week/day panes being the one place
+         in the app where a record could be seen but not opened.
+
+   Everything below is executed rather than pattern-matched wherever it can be:
+   the alarm is driven over a stubbed phone (an AudioContext that counts
+   oscillators, a vibration motor that records patterns, a wake lock that
+   records its sentinel, and an interval that hands back the callback), so
+   "keeps ringing until dismissed" is a claim the suite can actually falsify.
+   ========================================================================== */
+
+/**
+ * A phone, stubbed down to the four capabilities the alarm reaches for. Each
+ * one is independently switchable, because the whole point of the guards in
+ * Alarm is that a device missing any of them still gets the loudest thing it
+ * CAN do rather than a thrown error.
+ */
+function phoneStub(opts) {
+  const o = opts || {};
+  const vibes = [];
+  const sentinel = { released: false, release() { sentinel.released = true; } };
+  const locks = [];
+  const timers = [];
+  let next = 1;
+
+  const nav = {};
+  if (o.vibrate !== false) nav.vibrate = p => { vibes.push(p); return true; };
+  if (o.wakeLock !== false) {
+    nav.wakeLock = {
+      request(type) {
+        locks.push(type);
+        // a synchronously-resolving thenable: check() is not async, and the
+        // sentinel has to be in Alarm.wake by the time the assertions run
+        return { then(fn) { fn(sentinel); return { 'catch': () => {} } } };
+      }
+    };
+  }
+
+  return {
+    vibes, locks, sentinel, timers,
+    nav,
+    setInterval(fn, ms) { const id = next++; timers.push({ id, fn, ms }); return id; },
+    clearInterval(id) {
+      const at = timers.findIndex(t => t.id === id);
+      if (at !== -1) timers.splice(at, 1);
+    },
+    /** every live timer, fired once — one beat of wall-clock time */
+    beat() { timers.slice().forEach(t => t.fn()); },
+    live() { return timers.length; }
+  };
+}
+
+/** one due reminder, shaped exactly the way Notify.due() shapes them */
+function dueItem(over) {
+  return Object.assign({
+    key: 'at#t1@2026-08-07', id: 't1', collection: 'tasks', cat: 'business',
+    kind: 'משימה', clock: '09:00', subject: 'לשלוח הצעת מחיר',
+    title: 'משימה מתחילה עכשיו', body: 'לשלוח הצעת מחיר · 09:00',
+    alert: { sound: 'long', vibe: 'repeat' }
+  }, over || {});
+}
+
+/** the app, loaded over a stubbed phone with its store already open */
+function loadAlarm(opts) {
+  const phone = phoneStub(opts);
+  const dom = domStub();
+  const APP = loadApp({
+    navigator: phone.nav,
+    document: dom.doc,
+    AudioContext: (opts && opts.AudioContext === false) ? null : audioStub(),
+    setInterval: phone.setInterval,
+    clearInterval: phone.clearInterval
+  });
+  APP.Store.load();
+  return { APP, phone, dom, A: APP.ui.Alarm };
+}
+
+/* ---- 50a. §1 — the vocabulary and the module ---- */
+
+check('the alarm speaks the mandated vocabulary', () => {
+  const APP = loadApp();
+  const U = APP.ui;
+
+  if (JSON.stringify(U.ALARM_VIBE) !== '[1000,500,1000,500]') {
+    return 'the vibration pattern is ' + JSON.stringify(U.ALARM_VIBE);
+  }
+  // the beat has to be the pattern's own length, or the phone falls silent
+  // between bursts or stacks them on top of each other
+  const span = U.ALARM_VIBE.reduce((n, x) => n + x, 0);
+  if (U.ALARM_VIBE_MS !== span) {
+    return 'the re-fire beat is ' + U.ALARM_VIBE_MS + 'ms for a ' + span + 'ms pattern';
+  }
+  if (!(U.ALARM_SHORT_MS > 0)) return 'a short tone has no loop beat';
+  if (U.ALARM_KEEP_MS !== 60 * 60 * 1000) return 'the stale window is ' + U.ALARM_KEEP_MS;
+  if (!(U.ALARM_MAX > 1)) return 'the queue cannot hold a second alarm';
+
+  ['raise', 'start', 'ring', 'hush', 'lock', 'unlock', 'dismiss', 'close',
+    'open', 'act', 'paint', 'resume', 'init', 'queue', 'current', 'isOn']
+    .forEach(k => {
+      if (typeof U.Alarm[k] !== 'function') throw new Error('Alarm.' + k + ' is missing');
+    });
+
+  // and there is deliberately NO ceiling on the ringing: "until dismissed" is
+  // the feature, so nothing in the module may schedule its own end
+  const mod = bodyOf(js, 'var Alarm = ');
+  if (/setTimeout\s*\(/.test(mod)) return 'the alarm schedules its own silence';
+  return true;
+});
+
+check('a due reminder raises the screen and rings until it is dismissed', () => {
+  const { APP, phone, dom, A } = loadAlarm();
+  const screen = dom.node('#alarmScreen');
+
+  if (A.isOn()) return 'the app opened with an alarm already up';
+  if (!A.raise(dueItem())) return 'a due reminder did not raise an alarm';
+
+  /* 1. the screen */
+  if (screen.hidden !== false) return 'the alarm screen is still hidden';
+  if (dom.node('#alarmClock').textContent !== '09:00') {
+    return 'the clock reads ' + dom.node('#alarmClock').textContent;
+  }
+  if (dom.node('#alarmTitle').textContent !== 'לשלוח הצעת מחיר') return 'the title is not the record’s';
+  if (dom.node('#alarmTags').innerHTML.indexOf('tag-business') === -1) {
+    return 'the category is not on the screen';
+  }
+  // §0.2 — a colour is never the sole carrier, on this surface either
+  if (dom.node('#alarmTags').innerHTML.indexOf('עסקי') === -1) return 'the category has no text label';
+
+  /* 2. the sound — scheduled, and STILL scheduled a beat later */
+  const scheduled = APP.reminders.Chime.live.length;
+  if (!scheduled) return 'nothing was scheduled to make a sound';
+  const beats = phone.timers.filter(t => t.ms >= 1000);
+  if (!beats.length) return 'the ring was never re-armed — it would stop after one cycle';
+  phone.beat();
+  phone.beat();
+  if (!APP.reminders.Chime.loopOn()) return 'the loop died after two beats';
+
+  /* 3. the pulse — the mandated pattern, re-fired on its own length */
+  const vibe = phone.vibes.filter(v => Array.isArray(v) && v.join(',') === '1000,500,1000,500');
+  if (vibe.length < 2) return 'the phone buzzed ' + vibe.length + ' time(s) across three beats';
+  if (!phone.timers.some(t => t.ms === APP.ui.ALARM_VIBE_MS)) {
+    return 'the vibration is not on its own beat';
+  }
+
+  /* 4. the screen stays lit */
+  if (phone.locks.join(',') !== 'screen') return 'no screen wake lock was requested';
+  if (!A.wake) return 'the wake-lock sentinel was never kept, so it can never be released';
+
+  /* 5. ...and one tap stops all of it */
+  if (!A.dismiss()) return 'dismiss() declined a live alarm';
+  if (A.isOn()) return 'the queue still holds the dismissed alarm';
+  if (screen.hidden !== true) return 'the screen is still up after a dismissal';
+  if (APP.reminders.Chime.loopOn()) return 'the ring is still looping';
+  if (phone.live() !== 0) return phone.live() + ' timer(s) survived the dismissal';
+  if (phone.vibes[phone.vibes.length - 1] !== 0) return 'the vibration was never cancelled';
+  if (!phone.sentinel.released) return 'the wake lock was never released';
+  if (A.wake) return 'the module still holds a released sentinel';
+
+  // a beat AFTER the dismissal must be silent — the check that a stale timer
+  // cannot resurrect the ring
+  const before = APP.reminders.Chime.live.length;
+  phone.beat();
+  if (APP.reminders.Chime.live.length !== before) return 'a stale timer rang after the dismissal';
+  return true;
+});
+
+check('two reminders in the same minute are two alarms, not one', () => {
+  const { dom, A } = loadAlarm();
+
+  A.raise(dueItem());
+  A.raise(dueItem({ key: 'at#e9@2026-08-07', id: 'e9', collection: 'events', kind: 'פגישה', clock: '09:05', subject: 'פגישה עם דנה', cat: 'personal' }));
+  if (A.queue().length !== 2) return 'the second reminder did not queue';
+  // the first one keeps the screen; the second is COUNTED on it rather than
+  // silently swallowing it
+  if (dom.node('#alarmTitle').textContent !== 'לשלוח הצעת מחיר') return 'the second alarm stole the screen';
+  const more = dom.node('#alarmQueue');
+  if (more.hidden !== false) return 'the waiting alarm is not stated anywhere';
+  if (more.textContent.indexOf('תזכורת אחת ממתינה') === -1) {
+    return 'the waiting line reads "' + more.textContent + '"';
+  }
+
+  A.dismiss();
+  if (A.queue().length !== 1) return 'dismissing one alarm took the other with it';
+  if (dom.node('#alarmScreen').hidden !== false) return 'the queued alarm never took the screen';
+  if (dom.node('#alarmTitle').textContent !== 'פגישה עם דנה') return 'the second alarm never painted';
+  if (more.hidden !== true) return 'the screen still claims something is waiting';
+
+  A.dismiss();
+  if (A.isOn()) return 'the queue did not empty';
+  if (dom.node('#alarmScreen').hidden !== true) return 'the screen outlived the last alarm';
+
+  // the same reminder can never hold two places, however many times it fires
+  A.raise(dueItem());
+  A.raise(dueItem());
+  if (A.queue().length !== 1) return 'one reminder queued twice';
+  return true;
+});
+
+check('an alarm survives a reload, and a stale one does not', () => {
+  const { APP, A } = loadAlarm();
+  const U = APP.ui;
+  const now = Date.now();
+
+  const kept = U.normAlarms([
+    { key: 'a', at: now - 1000, id: 't1', collection: 'tasks', cat: 'business', clock: '09:00', subject: 'חי' },
+    { key: 'b', at: now - (U.ALARM_KEEP_MS + 60000), id: 't2', collection: 'tasks', subject: 'ישן' },
+    { key: 'a', at: now, id: 't1', collection: 'tasks', subject: 'כפול' },
+    { key: '', at: now, subject: 'ללא מפתח' },
+    null, 'nonsense', { at: now }
+  ]);
+  if (kept.length !== 1) return 'the queue came back holding ' + kept.length + ' entries';
+  if (kept[0].key !== 'a') return 'the wrong entry survived';
+  if (kept[0].cat !== 'business') return 'the category did not survive the round trip';
+  if (U.normAlarms(null).length !== 0) return 'a missing queue is not an empty one';
+
+  // an entry pointing at a collection with no reader is stripped rather than
+  // trusted — "פתיחת פרטי הפריט" must never open something that cannot be read
+  const odd = U.normAlarms([{ key: 'c', at: now, id: 'x', collection: 'clients', subject: 'לקוח' }]);
+  if (odd[0].collection !== '') return 'an unreadable collection survived as ' + odd[0].collection;
+  // ...and the alert pair is normalised, never trusted
+  const junk = U.normAlarms([{ key: 'd', at: now, alert: { sound: 'trumpet', vibe: 'earthquake' } }])[0];
+  if (junk.alert.sound !== 'short' || junk.alert.vibe !== 'short') {
+    return 'an unknown alert pair survived as ' + JSON.stringify(junk.alert);
+  }
+
+  // the cap is real: a device left alone must not stack alarms forever
+  const many = [];
+  for (let i = 0; i < U.ALARM_MAX + 5; i++) many.push({ key: 'k' + i, at: now });
+  if (U.normAlarms(many).length !== U.ALARM_MAX) return 'the queue is uncapped';
+
+  // and it is the STORE that holds the queue, so a save persists it
+  A.raise(dueItem());
+  if (APP.Store.data.prefs.alarms.length !== 1) return 'the alarm never reached the store';
+  if (APP.Store.data.prefs.alarms[0].key !== dueItem().key) return 'the store row lost its ledger key';
+  return true;
+});
+
+check('a phone that cannot ring, buzz or stay lit still gets the screen', () => {
+  // no vibration motor, no wake lock, no AudioContext — an iPhone in a browser
+  // that has never been added to the home screen is close enough to this
+  const { dom, A, phone } = loadAlarm({ vibrate: false, wakeLock: false, AudioContext: false });
+
+  if (!A.raise(dueItem())) return 'the alarm declined a device with no hardware';
+  if (dom.node('#alarmScreen').hidden !== false) return 'the screen — the one thing left — never came up';
+  if (!A.dismiss()) return 'dismiss() threw on a device with nothing to stop';
+  if (dom.node('#alarmScreen').hidden !== true) return 'the screen never came down';
+  if (phone.live() !== 0) return 'a timer was left running on a silent device';
+
+  // and a record that explicitly asked for silence rings silently but is still
+  // an alarm: 'ללא' is a choice about SOUND, never about being told
+  const quiet = loadAlarm();
+  quiet.A.raise(dueItem({ alert: { sound: 'none', vibe: 'short' } }));
+  if (quiet.dom.node('#alarmScreen').hidden !== false) return 'a silent record got no screen at all';
+  if (quiet.APP.reminders.Chime.loopOn()) return 'a record that asked for silence rang anyway';
+  if (!quiet.phone.vibes.length) return 'a silent record did not even buzz';
+  return true;
+});
+
+check('the reminder engine hands the alarm everything the screen has to say', () => {
+  const APP = loadApp(), Store = APP.Store;
+  Store.load();
+  const today = APP.isoDate(new Date());
+  const now = new Date();
+  const soon = APP.dates.shiftTime(
+    (now.getHours() < 10 ? '0' : '') + now.getHours() + ':' +
+    (now.getMinutes() < 10 ? '0' : '') + now.getMinutes(), 5);
+
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.filter = 'all';
+  Store.data.prefs.notify.lead = 10;
+
+  const ev = Store.add('events', {
+    type: 'event', title: 'פגישת סקיצות', category: 'business', date: today,
+    start: soon, end: '', location: 'הסטודיו', notes: '', clientId: '',
+    reminders: ['default'], alertSound: 'long', alertVibe: 'repeat'
+  });
+
+  const due = APP.Notify.due().filter(d => d.id === ev.id)[0];
+  if (!due) return 'the reminder never came due';
+  // everything the alarm screen paints has to arrive WITH the reminder — the
+  // screen is painted from the queue, which may have come off disk hours later
+  if (due.collection !== 'events') return 'the due entry does not name its collection';
+  if (due.cat !== 'business') return 'the due entry carries no category';
+  if (due.clock !== soon) return 'the due entry names ' + due.clock + ', expected ' + soon;
+  if (due.subject !== 'פגישת סקיצות') return 'the due entry carries no subject';
+  if (due.alert.sound !== 'long') return 'the record’s own sound did not ride along';
+
+  // ...and the tick raises the screen as well as the notification
+  const tick = bodyOf(js, 'tick: function () {');
+  if (tick.indexOf('Alarm.raise(item)') === -1) return 'a fired reminder never reaches the alarm';
+  if (tick.indexOf('self.show(') === -1) return 'the notification half was lost';
+  return true;
+});
+
+check('the background notification is the high-priority half of the same event', () => {
+  const show = bodyOf(js, 'show: function (tag, title, body, alert)');
+  if (!/requireInteraction:\s*true/.test(show)) {
+    return 'a reminder can still be auto-dismissed before anyone sees it';
+  }
+  if (!/renotify:\s*true/.test(show)) return 'a second reminder replaces the first silently';
+  if (!/vibrate:\s*VIBE_PATTERN/.test(show)) return 'the notification carries no vibration';
+  if (!/silent:\s*false/.test(show)) return 'the notification asks the OS for silence';
+  if (show.indexOf('Chime.playAlert(') === -1) return 'the app’s own sound was dropped';
+  return true;
+});
+
+/* ---- 50b. §1 — the ring loop itself ---- */
+
+check('the ring re-arms rather than running out after ten seconds', () => {
+  const Ctx = audioStub();
+  const phone = phoneStub();
+  const APP = loadApp({
+    navigator: phone.nav, document: domStub().doc, AudioContext: Ctx,
+    setInterval: phone.setInterval, clearInterval: phone.clearInterval
+  });
+  APP.Store.load();
+  const Chime = APP.reminders.Chime;
+
+  if (!Chime.loopAlert('long')) return 'the long ring never started';
+  const first = Ctx.scheduled.length;
+  if (!first) return 'the long ring scheduled no oscillators';
+  if (!Chime.loopOn()) return 'the loop registered no re-arm';
+
+  phone.beat();
+  if (Ctx.scheduled.length <= first) return 'the second cycle scheduled nothing';
+
+  // a short tone loops on its own, faster beat
+  Chime.loopAlert('short');
+  const shortBeat = phone.timers.map(t => t.ms);
+  if (shortBeat.indexOf(APP.ui.ALARM_SHORT_MS) === -1) {
+    return 'a short alarm beats at ' + shortBeat.join('/') + 'ms';
+  }
+  if (phone.live() !== 1) return 'starting a second loop left the first one running';
+
+  // stopLoop cuts the timer AND everything already scheduled
+  const live = Chime.live.length;
+  if (!live) return 'nothing was live to cut';
+  Chime.stopLoop();
+  if (Chime.loopOn()) return 'the loop timer survived stopLoop()';
+  if (Chime.live.length !== 0) return 'scheduled oscillators survived stopLoop()';
+  if (phone.live() !== 0) return 'stopLoop() left a timer behind';
+
+  // 'ללא' is a real answer and starts nothing at all
+  if (Chime.loopAlert('none') !== false) return 'a silent record started a loop';
+  if (phone.live() !== 0) return 'a silent record armed a timer';
+  return true;
+});
+
+check('the alarm screen is shipped, styled and unreachable by accident', () => {
+  const block = (html.match(/<div class="alarm"[\s\S]*?\n<\/div>/) || [''])[0];
+  if (!block) return 'no alarm screen in the shell';
+  if (block.indexOf('id="alarmScreen"') === -1) return 'the alarm screen has no id';
+  if (block.indexOf('role="alertdialog"') === -1) return 'the alarm is an ordinary dialog';
+  if (block.indexOf('aria-live="assertive"') === -1) return 'the alarm is announced politely';
+  if (!/\shidden(\s|>)/.test(block)) return 'the alarm ships visible';
+
+  ['alarmKicker', 'alarmClock', 'alarmTitle', 'alarmWhen', 'alarmTags', 'alarmQueue']
+    .forEach(id => {
+      if (block.indexOf('id="' + id + '"') === -1) throw new Error('no #' + id);
+      if (js.indexOf("$('#" + id + "')") === -1) throw new Error('#' + id + ' is never painted');
+    });
+
+  // the dismiss button is the only thing that stops the ringing, so it is the
+  // one control on the screen that must be impossible to miss
+  if (block.indexOf('data-alarm="dismiss"') === -1) return 'no dismiss control';
+  if (block.indexOf('ביטול התראה') === -1) return 'the dismiss button is not the mandated one';
+  if (block.indexOf('data-alarm="open"') === -1) return 'the screen cannot reach the record itself';
+  if (js.indexOf('[data-alarm]') === -1) return 'the alarm controls are not delegated';
+  if (!/if \(el\.dataset\.alarm\) \{ Alarm\.act/.test(js)) return 'the delegate never reaches Alarm';
+
+  // it outranks every other layer, and a display rule may not defeat `hidden`
+  const rule = (css.match(/\.alarm\{[^}]*\}/) || [''])[0];
+  if (!rule) return 'the alarm screen has no styling at all';
+  const z = rule.match(/z-index:\s*(\d+)/);
+  if (!z || parseInt(z[1], 10) < 100) return 'the alarm can be covered by a sheet';
+  if (!/position:\s*fixed/.test(rule) || !/inset:\s*0/.test(rule)) return 'the alarm is not full-screen';
+  if (!/\.alarm\[hidden\]\{\s*display:none/.test(css.replace(/\s*\{\s*/g, '{'))) {
+    return 'the display rule defeats the hidden attribute — the alarm would be permanent';
+  }
+  // Escape is a dismissal, not a way to leave it ringing behind a closed sheet
+  if (js.indexOf('if (Alarm.isOn()) { e.preventDefault(); Alarm.dismiss(); return; }') === -1) {
+    return 'Escape closes the sheets behind a still-ringing alarm';
+  }
+  return true;
+});
+
+/* ---- 50c. §2 — every title in every view opens its record ---- */
+
+check('a calendar chip is a real control carrying its own record', () => {
+  const APP = loadApp(), Store = APP.Store, U = APP.ui;
+  Store.load();
+  const today = APP.isoDate(new Date());
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.filter = 'all';
+
+  const ev = Store.add('events', {
+    type: 'event', title: 'פגישה <עם> "דנה"', category: 'business', date: today,
+    start: '09:00', end: '10:00', location: '', notes: '', clientId: '', reminders: ['at']
+  });
+  const task = Store.add('tasks', {
+    type: 'task', title: 'לשלוח חוזה', category: 'personal', due: today,
+    time: '11:00', status: 'new', priority: 'medium', nextAction: '',
+    subtasks: [], done: false, notes: '', clientId: '', reminders: ['at']
+  });
+
+  const chip = U.calChip('events', ev, 'cal-chip');
+  if (chip.indexOf('<button') !== 0) return 'the chip is not a button';
+  if (chip.indexOf('data-open="events:' + ev.id + '"') === -1) return 'the chip names no record';
+  if (chip.indexOf('cal-chip-business') === -1) return 'the chip carries no category colour';
+  // a title is user input and reaches an attribute AND a text node
+  if (chip.indexOf('<עם>') !== -1) return 'the title is injected unescaped';
+  if (chip.indexOf('&lt;עם&gt;') === -1) return 'the title never made it onto the chip';
+
+  // both collections, one door
+  const marks = U.calMarks(today);
+  if (marks.length !== 2) return 'the day reports ' + marks.length + ' records';
+  if (marks[0].collection !== 'events' || marks[1].collection !== 'tasks') {
+    return 'the marks do not carry the collection they came from';
+  }
+  if (U.calChip('tasks', task, 'cal-chip').indexOf('data-open="tasks:' + task.id + '"') === -1) {
+    return 'a task chip does not open the task';
+  }
+
+  // an untitled record still gets a chip rather than an empty button
+  if (U.calChip('tasks', { id: 'x', title: '', category: 'personal' }, 'cal-chip').indexOf('משימה') === -1) {
+    return 'an untitled record draws an unlabelled control';
+  }
+  return true;
+});
+
+check('the tap on a title opens the reader, not the create sheet', () => {
+  if (js.indexOf('[data-open],') === -1 && js.indexOf('[data-open]') === -1) {
+    return 'data-open is not in the delegate’s selector list';
+  }
+  const branch = (js.match(/if \(el\.dataset\.open\) \{[\s\S]*?\n    \}/) || [''])[0];
+  if (!branch) return 'no data-open branch in the delegate';
+  if (branch.indexOf('openTapped(') === -1) return 'a chip does not go through the reader door';
+
+  /* The cell is still the creation surface and the chip is inside it, so the
+     ONLY thing that keeps the two apart is closest() resolving to whichever of
+     them the finger actually landed on. That is why the chip has to be a real
+     element with its own attribute rather than a span the cell interprets. */
+  const sel = (js.match(/var el = e\.target\.closest \? e\.target\.closest\([\s\S]*?\) : null;/) || [''])[0];
+  if (sel.indexOf('[data-open]') === -1) return 'the chip is not matched before the cell';
+  if (sel.indexOf('[data-calslot]') === -1) return 'the cell lost its own creation branch';
+  return true;
+});
+
+check('every calendar view draws its titles as openable controls', () => {
+  const month = bodyOf(js, 'renderMonth: function ()');
+  const week = bodyOf(js, 'renderWeek: function ()');
+  const day = bodyOf(js, 'renderDay: function ()');
+
+  if (month.indexOf("calChip(m.collection, m.rec, 'cal-chip')") === -1) {
+    return 'a month cell still draws anonymous marks only';
+  }
+  // the dots stay — they are how a BUSY day states its categories at a glance
+  if (month.indexOf('<span class="dot dot-') === -1) return 'the month cell lost its category dots';
+  if (week.indexOf("calChip('events', e, 'wk-chip')") === -1) return 'a week chip is still inert text';
+  if (day.indexOf("data-open=\"events:' + b.ev.id") === -1) return 'a day-timeline block does not open';
+  if (day.indexOf("calChip('events', e, 'wk-chip')") === -1) return 'an all-day chip does not open';
+  if (day.indexOf('<button type="button" class="dv-block') === -1) return 'the day block is not a control';
+
+  /* A <button> may not contain a <button>, so the two cells that hold chips
+     had to stop being buttons. The ARIA button pattern they take on instead is
+     only honest if the keyboard contract comes with it. */
+  const open = bodyOf(js, 'function cellOpen(cls, iso, extra, label)');
+  if (open.indexOf('role="button"') === -1) return 'the cell is not exposed as a button';
+  if (open.indexOf('tabindex="0"') === -1) return 'the cell is unreachable from the keyboard';
+  if (open.indexOf('slotAttr(') === -1) return 'the cell lost its creation payload';
+  const keys = bodyOf(js, 'function onKeydown(e)');
+  if (keys.indexOf('d.calslot') === -1) return 'Enter and Space do nothing on a calendar cell';
+  if (!/e\.key === 'Enter' \|\| e\.key === ' '/.test(keys)) return 'the cell answers only one of Enter/Space';
+  if (keys.indexOf('e.preventDefault()') === -1) return 'Space scrolls the page under the grid';
+
+  // the overflow count is a control in BOTH grids, not just the month
+  if (month.indexOf('calMore(iso, extra)') === -1) return 'the month overflow is a dead label';
+  if (week.indexOf('calMore(iso, list.length - 2)') === -1) return 'the week overflow is a dead label';
+  const more = bodyOf(js, 'function calMore(iso, n)');
+  if (more.indexOf('data-calday="') === -1) return 'the overflow control names no day';
+  if (!/if \(el\.dataset\.calday\) \{ Cal\.openDay/.test(js)) return 'the overflow is not delegated';
+
+  // the agenda pane already drew real rows, and must keep doing so
+  const agenda = bodyOf(js, 'renderAgenda: function ()');
+  if (agenda.indexOf('eventCard') === -1 || agenda.indexOf('taskRow') === -1) {
+    return 'the agenda stopped drawing openable rows';
+  }
+  return true;
+});
+
+check('the three panes actually render, and every record in them is openable', () => {
+  const dom = domStub();
+  const APP = loadApp({ document: dom.doc });
+  const Store = APP.Store, Cal = APP.Cal;
+  Store.load();
+
+  const today = APP.isoDate(new Date());
+  Store.data.events.length = 0;
+  Store.data.tasks.length = 0;
+  Store.data.prefs.filter = 'all';
+
+  const timed = Store.add('events', {
+    type: 'event', title: 'פגישת סקיצות', category: 'business', date: today,
+    start: '09:00', end: '10:00', location: 'הסטודיו', notes: '', clientId: '', reminders: ['at']
+  });
+  const allDay = Store.add('events', {
+    type: 'event', title: 'יום צילומים', category: 'personal', date: today,
+    start: '', end: '', location: '', notes: '', clientId: '', reminders: ['at']
+  });
+  const task = Store.add('tasks', {
+    type: 'task', title: 'לשלוח חוזה', category: 'personal', due: today,
+    time: '11:00', status: 'new', priority: 'medium', nextAction: '',
+    subtasks: [], done: false, notes: '', clientId: '', reminders: ['at']
+  });
+
+  Cal.anchor = today;
+  Cal.renderMonth();
+  Cal.renderWeek();
+  Cal.renderDay();
+
+  const panes = {
+    // the month cell draws MONTH_CHIPS titles; the rest are not hidden, they
+    // are behind the "+N" control asserted below
+    '#calMonth': [timed],
+    '#calWeek': [timed],              // the week grid is events only
+    '#calDay': [timed, allDay]        // ...and so is the timeline + its all-day strip
+  };
+
+  Object.keys(panes).forEach(sel => {
+    const out = dom.node(sel).innerHTML;
+    if (!out) throw new Error(sel + ' rendered nothing at all');
+    // every <button> that was opened was closed — the cells stopped being
+    // buttons precisely so these could be, and an unbalanced tag would nest
+    const opened = (out.match(/<button/g) || []).length;
+    const closed = (out.match(/<\/button>/g) || []).length;
+    if (opened !== closed) throw new Error(sel + ' opened ' + opened + ' buttons and closed ' + closed);
+    const divs = (out.match(/<div/g) || []).length;
+    const undivs = (out.match(/<\/div>/g) || []).length;
+    if (divs !== undivs) throw new Error(sel + ' opened ' + divs + ' divs and closed ' + undivs);
+    if (/<button[^>]*>[^<]*<button/.test(out)) throw new Error(sel + ' nests a button inside a button');
+
+    panes[sel].forEach(rec => {
+      const key = (rec.due !== undefined ? 'tasks:' : 'events:') + rec.id;
+      if (out.indexOf('data-open="' + key + '"') === -1) {
+        throw new Error(sel + ' draws ' + rec.title + ' with no way to open it');
+      }
+    });
+  });
+
+  // the creation surface is still underneath every one of them
+  ['#calMonth', '#calWeek', '#calDay'].forEach(sel => {
+    if (dom.node(sel).innerHTML.indexOf('data-calslot="') === -1) {
+      throw new Error(sel + ' lost its contextual-creation surface');
+    }
+  });
+  if (dom.node('#calMonth').innerHTML.indexOf('cal-chips') === -1) return 'no titles reached the month grid';
+
+  /* A cell can only draw MONTH_CHIPS titles, so the count for the rest has to
+     BE the way to reach them — otherwise the third record on a busy day is
+     visible in the grid and openable from nowhere in it. */
+  const month = dom.node('#calMonth').innerHTML;
+  if (month.indexOf('+1') === -1) return 'the overflow is not even counted';
+  if (month.indexOf('data-calday="' + today + '"') === -1) {
+    return 'the "+N" count is a dead label — the records behind it are unreachable';
+  }
+  Cal.openDay(today);
+  if (Cal.view !== 'day') return 'the overflow does not open the day view';
+  if (Cal.anchor !== today) return 'the day view opened on ' + Cal.anchor;
+  // ...and that pane holds every one of the three, each with its own door
+  const all = dom.node('#calDay').innerHTML;
+  [timed, allDay].forEach(e => {
+    if (all.indexOf('data-open="events:' + e.id + '"') === -1) {
+      throw new Error('the day view hides ' + e.title);
+    }
+  });
+  if (all.indexOf('data-rec="tasks:' + task.id + '"') === -1) {
+    return 'the day view drops the task the month cell had no room for';
+  }
+  return true;
+});
+
+check('the new controls are styled, and the swipe still owns the horizontal axis', () => {
+  ['.cal-chip', '.cal-chips', '.wk-chip', '.cal-chip-business', '.cal-chip-personal',
+    '.wk-chip-business', '.wk-chip-personal'].forEach(s => {
+    if (css.indexOf(s + '{') === -1) throw new Error('no rule for ' + s);
+  });
+  const flat = css.replace(/\s*\{\s*/g, '{');
+  // a <button> brings its own font and centring; a chip that does not reset
+  // them reads as browser chrome inside a Hebrew calendar
+  ['.cal-chip', '.wk-chip'].forEach(s => {
+    const rule = (flat.match(new RegExp('\\' + s + '\\{[^}]*\\}')) || [''])[0];
+    if (!/font-family:inherit/.test(rule)) throw new Error(s + ' does not inherit the app font');
+    if (!/cursor:pointer/.test(rule)) throw new Error(s + ' does not read as tappable');
+  });
+  // the two cells stopped being <button> elements, so the blanket rule that
+  // reserved the horizontal axis for the swipe no longer reaches them
+  if (!/\.cal-stage \[data-calslot\]\{\s*touch-action:pan-y/.test(flat)) {
+    return 'a role="button" cell hands calendar swipes back to the browser';
+  }
+  // ...and a month cell now has two titles to fit under its number
+  const cell = (flat.match(/\.cal-cell\{[^}]*\}/) || [''])[0];
+  const min = cell.match(/min-height:(\d+)px/);
+  if (!min || parseInt(min[1], 10) < 74) return 'the month cell has no room for its titles';
+  return true;
+});
+
+/* ---- 50d. §2 — and the reader behind the tap holds the whole record ---- */
+
+check('the detail modal states every field the mandate names', () => {
+  const APP = loadApp(), Store = APP.Store, U = APP.ui;
+  Store.load();
+  const today = APP.isoDate(new Date());
+  Store.data.tasks.length = 0;
+  Store.data.events.length = 0;
+  Store.data.clients.length = 0;
+
+  const client = Store.add('clients', {
+    type: 'client', name: 'דנה לוי', phone: '', email: '', status: 'quoted',
+    category: 'business', interest: '', budget: '', nextAction: '', notes: ''
+  });
+  const task = Store.add('tasks', {
+    type: 'task', title: 'לשלוח הצעת מחיר', category: 'business', due: today,
+    time: '15:30', status: 'waiting', priority: 'high',
+    nextAction: 'להתקשר ולאשר מידות', subtasks: [], done: false,
+    notes: 'הלקוחה ביקשה שתי אפשרויות מסגור', clientId: client.id,
+    reminders: ['at', '1440'], alertSound: 'long', alertVibe: 'repeat'
+  });
+
+  const D = U.Detail;
+  D.collection = 'tasks';
+  D.id = task.id;
+  const body = D.body(task);
+
+  const owed = {
+    'the title': 'לשלוח הצעת מחיר',
+    'the date & time': '15:30',
+    'the notes': 'הלקוחה ביקשה שתי אפשרויות מסגור',
+    'the client': 'דנה לוי',
+    'the category': 'עסקי',
+    'the status': 'ממתין ללקוח',
+    'the reminder settings': 'התראות (2)',
+    'the next action': 'להתקשר ולאשר מידות'
+  };
+  const missing = Object.keys(owed).filter(k => body.indexOf(owed[k]) === -1);
+  if (missing.length) return 'the reader never states ' + missing.join(', ');
+
+  // ...and the three quick actions the mandate names are on the sheet itself
+  const acts = (html.match(/<div class="sheet-actions detail-acts">[\s\S]*?<\/div>/) || [''])[0];
+  if (!acts) return 'the reader has no action bar';
+  [['edit', 'עריכה'], ['done', 'סימון כבוצע'], ['delete', 'מחיקה']].forEach(pair => {
+    if (acts.indexOf('data-detailact="' + pair[0] + '"') === -1) {
+      throw new Error('no ' + pair[0] + ' action');
+    }
+    if (acts.indexOf(pair[1]) === -1) throw new Error('the ' + pair[0] + ' action is unlabelled');
+  });
+
+  // an event reaches the same reader, and both collections are declared
+  if (APP.ui.TAP_DETAIL.join(',') !== 'tasks,events') {
+    return 'the reader covers ' + APP.ui.TAP_DETAIL.join(',');
+  }
+  return true;
+});
+
+check('a title tapped from the alarm screen lands in the same reader', () => {
+  const open = bodyOf(js, 'open: function () {\n      var a = this.current();');
+  if (!open) return 'the alarm screen cannot open its record';
+  if (open.indexOf('openTapped(') === -1) return 'the alarm opens something other than the reader';
+  if (open.indexOf('this.dismiss()') === -1) return 'opening the record leaves the alarm ringing';
+  // a record deleted since the reminder was scheduled has no reader — the
+  // alarm was still real, so it is dismissed either way rather than stuck
+  if (open.indexOf('if (!collection || !id) return false;') === -1) {
+    return 'a deleted record would leave the alarm on screen forever';
+  }
+  return true;
+});
+
+/* ---- 50e. the shipped shell and the specification ---- */
+
+check('the shell was bumped to v24 for Sprint 18', () => {
+  const sw = read('sw.js');
+  const m = sw.match(/CACHE_VERSION\s*=\s*'v(\d+)'/);
+  if (!m || parseInt(m[1], 10) < 24) return 'the cache is still v' + (m ? m[1] : '?');
+  const v = 'v' + m[1];
+  if (html.indexOf('app.js?v=' + v) === -1) return 'app.js is not busted to ' + v;
+  if (html.indexOf('styles.css?v=' + v) === -1) return 'styles.css is not busted to ' + v;
+  if (js.indexOf("var APP_VERSION = '" + v + "'") === -1) return 'APP_VERSION disagrees with the worker';
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 18', () => {
+  ['Sprint 18', 'מסך שעון מעורר', 'wakeLock', 'data-open'].forEach(s => {
+    if (plan.indexOf(s) === -1) throw new Error('the plan never mentions ' + s);
+  });
   return true;
 });
 

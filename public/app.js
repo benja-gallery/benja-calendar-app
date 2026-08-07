@@ -216,6 +216,40 @@
   };
   var ALERT_SOUND_DEFAULT = 'short';
 
+  /* --- the full-screen alarm clock (Sprint 18 · mandate §1) ---
+
+     A notification is a message; an alarm is a demand. Everything below is
+     what turns the first into the second.
+
+     A reminder has always been a notification and a ten-second ring: raised
+     once, and over whether or not anybody was there. That is exactly right for
+     a heads-up and exactly wrong for the 09:00 you must not miss — a phone
+     face-down on a desk delivers a ten-second ring to nobody. So a due
+     reminder now also RAISES A SCREEN: a full-bleed overlay that states what
+     is starting, keeps ringing on a beat, keeps buzzing, holds the display
+     awake, and does not stop for anything except the finger that dismisses it.
+
+     Every number here is a beat rather than a ceiling. There is deliberately
+     no time limit on the ringing: "until dismissed" is the whole feature. */
+
+  /** the mandated hardware pattern — buzz, pause, buzz, pause */
+  var ALARM_VIBE = [1000, 500, 1000, 500];
+  /** that pattern's own length, which is therefore the beat it re-fires on */
+  var ALARM_VIBE_MS = 3000;
+  /** a short tone is under a second, so looping it needs a beat of its own */
+  var ALARM_SHORT_MS = 2500;
+  /**
+   * How long an undismissed alarm survives a closed app.
+   *
+   * The queue is persisted, so an alarm that was ringing when the phone was
+   * locked is still ringing when it comes back. An alarm from yesterday is not
+   * late, it is stale, and screaming about it on the next launch would teach
+   * the user to dismiss the overlay without reading it.
+   */
+  var ALARM_KEEP_MS = 60 * 60 * 1000;
+  /** ceiling on the pending queue — a device left alone must not stack forever */
+  var ALARM_MAX = 12;
+
   /* --- מראה ועיצוב (mandate §2d) ---
      'system' is not a third palette: it is "ask the OS", resolved through
      prefers-color-scheme at paint time and re-resolved when the OS flips. */
@@ -224,7 +258,7 @@
   var THEME_DEFAULT = 'dark';
 
   /** the shell version — MUST match CACHE_VERSION in sw.js and the ?v= in index.html */
-  var APP_VERSION = 'v23';
+  var APP_VERSION = 'v24';
 
   /* --- client CRM (Sprint 4) --- */
   var CLIENT_STATUSES = ['lead', 'contacted', 'interested', 'quoted',
@@ -277,6 +311,12 @@
   var HOUR_PX = 56;      // day-view hour row height — mirrors --hour-h in styles.css
   var AGENDA_DAYS = 30;  // rolling agenda window
   var SWIPE_MIN = 55;    // px before a horizontal drag counts as navigation
+  /* Sprint 18 — a month cell now draws both: the dots that state how busy the
+     day is, and the first titles, which are what makes it openable (§2). Two
+     titles is what fits a 7-column grid on a 320px screen without truncating
+     every one of them into uselessness; the rest are counted by +N. */
+  var MONTH_DOTS = 4;
+  var MONTH_CHIPS = 2;
 
   /* --- cloud sync engine (Sprint 5) --- */
 
@@ -737,6 +777,52 @@
       return want === 'long'
         ? Chime.playLong(chosen ? chosen.long : LONG_DEFAULT)
         : Chime.playShort(chosen ? chosen.short : SHORT_DEFAULT);
+    },
+
+    /* ======================================================================
+       Sprint 18 — the ring that does not stop (mandate §1)
+       ====================================================================== */
+
+    /** the live re-arm timer; null means nothing is looping */
+    loopTimer: null,
+
+    loopOn: function () { return !!Chime.loopTimer; },
+
+    /**
+     * playAlert(), re-armed on its own beat until stopLoop().
+     *
+     * playLong() schedules its ten seconds in ONE pass precisely so a throttled
+     * background tab still rings on the beat. A loop cannot do that — ten
+     * seconds is not "until dismissed" and no oscillator can be scheduled for a
+     * moment nobody has decided on yet — so the re-arm is a real interval. That
+     * is honest here in a way it would not be inside playLong(): the alarm
+     * overlay is on screen and the tab is foregrounded, which is exactly the
+     * condition under which a browser does NOT throttle a timer.
+     *
+     * 'none' is still a real answer. A record that asked for silence rings
+     * silently, and the overlay and the vibration carry the alarm instead.
+     */
+    loopAlert: function (kind) {
+      var want = normAlertSound(kind);
+      Chime.stopLoop();
+      if (want === 'none') return false;
+      if (!Chime.playAlert(want)) return false;
+
+      var beat = want === 'long' ? LONG_MS : ALARM_SHORT_MS;
+      Chime.loopTimer = setInterval(function () {
+        // the chime can be switched off mid-alarm; the loop follows it out
+        if (!Chime.playAlert(want)) Chime.stopLoop();
+      }, beat);
+      return true;
+    },
+
+    /** cut the loop AND everything it has already scheduled */
+    stopLoop: function () {
+      if (Chime.loopTimer) {
+        clearInterval(Chime.loopTimer);
+        Chime.loopTimer = null;
+      }
+      return Chime.stop();
     }
   };
 
@@ -1692,6 +1778,9 @@
           // serverAt — when the Worker last accepted this device's push
           // subscription. '' means local-only delivery (Sprint 11).
           notify: { on: false, lead: 10, sound: true, serverAt: '' }, fired: {},
+          // Sprint 18 — the alarms still waiting to be dismissed. Persisted on
+          // purpose: an alarm the phone was locked on is still owed (§1).
+          alarms: [],
           // Sprint 10 — "משימות קרובות" on My Day starts open: the whole point
           // of the widget is that nothing can hide inside it
           upcomingOpen: true,
@@ -1795,6 +1884,11 @@
       if (typeof d.prefs.notify.serverAt !== 'string') d.prefs.notify.serverAt = '';
       if (!d.prefs.fired || typeof d.prefs.fired !== 'object') d.prefs.fired = {};
       d.prefs.upcomingOpen = d.prefs.upcomingOpen !== false;
+
+      // Sprint 18 — the alarm queue, absent in every store written before the
+      // alarm screen existed. Normalised rather than trusted, and anything
+      // older than ALARM_KEEP_MS is dropped: an alarm can be late, never stale.
+      d.prefs.alarms = normAlarms(d.prefs.alarms);
 
       // Sprint 13 — the settings drawer's block, absent in every store written
       // before it existed. Every value is normalised rather than trusted, so a
@@ -3328,6 +3422,56 @@
     return ' data-calslot="' + iso + '|' + (time || '') + '"';
   }
 
+  /**
+   * A calendar cell is two surfaces, not one (Sprint 18 · mandate §2).
+   *
+   * Empty space inside it is still "create something here" — that is what
+   * data-calslot has always meant. But the records drawn INSIDE it are records:
+   * before this they were anonymous dots and unclickable text, so a meeting you
+   * could see in the month grid was a meeting you could not open, and the only
+   * way to read one was to leave the calendar for a list that held it as a row.
+   *
+   * So the cell stops being a <button> and becomes a role="button" container —
+   * a <button> may not contain a <button>, and the title has to be a real
+   * control, not a span with a handler bolted to it. The keyboard contract the
+   * element loses is paid back in onKeydown(); everything else about the cell
+   * (the class, the slot payload, the press dip) is unchanged.
+   */
+  function cellOpen(cls, iso, extra, label) {
+    return '<div class="' + cls + (extra || '') + '" role="button" tabindex="0"' +
+      slotAttr(iso, label && label.time) +
+      ' aria-label="' + esc((label && label.text) || hebDate(iso)) + '">';
+  }
+
+  /** the record's own title, as the control that opens its reader */
+  function calChip(collection, rec, cls) {
+    var title = recTitle(collection, rec) || (collection === 'tasks' ? 'משימה' : 'אירוע');
+    return '<button type="button" class="' + cls + ' ' + cls + '-' + rec.category + '"' +
+      ' data-open="' + collection + ':' + rec.id + '"' +
+      ' title="' + esc(title) + '">' + esc(title) + '</button>';
+  }
+
+  /**
+   * "+3" — the records a cell had no room for, as the way to reach them.
+   *
+   * A cell can only draw so many titles, and until this the overflow was a
+   * dead label: the third meeting on a busy Tuesday was counted and could not
+   * be opened from anywhere in the month grid. It is a control now, and it
+   * goes exactly where the missing records are — that day, in the day view,
+   * which lists every one of them as an openable row.
+   */
+  function calMore(iso, n) {
+    return '<button type="button" class="cal-more" data-calday="' + iso + '"' +
+      ' aria-label="' + esc('עוד ' + n + ' פריטים ב' + hebDate(iso) + ' — פתיחת תצוגת היום') + '">' +
+      '+' + n + '</button>';
+  }
+
+  /** every dated record on one day, tagged with the collection it came from */
+  function calMarks(iso) {
+    return eventsOn(iso).map(function (e) { return { collection: 'events', rec: e }; })
+      .concat(boardTasksOn(iso).map(function (x) { return { collection: 'tasks', rec: x }; }));
+  }
+
   var Cal = {
     view: 'month',
     anchor: todayISO(),
@@ -3358,6 +3502,20 @@
         return;
       }
       this.step(what === 'next' ? 1 : -1);
+    },
+
+    /**
+     * One day, opened in the only view that can hold all of it (Sprint 18 §2).
+     *
+     * This is where the "+3" on a crowded cell goes. A month cell draws two
+     * titles because two is what fits; the rest are not hidden, they are one
+     * tap away in a pane that lists every one of them as an openable row.
+     */
+    openDay: function (iso) {
+      if (!iso) return false;
+      this.anchor = iso;
+      this.setView('day');            // setView() persists the choice and repaints
+      return true;
     },
 
     /* ------------------------------------------------------------- labels */
@@ -3415,20 +3573,28 @@
 
       var grid = cells.map(function (iso) {
         var d = parseISO(iso);
-        var marks = eventsOn(iso).concat(boardTasksOn(iso));
-        var shown = marks.slice(0, 4);
-        var extra = marks.length - shown.length;
+        var entries = calMarks(iso);
+        // the dots stay: they are the only thing that fits when a day is busy,
+        // and they are how a full cell states its categories at a glance (§0.2)
+        var dots = entries.slice(0, MONTH_DOTS).map(function (m) { return m.rec; });
+        // ...and the titles are what makes the cell reachable (mandate §2)
+        var shown = entries.slice(0, MONTH_CHIPS);
+        var extra = entries.length - shown.length;
 
-        return '<button type="button" class="cal-cell' +
-          (d.getMonth() !== month ? ' is-out' : '') +
-          (iso === t ? ' is-today' : '') + '"' + slotAttr(iso) +
-          ' aria-label="' + esc(hebDate(iso) + ' · ' + marks.length + ' פריטים') + '">' +
+        return cellOpen('cal-cell', iso,
+          (d.getMonth() !== month ? ' is-out' : '') + (iso === t ? ' is-today' : ''),
+          { text: hebDate(iso) + ' · ' + entries.length + ' פריטים — הקשה מוסיפה פריט חדש' }) +
           '<span class="cal-num">' + d.getDate() + '</span>' +
-          '<span class="cal-dots">' + shown.map(function (r) {
+          '<span class="cal-dots">' + dots.map(function (r) {
             return '<span class="dot dot-' + r.category + '"></span>';
           }).join('') + '</span>' +
-          (extra > 0 ? '<span class="cal-more">+' + extra + '</span>' : '') +
-          '</button>';
+          (shown.length
+            ? '<span class="cal-chips">' + shown.map(function (m) {
+              return calChip(m.collection, m.rec, 'cal-chip');
+            }).join('') + '</span>'
+            : '') +
+          (extra > 0 ? calMore(iso, extra) : '') +
+          '</div>';
       }).join('');
 
       $('#calMonth').innerHTML =
@@ -3464,14 +3630,13 @@
       }).join('');
 
       function cell(iso, time, list) {
-        return '<button type="button" class="wk-cell' + (iso === t ? ' is-today' : '') + '"' +
-          slotAttr(iso, time) +
-          ' aria-label="' + esc(hebDate(iso) + (time ? ' ' + time : '')) + '">' +
+        return cellOpen('wk-cell', iso, (iso === t ? ' is-today' : ''),
+          { time: time, text: hebDate(iso) + (time ? ' ' + time : '') + ' — הקשה מוסיפה אירוע' }) +
           list.slice(0, 2).map(function (e) {
-            return '<span class="wk-chip wk-' + e.category + '">' + esc(e.title) + '</span>';
+            return calChip('events', e, 'wk-chip');
           }).join('') +
-          (list.length > 2 ? '<span class="cal-more">+' + (list.length - 2) + '</span>' : '') +
-          '</button>';
+          (list.length > 2 ? calMore(iso, list.length - 2) : '') +
+          '</div>';
       }
 
       // all-day strip: events carrying a date but no time still need a home
@@ -3513,9 +3678,12 @@
         timed.push({ s: s, e: en, ev: e });
       });
 
+      // mandate §2 — the block IS the title on this view, so the block itself
+      // is the control that opens the record's reader
       var blocks = layoutBlocks(timed).map(function (b) {
         var w = 100 / b.lanes;
-        return '<div class="dv-block dv-' + b.ev.category + '" style="' +
+        return '<button type="button" class="dv-block dv-' + b.ev.category + '"' +
+          ' data-open="events:' + b.ev.id + '" style="' +
           'top:' + Math.round(b.s / 60 * HOUR_PX) + 'px;' +
           'height:' + Math.max(26, Math.round((b.e - b.s) / 60 * HOUR_PX) - 3) + 'px;' +
           'inset-inline-start:' + (b.lane * w) + '%;' +
@@ -3523,7 +3691,7 @@
           '<b>' + esc(b.ev.title) + '</b>' +
           '<span>' + esc(b.ev.start + (b.ev.end ? '–' + b.ev.end : '') +
             (b.ev.location ? ' · ' + b.ev.location : '')) + '</span>' +
-          '</div>';
+          '</button>';
       }).join('');
 
       var hours = [], slots = [];
@@ -3546,7 +3714,7 @@
         '<div class="cal-day">' +
         (untimed.length
           ? '<div class="dv-untimed">' + untimed.map(function (e) {
-            return '<span class="wk-chip wk-' + e.category + '">' + esc(e.title) + '</span>';
+            return calChip('events', e, 'wk-chip');
           }).join('') + '</div>'
           : '') +
         '<div class="dv-grid">' +
@@ -8765,6 +8933,12 @@
         // subject to that, which is the whole reason it exists
         silent: false,
         vibrate: VIBE_PATTERN[a.vibe] || [],
+        /* Sprint 18 §1 — a reminder is not an FYI that may be auto-dismissed
+           after a few seconds. It stays in the shade until it is acted on,
+           which is what "high priority" means at the Notification API level,
+           and re-alerts rather than silently replacing a same-tag predecessor. */
+        requireInteraction: true,
+        renotify: true,
         data: { url: './index.html' }
       };
 
@@ -8863,17 +9037,25 @@
        * reminder that date is the reminder's own — a reminder set for next
        * Tuesday must not be swept tonight.
        */
-      function collect(rec, kind, clockDate, clockTime, body) {
+      function collect(collection, rec, kind, clockDate, clockTime, body) {
         remindPlan(rec, lead).forEach(function (plan) {
           if (plan.at) {
             var day = plan.at.slice(0, 10);
-            var gapAbs = gapTo(day, plan.at.slice(11, 16));
+            var stamp = plan.at.slice(11, 16);
+            var gapAbs = gapTo(day, stamp);
             if (gapAbs === null || gapAbs > 0 || gapAbs < -MISS_GRACE_MIN) return;
             out.push({
               id: rec.id, on: day, tok: plan.tok,
               key: remindMark(plan.tok, rec.id, day),
               // Sprint 13 — the record's own sound & vibration ride with it
               alert: alertOf(rec),
+              /* Sprint 18 — what the ALARM SCREEN has to state (§1): which
+                 record it belongs to, so "פרטים" can open it; the category, so
+                 the screen carries the same colour-and-label pair every other
+                 surface does; and the clock the alarm is about. A custom
+                 reminder names its own moment rather than the record's. */
+              collection: collection, cat: normCat(rec.category),
+              kind: kind, clock: stamp, subject: recTitle(collection, rec),
               title: 'תזכורת · ' + kind, body: body
             });
             return;
@@ -8885,20 +9067,22 @@
             id: rec.id, on: clockDate, tok: plan.tok,
             key: remindMark(plan.tok, rec.id, clockDate),
             alert: alertOf(rec),
+            collection: collection, cat: normCat(rec.category),
+            kind: kind, clock: clockTime, subject: recTitle(collection, rec),
             title: kind + ' ' + when(gap), body: body
           });
         });
       }
 
       Store.data.events.forEach(function (e) {
-        collect(e, 'פגישה', e.date, e.start,
+        collect('events', e, 'פגישה', e.date, e.start,
           e.title + ' · ' + e.start + (e.location ? ' · ' + e.location : ''));
       });
 
       Store.data.tasks.forEach(function (x) {
         // הושלם and בוטל are both closed — neither deserves a reminder
         if (isClosed(x.status)) return;
-        collect(x, 'משימה', x.due, x.time, x.title + ' · ' + x.time);
+        collect('tasks', x, 'משימה', x.due, x.time, x.title + ' · ' + x.time);
       });
 
       return out;
@@ -8931,6 +9115,10 @@
         fired[key] = 1;
         dirty = true;
         self.show(key, item.title, item.body, item.alert);
+        /* Sprint 18 — and the screen (§1). The notification is the background
+           half and stays exactly as it was; this is the foreground half, and
+           it is the one that keeps going until a finger says otherwise. */
+        Alarm.raise(item);
       });
 
       if (dirty) Store.save();
@@ -9072,6 +9260,326 @@
       this.tick();
       // the subscription is what lets a reminder arrive with the app closed
       this.linkServer();
+    }
+  };
+
+  /* ==========================================================================
+     מסך שעון מעורר — the full-screen alarm (Sprint 18 · mandate §1)
+
+     Everything above this point delivers a reminder the way the platform
+     delivers a message: once, quietly, and over whether or not anybody saw it.
+     That is right for a heads-up and wrong for the 09:00 you cannot miss.
+
+     This is the other contract. When a reminder falls due the app raises a
+     screen — full-bleed, high contrast, the title and the clock and the
+     category on it — and then it does four things that a notification does not:
+
+       1. it RINGS ON A BEAT, re-arming the record's own sound family forever
+          rather than for ten seconds (Chime.loopAlert);
+       2. it BUZZES on the mandated [1000,500,1000,500] pattern, re-fired on
+          the pattern's own length so the phone never falls silent;
+       3. it HOLDS THE SCREEN AWAKE through a Screen Wake Lock, because an
+          alarm nobody can see is an alarm nobody dismissed;
+       4. it STAYS. Nothing here has a timeout. The only thing that stops it is
+          the ביטול התראה button.
+
+     Two alarms falling in the same minute do not fight over the screen: the
+     second queues behind the first and takes over the moment it is dismissed.
+     The queue is persisted, so an alarm that was ringing when the phone locked
+     is still owed when the app comes back — bounded by ALARM_KEEP_MS, because
+     an alarm may be late but must never be stale.
+
+     Every capability is optional and independently guarded. No wakeLock, no
+     vibration motor, no AudioContext, no permission — each one degrades to the
+     next-loudest thing the device can actually do, and the screen itself is
+     the floor that is always available.
+     ========================================================================== */
+
+  /**
+   * The alarm queue as it comes back off disk — trusted no further than its
+   * own clock. A malformed row is dropped rather than allowed to crash the
+   * paint, an entry past ALARM_KEEP_MS is stale rather than late, and the same
+   * reminder key can only ever hold one place in the queue.
+   */
+  function normAlarms(list) {
+    if (!Array.isArray(list)) return [];
+    var now = Date.now();
+    var seen = {};
+    var out = [];
+
+    list.forEach(function (a) {
+      if (!a || typeof a !== 'object') return;
+      var key = String(a.key || '');
+      var at = typeof a.at === 'number' && a.at > 0 ? a.at : 0;
+      if (!key || !at || seen[key]) return;
+      if (now - at > ALARM_KEEP_MS) return;
+      seen[key] = 1;
+      out.push({
+        key: key,
+        at: at,
+        id: String(a.id || ''),
+        // an alarm can only ever point at a record the reader can open
+        collection: TAP_DETAIL.indexOf(a.collection) === -1 ? '' : a.collection,
+        cat: normCat(a.cat),
+        kind: String(a.kind || ''),
+        clock: String(a.clock || ''),
+        subject: String(a.subject || ''),
+        title: String(a.title || ''),
+        body: String(a.body || ''),
+        alert: {
+          sound: normAlertSound(a.alert && a.alert.sound),
+          vibe: normVibe(a.alert && a.alert.vibe)
+        }
+      });
+    });
+
+    return out.slice(0, ALARM_MAX);
+  }
+
+  /** one due reminder, reduced to what the alarm screen and the store need */
+  function alarmOf(item) {
+    return normAlarms([{
+      key: item.key, at: Date.now(), id: item.id, collection: item.collection,
+      cat: item.cat, kind: item.kind, clock: item.clock, subject: item.subject,
+      title: item.title, body: item.body, alert: item.alert
+    }])[0] || null;
+  }
+
+  var Alarm = {
+    /** the live vibration beat; null means the phone is not being buzzed */
+    vibeTimer: null,
+    /** the live WakeLockSentinel, or null on a device/browser without one */
+    wake: null,
+
+    /** the queue IS the state — the store row and the screen never disagree */
+    queue: function () {
+      var d = Store.data;
+      if (!d || !d.prefs) return [];
+      if (!Array.isArray(d.prefs.alarms)) d.prefs.alarms = [];
+      return d.prefs.alarms;
+    },
+
+    current: function () { return this.queue()[0] || null; },
+    isOn: function () { return this.queue().length > 0; },
+
+    /* ------------------------------------------------------------- raising */
+
+    /**
+     * A reminder has fired — put it on the screen.
+     *
+     * The ledger in Notify.tick() already guarantees exactly one delivery per
+     * reminder, and the key rides along so a queue restored from disk cannot
+     * hold the same alarm twice either.
+     */
+    raise: function (item) {
+      var entry = item && item.key ? alarmOf(item) : null;
+      if (!entry) return false;
+
+      var q = this.queue();
+      for (var i = 0; i < q.length; i++) if (q[i].key === entry.key) return false;
+      if (q.length >= ALARM_MAX) return false;
+
+      var first = q.length === 0;
+      q.push(entry);
+      Store.save();
+
+      // an alarm already ringing keeps the screen; this one waits its turn and
+      // is only counted on it, which is what the "+N ממתינות" line says
+      if (first) this.start(); else this.paint();
+      return true;
+    },
+
+    /** put the head of the queue on screen and make it impossible to ignore */
+    start: function () {
+      if (!this.isOn()) return false;
+      this.paint();
+      this.ring();
+      this.lock();
+      return true;
+    },
+
+    /* -------------------------------------------------------- sound & buzz */
+
+    /**
+     * The ring and the pulse. Both are loops, both are guarded, and neither is
+     * gated on the app's own touch-feedback switch: silencing the interface
+     * must never silence an alarm (the same rule Haptics.pattern() keeps).
+     */
+    ring: function () {
+      var a = this.current();
+      if (!a) return false;
+
+      Chime.loopAlert(a.alert.sound);
+
+      clearInterval(this.vibeTimer);
+      this.vibeTimer = null;
+      if (a.alert.vibe === 'none' || !Haptics.supported()) return true;
+
+      Haptics.fire(ALARM_VIBE);
+      this.vibeTimer = setInterval(function () { Haptics.fire(ALARM_VIBE); }, ALARM_VIBE_MS);
+      return true;
+    },
+
+    /** everything the alarm is doing to the device, undone */
+    hush: function () {
+      Chime.stopLoop();
+      if (this.vibeTimer) { clearInterval(this.vibeTimer); this.vibeTimer = null; }
+      // vibrate(0) is the documented cancel — without it the pattern already
+      // handed to the OS keeps running after the screen has gone
+      Haptics.fire(0);
+      return true;
+    },
+
+    /* ----------------------------------------------------------- wake lock */
+
+    /**
+     * Keep the display lit while the alarm is up. The lock is released by the
+     * platform whenever the page is hidden, so re-acquiring it is part of the
+     * visibility handler rather than a one-off at raise time.
+     */
+    lock: function () {
+      var self = this;
+      if (self.wake) return false;
+      var wl = typeof navigator !== 'undefined' ? navigator.wakeLock : null;
+      if (!wl || typeof wl.request !== 'function') return false;
+
+      var p;
+      try { p = wl.request('screen'); } catch (e) { return false; }
+      if (!p || typeof p.then !== 'function') return false;
+
+      p.then(function (sentinel) {
+        // the alarm may have been dismissed while the request was in flight
+        if (!self.isOn()) {
+          try { sentinel.release(); } catch (e) { /* already gone */ }
+          return;
+        }
+        self.wake = sentinel;
+      })['catch'](function () { /* denied, or no user activation — the screen stands alone */ });
+      return true;
+    },
+
+    unlock: function () {
+      var sentinel = this.wake;
+      this.wake = null;
+      if (!sentinel) return false;
+      try {
+        if (typeof sentinel.release === 'function') sentinel.release();
+      } catch (e) { /* the platform already took it back */ }
+      return true;
+    },
+
+    /* ------------------------------------------------------------ dismissal */
+
+    /**
+     * ביטול התראה / כבה — the one thing that stops the alarm.
+     *
+     * It stops THIS alarm. Anything queued behind it takes the screen
+     * immediately, because two reminders that fell due together are two things
+     * owed, and swallowing the second would be the exact failure the ledger
+     * was built to prevent.
+     */
+    dismiss: function () {
+      if (!this.isOn()) return false;
+      var q = this.queue();
+      q.shift();
+      Store.save();
+      Haptics.light();
+
+      this.hush();
+      if (q.length) { this.start(); return true; }
+      this.close();
+      return true;
+    },
+
+    /** every alarm at once — used by the screen's own teardown, never by a tap */
+    close: function () {
+      this.hush();
+      this.unlock();
+      var el = $('#alarmScreen');
+      if (el) el.hidden = true;
+      if (document.body && document.body.style && !anySheetOpen()) {
+        document.body.style.overflow = '';
+      }
+      return true;
+    },
+
+    /** פתיחת הפרטים — dismiss, then land in the reader for the record itself */
+    open: function () {
+      var a = this.current();
+      if (!a) return false;
+      var collection = a.collection, id = a.id;
+      this.dismiss();
+      // a record deleted since the reminder was scheduled has no reader; the
+      // alarm was still real, so it is dismissed either way
+      if (!collection || !id) return false;
+      if (!openTapped(collection, id)) { toast('הפריט לא נמצא'); return false; }
+      return true;
+    },
+
+    act: function (what) {
+      if (what === 'open') return this.open();
+      return this.dismiss();
+    },
+
+    /* --------------------------------------------------------------- paint */
+
+    paint: function () {
+      var el = $('#alarmScreen');
+      if (!el) return false;
+
+      var a = this.current();
+      if (!a) { el.hidden = true; return false; }
+
+      el.hidden = false;
+      if (document.body && document.body.style) document.body.style.overflow = 'hidden';
+
+      setText($('#alarmKicker'), a.kind ? '⏰ ' + a.kind : '⏰ תזכורת');
+      setText($('#alarmClock'), a.clock || '--:--');
+      setText($('#alarmTitle'), a.subject || a.title || 'תזכורת');
+      setText($('#alarmWhen'), a.body || '');
+      // §0.2 — the category is a colour AND a label, on the alarm screen too
+      setHTML($('#alarmTags'), catTag(a.cat));
+
+      var waiting = this.queue().length - 1;
+      var more = $('#alarmQueue');
+      if (more) {
+        more.hidden = waiting <= 0;
+        if (waiting > 0) {
+          more.textContent = 'ועוד ' + plural(waiting, 'תזכורת אחת ממתינה', 'תזכורות ממתינות');
+        }
+      }
+      return true;
+    },
+
+    /* ---------------------------------------------------------- bootstrap */
+
+    /**
+     * An alarm that was ringing when the app was closed is still owed.
+     *
+     * Store.load() has already pruned anything past ALARM_KEEP_MS, so whatever
+     * is left is a reminder from the last hour that nobody ever dismissed —
+     * which is precisely the case a one-shot notification loses and the reason
+     * the queue is on disk at all.
+     */
+    resume: function () {
+      if (!this.isOn()) return false;
+      return this.start();
+    },
+
+    init: function () {
+      var self = this;
+
+      /* A wake lock does not survive the page being hidden, and neither does a
+         suspended AudioContext. Coming back to a still-ringing alarm therefore
+         has to re-arm both, or the phone returns to a silent screen that
+         claims to be an alarm. */
+      document.addEventListener('visibilitychange', function () {
+        if (document.hidden || !self.isOn()) return;
+        self.lock();
+        if (!Chime.loopOn()) self.ring();
+      });
+
+      this.resume();
     }
   };
 
@@ -9237,11 +9745,13 @@
 
     var el = e.target.closest ? e.target.closest(
       '[data-nav],[data-action],[data-type],[data-filter],[data-cat],[data-toggle],[data-del],' +
-      '[data-calview],[data-calnav],[data-calslot],' +
+      '[data-calview],[data-calnav],[data-calslot],[data-calday],' +
       '[data-tasktab],[data-work],[data-upcoming],' +
       // Sprint 12 — the reminder panel, the "פתוחות" sheet and the detail reader
       '[data-remindmode],[data-remindadd],[data-reminddrop],' +
       '[data-openall],[data-openfilter],[data-detailact],' +
+      // Sprint 18 — the alarm screen, and the tappable title on a calendar chip
+      '[data-alarm],[data-open],' +
       // Sprint 13 — the settings drawer and the per-record alert picker
       '[data-settoggle],[data-setplay],[data-setdefault],[data-settheme],[data-setsync],' +
       '[data-alertsound],[data-alertvibe],' +
@@ -9268,6 +9778,12 @@
       }
       return;
     }
+
+    /* Sprint 18 — the alarm owns the screen while it is up, so its own two
+       controls are answered BEFORE the app's blanket haptic beat: a light
+       pulse on top of a running [1000,500,1000,500] is noise, and dismiss()
+       fires its own the moment the pattern is actually cancelled. */
+    if (el.dataset.alarm) { Alarm.act(el.dataset.alarm); return; }
 
     // one light pulse for every control in the app — button taps, tab switches
     // and status toggles all come through this one delegate. The check circle
@@ -9324,6 +9840,9 @@
 
     if (el.dataset.calview) { Cal.setView(el.dataset.calview); return; }
     if (el.dataset.calnav) { Cal.nav(el.dataset.calnav); return; }
+    // Sprint 18 — "+3" on a crowded cell: the records it had no room for, in
+    // the one pane that can list all of them
+    if (el.dataset.calday) { Cal.openDay(el.dataset.calday); return; }
 
     if (el.dataset.calslot) {
       var slot = el.dataset.calslot.split('|');
@@ -9355,6 +9874,18 @@
     if (el.dataset.openall) { openOpenSheet(); return; }
     if (el.dataset.openfilter) { setOpenFilter(el.dataset.openfilter); return; }
     if (el.dataset.detailact) { Detail.act(el.dataset.detailact); return; }
+
+    /* ---------- Sprint 18 · a title in the calendar opens its record -------- */
+
+    /* The one door every calendar view now shares (mandate §2). A month cell,
+       a week cell and a day slot are all still creation surfaces; the TITLE
+       drawn inside them is not, and closest() resolves to whichever of the two
+       the finger actually landed on. */
+    if (el.dataset.open) {
+      var op = String(el.dataset.open).split(':');
+      if (!openTapped(op[0], op.slice(1).join(':'))) toast('הפריט לא נמצא');
+      return;
+    }
 
     /* ---------- Sprint 13 · the settings drawer and the alert picker ------- */
 
@@ -9616,7 +10147,21 @@
     var el = e.target;
     var d = el && el.dataset ? el.dataset : null;
 
+    /* Sprint 18 — a role="button" calendar cell is not a <button>, so the
+       browser does not synthesise a click for it. Enter and Space are the two
+       keys the ARIA button pattern owes, and Space additionally has to be
+       stopped from scrolling the page under the grid. */
+    if (d && d.calslot && (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar')) {
+      e.preventDefault();
+      var slot = String(d.calslot).split('|');
+      openTypeSheet({ date: slot[0], start: slot[1] || '' });
+      return;
+    }
+
     if (e.key === 'Escape') {
+      // ...and the alarm owns the screen: Escape stops the ringing rather than
+      // closing a sheet nobody can see behind it
+      if (Alarm.isOn()) { e.preventDefault(); Alarm.dismiss(); return; }
       // Sprint 17 — a rename in flight is its own layer: Escape puts the row
       // back rather than closing the whole module around a half-typed name
       if (d && d.shoprename && Shop.editing) { e.preventDefault(); Shop.catalogCancel(); return; }
@@ -9925,6 +10470,9 @@
     TrashSel.paint();                 // the bin's own bar starts closed too
     TrashSel.bindLongPress();         // long press on a binned row picks it
     registerServiceWorker();
+    // BEFORE Notify.init(): an alarm left un-dismissed by the last session is
+    // owed the screen first, and Notify's opening tick() queues behind it
+    Alarm.init();
     Notify.init();
     Sync.init();
     GCal.init();
@@ -10082,6 +10630,26 @@
       renderOpenSheet: renderOpenSheet,
       Detail: Detail,
       openTapped: openTapped,
+
+      /* Sprint 18 — the full-screen alarm (§1) and the calendar's tappable
+         titles (§2). normAlarms()/alarmOf() are pure, the queue lives in the
+         store rather than in the module, and every device capability the
+         alarm uses is behind a guard — so healthcheck.js drives a whole
+         raise → ring → queue → dismiss cycle over a stubbed phone. */
+      ALARM_VIBE: ALARM_VIBE,
+      ALARM_VIBE_MS: ALARM_VIBE_MS,
+      ALARM_SHORT_MS: ALARM_SHORT_MS,
+      ALARM_KEEP_MS: ALARM_KEEP_MS,
+      ALARM_MAX: ALARM_MAX,
+      MONTH_DOTS: MONTH_DOTS,
+      MONTH_CHIPS: MONTH_CHIPS,
+      Alarm: Alarm,
+      normAlarms: normAlarms,
+      alarmOf: alarmOf,
+      calChip: calChip,
+      calMarks: calMarks,
+      calMore: calMore,
+      cellOpen: cellOpen,
 
       /* Sprint 14 — the compact task row (§1) and the reader that now holds
          everything it stopped carrying (§2). taskRow() is pure string work, so

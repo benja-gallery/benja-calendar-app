@@ -1,6 +1,14 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Sprint 15 shipped (§7.4q) — **קטלוג המצרכים**: the list form now carries the
+> **Status:** Sprint 18 shipped (§7.4t) — **מסך שעון מעורר ופתיחת פרטים מהיומן**: a due
+> reminder no longer just notifies, it raises a full-screen alarm that rings on a beat,
+> buzzes on `[1000,500,1000,500]`, holds a `wakeLock` on the screen and does not stop for
+> anything but `ביטול התראה / כבה` — with a persisted queue, so two reminders in one minute
+> are two alarms and one the phone was locked on is still owed on the next launch. And
+> every event/task title in the month, week and day panes is now a `data-open` control that
+> lands in the detail reader, instead of the calendar being the one place a record could be
+> seen but not opened. v24.
+> Sprint 15 before it (§7.4q) — **קטלוג המצרכים**: the list form now carries the
 > whole grocery vocabulary the field mandate handed over — 161 products across ten aisles
 > (`PANTRY`) — as a searchable chip grid under the items field. A tap adds a line, a second
 > tap removes it, and the textarea stays the single source of truth, so a hand-typed product
@@ -2139,6 +2147,107 @@ guard is proven by counting `innerHTML` writes: two idempotent repaints write no
 repaint with the amount box focused writes nothing, and the deferred write lands the moment
 focus leaves. The cache floor is raised to **v23** with `APP_VERSION` and both `?v=` URLs
 asserted in step.
+
+### 7.4t מסך שעון מעורר ופתיחת פרטים מהיומן (shipped — Sprint 18)
+
+A field mandate in two halves: a reminder that cannot be ignored, and a calendar whose
+records can finally be opened.
+
+**§1 — the persistent alarm clock (שעון מעורר משימות/אירועים)**
+
+Until now a due reminder was a *message*: `Notify.show()` raised one notification, played
+one sound of at most ten seconds, and was over whether or not anybody was there. That is
+right for a heads-up and wrong for the 09:00 you must not miss — a phone face-down on a
+desk delivers a ten-second ring to nobody.
+
+`Alarm` is the second contract. When `Notify.tick()` fires a reminder it now *also* raises
+`#alarmScreen`: a full-bleed, high-contrast overlay at `z-index:120` — above the sheets
+(60) and the confirmation (80), because an alarm a half-open form can hide is an alarm
+that was missed — carrying **the record's title, its clock and its category** (colour *and*
+label, §0.2). Behind the screen four things run and none of them stop on their own:
+
+1. **A ring that re-arms.** `Chime.loopAlert()` plays the record's own sound family and
+   schedules itself again on that family's beat (`LONG_MS` for a צלצול, `ALARM_SHORT_MS`
+   for a צליל קצר) — forever. `playLong()` deliberately schedules its ten seconds in one
+   pass so a throttled tab still rings on the beat; a loop cannot do that, and the real
+   `setInterval` is honest here precisely because the alarm screen is foregrounded.
+2. **The mandated pulse.** `navigator.vibrate([1000,500,1000,500])`, re-fired every
+   `ALARM_VIBE_MS` = 3000ms — the pattern's own length, so the phone never falls silent
+   between bursts nor stacks them. Deliberately **not** gated on `רטט במגע`: silencing the
+   interface must never silence an alarm.
+3. **A Screen Wake Lock.** `navigator.wakeLock.request('screen')`, held for as long as the
+   alarm is up and re-acquired on `visibilitychange` — the platform releases it whenever
+   the page hides, and an alarm nobody can see is an alarm nobody dismissed.
+4. **A high-priority Web Notification**, unchanged except that it now carries
+   `requireInteraction: true` and `renotify: true`, so the background half stays in the
+   shade until it is acted on. That is the half that survives a closed app, via the
+   Sprint-11 push path.
+
+`ביטול התראה / כבה` is the only thing that stops any of it: it cuts the loop, cancels the
+pattern with `vibrate(0)`, releases the sentinel and takes the screen down. `פתיחת פרטי
+הפריט` dismisses and lands in the same reader §2 opens. Nothing here schedules its own
+silence — there is no `setTimeout` anywhere in the module, and the healthcheck asserts it.
+
+Two reminders in the same minute are two things owed: the second **queues** behind the
+first, is counted on the screen ("ועוד תזכורת אחת ממתינה"), and takes over the moment the
+first is dismissed. The queue lives in `prefs.alarms` rather than in the module, so an
+alarm the phone was locked on is still owed when the app comes back — bounded by
+`ALARM_KEEP_MS` (one hour), because an alarm may be late but must never be stale.
+`normAlarms()` drops malformed rows, collapses duplicate ledger keys, normalises the alert
+pair and strips a `collection` no reader can open, then caps at `ALARM_MAX`.
+
+Every capability is independently guarded. No `wakeLock`, no vibration motor, no
+`AudioContext`, no permission — each degrades to the next-loudest thing the device can
+actually do, and the screen itself is the floor that is always there.
+
+**§2 — every title in the calendar opens its record (תצוגת אירועים ופתיחת פרטים בלחיצה)**
+
+The month, week and day panes were the one place in the app where a record could be *seen*
+and not *opened*: month cells drew anonymous dots, week chips were inert `<span>`s and a
+day-timeline block was a plain `<div>`. Tapping any of them opened Master Add for that
+slot, which is the right answer for empty space and the wrong one for a meeting.
+
+A cell is two surfaces now. Empty space is still `data-calslot` — "create something here".
+The records inside it are real controls carrying `data-open="<collection>:<id>"`, and
+`closest()` in the delegate resolves to whichever of the two the finger actually landed on:
+
+| View | Before | Now |
+|---|---|---|
+| Monthly cell | 4 dots | the dots **and** the first 2 titles as `.cal-chip` buttons, `+N` for the rest |
+| Weekly grid | `<span class="wk-chip">` | `<button class="wk-chip" data-open>` |
+| Daily timeline | `<div class="dv-block">` | `<button class="dv-block" data-open>` |
+| All-day strip | inert chip | `.wk-chip` button |
+| Agenda / לביצוע היום / משימות קרובות | already `data-rec` rows | unchanged — they already opened the reader |
+
+A cell can only draw so many titles, so `+N` stops being a dead label and becomes
+`calMore()` — a control carrying `data-calday` that opens **that day in the day view**,
+where every record it stands for is listed as an openable row. Without it the third meeting
+on a busy Tuesday would be counted in the month grid and reachable from nowhere in it.
+
+A `<button>` may not contain a `<button>`, so `.cal-cell` and `.wk-cell` stop being buttons
+and become `role="button" tabindex="0"` containers (`cellOpen()`). The keyboard contract
+that loses is paid back in `onKeydown()` — Enter *and* Space, with `preventDefault()` so
+Space cannot scroll the grid — and `.cal-stage [data-calslot]` restores the `touch-action:
+pan-y` the blanket `button` rule no longer reaches, so swipe navigation still owns the
+horizontal axis. The month cell grows to 74px (106px on a wide canvas) to hold its titles.
+
+The reader behind the tap is the Sprint-12 `#detailSheet`, which already states every field
+the mandate names — כותרת, תאריך ושעה, הערות, לקוח, קטגוריה, סטטוס, הגדרות התראה — and
+already carries ערוך / מחק / סמן כבוצע. §50d asserts all eight against a real record rather
+than trusting that.
+
+**Verification (§50).** The alarm is *driven*, not pattern-matched: `phoneStub()` supplies
+an `AudioContext` that counts oscillators, a vibration motor that records patterns, a wake
+lock that hands back a sentinel, and a `setInterval` that returns the callback the app
+registered — so `beat()` is one tick of wall-clock time and "keeps ringing until dismissed"
+becomes a falsifiable claim. A full raise → ring → beat → beat → queue → dismiss cycle
+asserts the screen, the loop, the pattern, the lock and then that all five stop together
+and a stale timer cannot resurrect the ring. A second pass runs the same cycle on a device
+with no motor, no lock and no audio at all. `normAlarms()` is table-driven; `Notify.due()`
+is asserted to hand the alarm the collection, category, clock and subject the screen paints
+hours later; and the chip, the delegate, the four render paths and the keyboard fallback
+are each asserted in turn. The cache floor is raised to **v24** with `APP_VERSION` and both
+`?v=` URLs asserted in step.
 
 ### 7.4 General layout
 
