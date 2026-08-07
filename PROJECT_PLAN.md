@@ -2249,6 +2249,81 @@ hours later; and the chip, the delegate, the four render paths and the keyboard 
 are each asserted in turn. The cache floor is raised to **v24** with `APP_VERSION` and both
 `?v=` URLs asserted in step.
 
+### 7.4u שעון מעורר ברקע — the alarm that rings with the app closed (shipped — Sprint 19)
+
+Sprint 18 built an alarm that cannot be ignored. It could only ever ring while the app was
+**open**, because the thing that raised it was `Notify.tick()` — a `setInterval` inside the
+page. Mobile Chrome freezes a backgrounded tab's timers within minutes, iOS suspends the
+whole process, and a closed PWA runs nothing at all.
+
+Sprint 11 had already moved the *delivery* off the phone: a scheduled Worker POSTs
+`/api/push/dispatch` once a minute, the dispatcher runs the server-side twin of
+`Notify.due()`, and `_webpush.js` encrypts an RFC 8291 payload to each registered device.
+But what landed was a **notification** — one line in the shade, a `[110,60,110]` buzz,
+auto-dismissable, and ending at a focused window rather than at an alarm. So the 09:00 you
+must not miss was a full-screen ringing alarm if the app happened to be open and a
+dismissable toast if it was not. This sprint closes that gap in four parts.
+
+**§1 — the notification a closed phone receives is the alarm's own.** `sw.js` now raises it
+with `vibrate: ALARM_VIBE` — the same mandated `[1000,500,1000,500]` `app.js` rings on, and
+§51a asserts the two constants against each other — plus `requireInteraction: true` so it
+sits on the lock screen until a finger acts on it, `renotify: true` so a second reminder
+re-alerts rather than silently replacing the first, and `silent: false`. The notification is
+tagged with the reminder's **ledger key**.
+
+**§2 — the payload carries what the screen paints.** A phone whose app has been closed for
+hours cannot look anything up, so `pushPayload()` in `dispatch.js` puts an `alarm` block on
+the wire beside the title and body: the ledger `key`, the `id` + `collection` that let
+פתיחת פרטי הפריט work, the `cat`, `kind`, `clock` and `subject` the screen states, and the
+record's own `alert` pair. `scan()` therefore selects `category`, `alert_sound` and
+`alert_vibe` alongside the columns it already read. Both ends normalise the vocabulary
+(`normCat` / `normAlertSound` / `normVibe`, mirrored server-side), so neither has to trust
+the other and an unknown value falls back rather than travelling. The GET dry run reports
+the whole payload — a diagnostic surface that hid the alarm block could not diagnose a blank
+alarm screen.
+
+**§3 — the tap ends at the alarm screen, open app or not.** `notificationclick` has two
+paths and both converge on `Alarm.raise()`:
+
+| State of the app | Path | Carrier |
+|---|---|---|
+| a window is open | `client.focus()` → `postMessage` | `{type:'PUSH_ALARM', alarm}` → `Notify.init()`'s listener → `Alarm.fromPush()` |
+| nothing is open | `clients.openWindow()` | `#alarm=<encoded JSON>` → `alarmFromHash()` → `Alarm.fromLaunch()` |
+
+`ALARM_HASH` is declared in both files and asserted to match. The hash is a **one-shot
+courier**: `clearAlarmHash()` spends it via `history.replaceState` the moment it is read,
+because a hash left in the address bar would re-ring a dismissed reminder on every reload —
+the one way an alarm clock becomes something you learn to ignore. `fromLaunch()` runs before
+`resume()` in `Alarm.init()` so a queue off disk and an alarm off a tap end in **one** queue,
+and `resume()` no longer re-starts a screen that is already up. The ledger key does the rest:
+a reminder the local scan already raised is recognised, not queued twice.
+
+A push with no `alarm` block behaves exactly as it did in Sprint 11 — `PUSH_CHIME`, the
+one-shot bell — because an alarm screen ringing on its own loop and a one-shot chime would
+fight each other. The two messages are alternatives, never a pair.
+
+**§4 — the permission, and the subscription behind it.** The browser's own dialog cannot be
+relabelled, so the app says what it is buying a beat before it opens: `NOTIFY_ASK_CTA` =
+**"אפשר התראות בשביל שעון מעורר ברקע"**, used as the banner CTA, the pill's title and a
+toast immediately before `requestPermission()`. `linkServer()` now writes the subscription to
+`prefs.notify.sub` **before** the POST rather than after it: the browser has already
+committed the endpoint by then, so recording it only on a 200 would leave a device with a
+live subscription the app cannot name. `serverAt` stays the separate fact — whether D1 has
+it. `normSub()` is all-three-fields-or-none: an endpoint with no keys cannot be encrypted
+to, so a half-row would claim a device is reachable while every dispatch to it failed.
+
+**Verification (§51).** `sw.js` is loaded into a stubbed worker scope and its **real**
+listeners are fired, so a `push` or a `notificationclick` in the suite is the function the
+browser calls. The full journey is asserted hop by hop — `pushPayload()` builds it,
+`alarmFromHash()` parses the worker's own URL back, `normAlarms()` normalises it onto the
+screen — because every hop is a place a field can be dropped and a dropped field is a blank
+alarm screen at 09:00. A pushed alarm is driven through the same `phoneStub()` raise → ring
+→ buzz → wake-lock → dismiss cycle Sprint 18 uses, and asserted *not* to double-raise a
+reminder the local scan already holds. `linkServer()` is executed against a stubbed
+`pushManager` and `fetch`, proving both halves land; `validSub()` is executed against eight
+malformed subscriptions; `normSub()` and `alarmFromHash()` are table-driven against junk.
+The cache floor is raised to **v25** with `APP_VERSION` and both `?v=` URLs asserted in step.
+
 ### 7.4 General layout
 
 **Layout direction:** RTL by default (`dir="rtl"`), with LTR fallback driven by locale.

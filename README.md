@@ -126,16 +126,52 @@ fires once per day per record.
 Reminders intentionally ignore the personal/business filter — the filter hides rows on screen,
 it must never mute a real meeting.
 
-### Server-sent push (remaining work)
+### Server-sent push — the background alarm clock (Sprint 11 + Sprint 19)
 
-`sw.js` already handles the `push` event and renders it through
-`self.registration.showNotification()`. To send from a server:
+Local timers cannot survive a closed app, so the reminder clock lives off the phone:
+`tools/push-cron-worker/` fires once a minute and POSTs `/api/push/dispatch`, which runs the
+server-side twin of `Notify.due()` and encrypts an RFC 8291 payload to every registered
+device. Setup is four secrets on the Pages project plus the cron Worker:
 
-1. Generate a VAPID key pair.
-2. Subscribe the device: `APP.Notify.subscribe('<VAPID_PUBLIC_KEY>')` → returns a
-   `PushSubscription`; store it server-side.
-3. Send a Web Push message with a JSON body of `{ "title": "...", "body": "...", "url": "...",
-   "tag": "..." }`.
+```bash
+node tools/gen-vapid.js                       # prints the P-256 key pair
+wrangler pages secret put VAPID_PUBLIC_KEY
+wrangler pages secret put VAPID_PRIVATE_KEY
+wrangler pages secret put VAPID_SUBJECT       # mailto:you@example.com
+wrangler pages secret put PUSH_DISPATCH_SECRET
+wrangler d1 migrations apply benja-calendar --remote
+cd tools/push-cron-worker && wrangler deploy  # the clock Pages cannot run itself
+```
+
+Until they are set `/api/push/*` answers `503`, the client stays on its local 30-second scan,
+and nothing else changes.
+
+Since Sprint 19 the payload is not just a notification — it is the **alarm**:
+
+```json
+{
+  "title": "משימה מתחילה עכשיו",
+  "body": "לשלוח הצעת מחיר · 09:00",
+  "tag": "at#t1@2026-08-07",
+  "url": "./index.html",
+  "alarm": {
+    "key": "at#t1@2026-08-07", "id": "t1", "collection": "tasks",
+    "cat": "business", "kind": "משימה", "clock": "09:00",
+    "subject": "לשלוח הצעת מחיר",
+    "alert": { "sound": "long", "vibe": "repeat" }
+  }
+}
+```
+
+`sw.js` draws it with the mandated `[1000,500,1000,500]` vibration and
+`requireInteraction: true`, so it stays on the lock screen until it is acted on. Tapping it
+raises the same full-screen alarm screen a foreground reminder does — over `postMessage`
+into a window that is already open, or on the `#alarm=` hash of one that is not. `alarm.key`
+is the ledger key, which is what stops a reminder the local scan already raised from ringing
+twice.
+
+`GET /api/push/dispatch?key=<PUSH_DISPATCH_SECRET>` is a dry run: it reports exactly what a
+POST would send — payloads included — and sends nothing.
 
 ---
 

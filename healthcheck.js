@@ -623,7 +623,11 @@ function loadApp(over) {
     console, Math, JSON, Date, Promise, RegExp, Error, isNaN, parseInt, parseFloat,
     setTimeout: noop, clearTimeout: noop, setInterval: noop, clearInterval: noop,
     navigator: (over && over.navigator) || {},
-    location: { protocol: 'file:' },
+    /* Sprint 19 adds `over.location`: a background notification launches the
+       app on '#alarm=<payload>', so the only way to drive that path is to load
+       the app on the URL a real tap would have opened it with. */
+    location: Object.assign({ protocol: 'file:', pathname: '/index.html', search: '', hash: '' },
+      (over && over.location) || {}),
     document: Object.assign({
       readyState: 'loading',                 // keeps init() parked on DOMContentLoaded
       addEventListener: noop,
@@ -640,6 +644,11 @@ function loadApp(over) {
      app registered and fire it. */
   if (over && over.setInterval) sandbox.setInterval = over.setInterval;
   if (over && over.clearInterval) sandbox.clearInterval = over.clearInterval;
+  /* Sprint 19 adds `over.globals`: linkServer() reads fetch, PushManager,
+     Notification and atob off `window`, and the only honest way to prove a
+     subscription reaches BOTH localStorage and the Worker is to give it all
+     four and watch what it does with them. */
+  if (over && over.globals) Object.assign(sandbox, over.globals);
   sandbox.window = sandbox;
   sandbox.self = sandbox;
   vm.createContext(sandbox);
@@ -648,6 +657,10 @@ function loadApp(over) {
   // that has to move focus after load (Sprint 17's caret guard) needs the real
   // one rather than the literal it handed in
   if (sandbox.APP) sandbox.APP.doc = sandbox.document;
+  // ...and the same for `location`, which Sprint 19's launch hash is read off
+  // and cleared from: a stub that cannot see the app's own copy cannot tell a
+  // spent hash from a live one
+  if (sandbox.APP) sandbox.APP.loc = sandbox.location;
   return sandbox.APP;
 }
 
@@ -5387,7 +5400,9 @@ check('the chime has its own toggle and its own default', () => {
 check('a server-sent push asks an open window to make the sound', () => {
   if (sw.indexOf('PUSH_CHIME') === -1) return 'sw.js never asks for the chime';
   if (sw.indexOf('postMessage') === -1) return 'sw.js cannot reach a client';
-  if (js.indexOf("event.data.type === 'PUSH_CHIME'") === -1) return 'app.js never answers PUSH_CHIME';
+  // Sprint 19 widened the listener to two message types; the chime is still
+  // the answer to a push carrying no alarm block of its own
+  if (js.indexOf("msg.type === 'PUSH_CHIME'") === -1) return 'app.js never answers PUSH_CHIME';
   if (!/silent: false/.test(sw)) return 'sw.js lets the platform silence the notification';
   return true;
 });
@@ -5674,7 +5689,7 @@ function loadDispatch() {
   vm.createContext(sandbox);
   vm.runInContext(
     stripModule(dispatchSrc) +
-    '\n;globalThis.__d = { selectDue, localNow, addDaysISO, timeToMinutes, leadOf, phrase, remindTokens };',
+    '\n;globalThis.__d = { selectDue, localNow, addDaysISO, timeToMinutes, leadOf, phrase, remindTokens, pushPayload };',
     sandbox, { filename: 'dispatch.js' });
   return sandbox.__d;
 }
@@ -9763,10 +9778,656 @@ check('PROJECT_PLAN documents Sprint 18', () => {
   return true;
 });
 
+/* ==========================================================================
+   §51 — SPRINT 19 · the background alarm clock
+
+   Sprint 18 built an alarm that cannot be ignored. It could only ever ring
+   while the app was open, because the thing that raised it was a setInterval
+   inside the page — and a closed PWA runs no timers at all. Sprint 11 already
+   moved the DELIVERY off the phone, but what arrived was a notification: one
+   line in the shade, a polite three-tick buzz, auto-dismissable, and ending at
+   a focused window rather than at an alarm.
+
+   This sprint closes the last gap. A push now carries the alarm itself:
+
+     §1  the notification the OS draws is the alarm's — the mandated
+         [1000,500,1000,500] beat and requireInteraction, so it sits on the
+         lock screen until a finger acts on it;
+     §2  the payload carries everything the alarm SCREEN paints, because a
+         phone whose app has been closed for hours cannot look any of it up;
+     §3  the tap ends at that screen either way — postMessage into a window
+         that is already open, '#alarm=' on the URL of one that is not;
+     §4  the subscription that makes any of it possible is kept on disk as
+         well as in D1, so a device can say what it registered.
+
+   Everything below is executed. sw.js is loaded into a stubbed worker scope
+   and its real listeners are fired; app.js is loaded on the URL a real tap
+   would have opened it with; the dispatcher's payload is built from real rows.
+   ========================================================================== */
+
+/**
+ * A service worker scope, stubbed down to what sw.js actually touches.
+ *
+ * The listeners are captured rather than simulated, so a `push` or a
+ * `notificationclick` in this suite is the same function the browser calls.
+ */
+function loadSW(over) {
+  const o = over || {};
+  const listeners = {};
+  const shown = [];
+  const posted = [];
+  const opened = [];
+
+  const clients = (o.clients || []).map((c, i) => Object.assign({
+    id: 'w' + i,
+    url: 'https://cal.example/index.html',
+    focused: 0,
+    focus() { this.focused++; return Promise.resolve(this); },
+    postMessage(m) { posted.push({ client: this, message: m }); }
+  }, c));
+
+  const scope = {
+    location: { origin: 'https://cal.example', href: 'https://cal.example/index.html' },
+    addEventListener(type, fn) { listeners[type] = fn; },
+    skipWaiting() { return Promise.resolve(); },
+    registration: {
+      showNotification(title, opts) { shown.push({ title, opts }); return Promise.resolve(); },
+      pushManager: { subscribe() { return Promise.resolve(null); } }
+    },
+    clients: {
+      matchAll() { return Promise.resolve(clients); },
+      openWindow(url) { opened.push(url); return Promise.resolve({ url }); },
+      claim() { return Promise.resolve(); }
+    }
+  };
+
+  const cache = { match: () => Promise.resolve(null), put() {}, add: () => Promise.resolve() };
+  const sandbox = {
+    console, JSON, Promise, String, Object, Array, RegExp, Error, Date, URL,
+    encodeURIComponent, decodeURIComponent,
+    fetch: () => Promise.resolve({ ok: true }),
+    caches: {
+      open: () => Promise.resolve(cache),
+      keys: () => Promise.resolve([]),
+      'delete': () => Promise.resolve(true)
+    },
+    self: scope
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(sw, sandbox, { filename: 'sw.js' });
+
+  /** fire a listener the way the browser does, and wait for its waitUntil */
+  function fire(type, event) {
+    const waits = [];
+    const fn = listeners[type];
+    if (!fn) throw new Error('sw.js registered no ' + type + ' listener');
+    fn(Object.assign({ waitUntil: p => waits.push(p) }, event));
+    return Promise.all(waits);
+  }
+
+  return { listeners, shown, posted, opened, clients, scope, fire };
+}
+
+/** the alarm block the dispatcher puts on the wire, as sw.js receives it */
+function pushBody(over) {
+  return Object.assign({
+    title: 'משימה מתחילה עכשיו',
+    body: 'לשלוח הצעת מחיר · 09:00',
+    tag: 'at#t1@2026-08-07',
+    url: './index.html',
+    alarm: {
+      key: 'at#t1@2026-08-07', id: 't1', collection: 'tasks', cat: 'business',
+      kind: 'משימה', clock: '09:00', subject: 'לשלוח הצעת מחיר',
+      title: 'משימה מתחילה עכשיו', body: 'לשלוח הצעת מחיר · 09:00',
+      alert: { sound: 'long', vibe: 'repeat' }
+    }
+  }, over || {});
+}
+
+/* ---- 51a. §1 — the notification a closed app receives is an alarm ---- */
+
+checkAsync('a pushed reminder is drawn with the alarm’s own urgency', () => {
+  const SW = loadSW({ clients: [{}] });
+  const body = pushBody();
+
+  return SW.fire('push', { data: { json: () => body } }).then(() => {
+    if (SW.shown.length !== 1) return SW.shown.length + ' notifications for one push';
+    const { title, opts } = SW.shown[0];
+
+    if (title !== body.title) return 'the notification is titled ' + title;
+    if (opts.body !== body.body) return 'the notification body is not the reminder’s';
+
+    /* §1 — the mandated pattern, and the same one app.js rings on. Two
+       constants that disagree would mean a reminder buzzes differently
+       depending on whether the app happened to be open. */
+    const want = JSON.stringify(loadApp().ui.ALARM_VIBE);
+    if (JSON.stringify(opts.vibrate) !== '[1000,500,1000,500]') {
+      return 'the OS is asked to buzz ' + JSON.stringify(opts.vibrate);
+    }
+    if (JSON.stringify(opts.vibrate) !== want) return 'sw.js and app.js buzz differently';
+
+    // an alarm that clears itself off the lock screen is the failure being fixed
+    if (opts.requireInteraction !== true) return 'the notification can be auto-dismissed';
+    if (opts.renotify !== true) return 'a second reminder replaces the first silently';
+    if (opts.silent !== false) return 'the notification asks the OS for silence';
+    if (opts.dir !== 'rtl' || opts.lang !== 'he') return 'the notification is not Hebrew RTL';
+    if (opts.tag !== body.tag) return 'the notification is not tagged with the ledger key';
+
+    // §2 — and the alarm survives the tap
+    if (!opts.data || !opts.data.alarm) return 'the payload is dropped before the tap';
+    if (opts.data.alarm.key !== body.alarm.key) return 'the ledger key never reaches the click handler';
+    if (opts.data.alarm.subject !== 'לשלוח הצעת מחיר') return 'the subject was lost';
+    if (opts.data.alarm.alert.sound !== 'long') return 'the record’s own sound was lost';
+
+    // an open window is asked for the ALARM, not for a one-shot chime that
+    // would fight the alarm screen's own ring
+    const kinds = SW.posted.map(p => p.message.type);
+    if (kinds.join(',') !== 'PUSH_ALARM') return 'the open window was sent ' + (kinds.join(',') || 'nothing');
+    if (SW.posted[0].message.alarm.key !== body.alarm.key) return 'the window got an alarm with no key';
+    return true;
+  });
+});
+
+checkAsync('a push with nothing to raise still behaves exactly as it used to', () => {
+  const plain = loadSW({ clients: [{}] });
+
+  return plain.fire('push', { data: { json: () => ({ title: 'הודעה', body: 'טקסט' }) } })
+    .then(() => {
+      if (plain.shown[0].opts.data.alarm !== null) return 'a payload with no alarm invented one';
+      // no alarm block → the Sprint 11 chime is still the right answer
+      const kinds = plain.posted.map(p => p.message.type);
+      if (kinds.join(',') !== 'PUSH_CHIME') return 'an ordinary push sent ' + kinds.join(',');
+
+      // ...and an alarm block missing the one field that matters is refused
+      const keyless = loadSW({ clients: [{}] });
+      return keyless.fire('push', { data: { json: () => pushBody({ alarm: { subject: 'ללא מפתח' } }) } })
+        .then(() => {
+          if (keyless.shown[0].opts.data.alarm !== null) return 'an alarm with no ledger key was accepted';
+          return true;
+        });
+    })
+    .then(res => {
+      if (res !== true) return res;
+      // a plain-text push (no JSON at all) must notify rather than throw
+      const text = loadSW();
+      return text.fire('push', { data: { json() { throw new Error('not json'); }, text: () => 'תזכורת' } })
+        .then(() => (text.shown.length === 1 ? true : 'a plain-text push raised nothing'));
+    });
+});
+
+/* ---- 51b. §3 — the tap ends at the alarm screen, open app or not ---- */
+
+checkAsync('tapping a background notification lands on the alarm screen', () => {
+  const body = pushBody();
+
+  /* a window IS open: focus it and hand the alarm straight over, which is the
+     path a phone that was merely asleep takes */
+  const live = loadSW({ clients: [{}] });
+  const clicked = {
+    notification: { close() { live.closed = true; }, data: { url: './index.html', alarm: body.alarm } }
+  };
+
+  return live.fire('notificationclick', clicked).then(() => {
+    if (!live.closed) return 'the notification stays in the shade after the tap';
+    if (live.clients[0].focused !== 1) return 'the open window was never focused';
+    if (live.opened.length) return 'a second window was opened over the live one';
+    const msg = live.posted[live.posted.length - 1];
+    if (!msg || msg.message.type !== 'PUSH_ALARM') return 'the focused window was never told which alarm';
+    if (msg.message.alarm.key !== body.alarm.key) return 'the window got the wrong alarm';
+
+    /* nothing is open: the alarm rides the URL instead. This is the case the
+       whole sprint exists for — the app was closed, so there is no window to
+       talk to and no store read that could recover what the reminder was. */
+    const cold = loadSW({ clients: [] });
+    return cold.fire('notificationclick', {
+      notification: { close() {}, data: { url: './index.html', alarm: body.alarm } }
+    }).then(() => {
+      if (cold.opened.length !== 1) return 'a cold tap opened ' + cold.opened.length + ' windows';
+      const url = cold.opened[0];
+      if (url.indexOf('#alarm=') === -1) return 'the launch URL carries no alarm: ' + url;
+
+      // and the app can read back exactly what the worker wrote
+      const back = loadApp().ui.alarmFromHash(url.slice(url.indexOf('#')));
+      if (!back) return 'app.js cannot parse the URL sw.js opened';
+      if (back.key !== body.alarm.key) return 'the round trip lost the ledger key';
+      if (back.subject !== body.alarm.subject) return 'the round trip lost the subject';
+      if (back.alert.vibe !== 'repeat') return 'the round trip lost the record’s vibration';
+      return true;
+    });
+  });
+});
+
+/* ---- 51c. §3 — the client half: a push becomes the same alarm ---- */
+
+check('a pushed alarm is the same full-screen alarm a local reminder raises', () => {
+  const { APP, phone, dom, A } = loadAlarm();
+  const screen = dom.node('#alarmScreen');
+  const alarm = pushBody().alarm;
+
+  if (!A.fromPush(alarm)) return 'a pushed alarm was refused';
+  if (screen.hidden !== false) return 'a pushed alarm did not take the screen';
+  if (dom.node('#alarmTitle').textContent !== 'לשלוח הצעת מחיר') return 'the pushed alarm painted nothing';
+  if (dom.node('#alarmClock').textContent !== '09:00') return 'the pushed alarm lost its clock';
+  if (dom.node('#alarmTags').innerHTML.indexOf('tag-business') === -1) return 'the category did not survive the wire';
+
+  // it RINGS — a background reminder is not a quieter reminder
+  if (!APP.reminders.Chime.loopOn()) return 'a pushed alarm does not ring';
+  if (!phone.vibes.some(v => Array.isArray(v) && v.join(',') === '1000,500,1000,500')) {
+    return 'a pushed alarm does not buzz on the mandated pattern';
+  }
+  if (phone.locks.join(',') !== 'screen') return 'a pushed alarm does not hold the screen awake';
+
+  // ...and the one button stops it, exactly as it does for a local one
+  if (!A.dismiss()) return 'a pushed alarm cannot be dismissed';
+  if (screen.hidden !== true) return 'the screen outlived the dismissal';
+  if (APP.reminders.Chime.loopOn()) return 'the pushed alarm kept ringing after ביטול התראה';
+
+  /* the ledger key is what stops the same reminder being raised twice when the
+     local scan and the push both reach the phone — the exact case a user sees
+     as "it rang, I dismissed it, it rang again" */
+  const twice = loadAlarm();
+  twice.A.raise(dueItem());
+  if (twice.A.fromPush(alarm) !== false) return 'a push re-raised a reminder the local scan already had';
+  if (twice.A.queue().length !== 1) return 'the same reminder holds two places in the queue';
+
+  // junk off the network is refused rather than half-raised
+  const junk = loadAlarm();
+  [null, undefined, {}, 'nonsense', { subject: 'ללא מפתח' }, { key: '' }].forEach(bad => {
+    if (junk.A.fromPush(bad) !== false) throw new Error('fromPush accepted ' + JSON.stringify(bad));
+  });
+  if (junk.A.isOn()) return 'malformed push data still put something on the screen';
+  return true;
+});
+
+check('a cold launch from a notification raises the alarm on boot', () => {
+  const U = loadApp().ui;
+  const alarm = pushBody().alarm;
+  const hash = '#alarm=' + encodeURIComponent(JSON.stringify(alarm));
+
+  /* the parser first — it reads a URL, which is the least trustworthy input
+     the app has, and a throw here would take the whole boot with it */
+  if (!U.alarmFromHash(hash)) return 'a valid launch hash is not recognised';
+  if (U.alarmFromHash(hash).key !== alarm.key) return 'the launch hash lost its key';
+  [null, undefined, '', '#', '#alarm=', '#alarm=%%%', '#alarm=' + encodeURIComponent('{'),
+    '#alarm=' + encodeURIComponent('{"subject":"ללא מפתח"}'),
+    '#alarm=' + encodeURIComponent('"a string"'), '#other=1'].forEach(bad => {
+      if (U.alarmFromHash(bad) !== null) throw new Error('alarmFromHash accepted ' + bad);
+    });
+  // the hash survives being a second parameter, because a launch URL is not
+  // the app's to dictate
+  if (!U.alarmFromHash('#tab=day&alarm=' + encodeURIComponent(JSON.stringify(alarm)))) {
+    return 'the alarm is only found when it is the first hash parameter';
+  }
+
+  /* now the boot itself, on the URL a real tap would have opened */
+  const phone = phoneStub();
+  const dom = domStub();
+  const replaced = [];
+  const APP = loadApp({
+    navigator: phone.nav,
+    document: dom.doc,
+    AudioContext: audioStub(),
+    setInterval: phone.setInterval,
+    clearInterval: phone.clearInterval,
+    location: { protocol: 'https:', pathname: '/index.html', search: '', hash: hash },
+    // a real replaceState rewrites the address bar, so the stub rewrites the
+    // location it was handed — otherwise "the hash is spent" is untestable
+    globals: {
+      history: {
+        replaceState: (state, title, url) => { replaced.push(url); APP.loc.hash = ''; }
+      }
+    }
+  });
+  APP.Store.load();
+  const A = APP.ui.Alarm;
+
+  if (!A.fromLaunch()) return 'the launch hash never reached the alarm';
+  if (!A.isOn()) return 'the launch alarm is not on the queue';
+  if (A.current().key !== alarm.key) return 'the wrong alarm was launched';
+  if (dom.node('#alarmScreen').hidden !== false) return 'the launch alarm never took the screen';
+
+  /* the hash is spent on arrival: left in place, a reload — or the PWA being
+     resumed on the same URL — would re-ring something already dismissed */
+  if (replaced.length !== 1) return 'the launch hash was never cleared';
+  if (replaced[0].indexOf('alarm') !== -1) return 'the cleared URL still carries the alarm';
+
+  // and a second read finds nothing, because raising is what spends it
+  A.dismiss();
+  if (A.fromLaunch() !== false) return 'the same launch hash raised a second alarm';
+
+  // a plain launch with no hash at all is a no-op rather than a throw
+  const plain = loadApp({ document: domStub().doc });
+  plain.Store.load();
+  if (plain.ui.Alarm.fromLaunch() !== false) return 'an ordinary launch raised an alarm';
+
+  // the two ends have to name the same hash key or nothing ever arrives
+  if (sw.indexOf("var ALARM_HASH = '" + APP.ui.ALARM_HASH + "'") === -1) {
+    return 'sw.js and app.js disagree about the launch hash';
+  }
+  return true;
+});
+
+check('an open window turns a PUSH_ALARM message into the alarm screen', () => {
+  // the listener is registered inside Notify.init(); this is the wiring that
+  // connects the worker's postMessage to Alarm, and a message type that
+  // reaches nothing is indistinguishable from a push that never arrived
+  const init = bodyOf(js, 'init: function () {\n      this.paint();');
+  if (init.indexOf("msg.type === 'PUSH_ALARM'") === -1) return 'app.js never answers PUSH_ALARM';
+  if (init.indexOf('Alarm.fromPush(msg.alarm)') === -1) return 'a PUSH_ALARM message reaches nothing';
+  if (init.indexOf("msg.type === 'PUSH_CHIME'") === -1) return 'the Sprint 11 chime was dropped';
+  if (sw.indexOf("type: 'PUSH_ALARM'") === -1) return 'sw.js never sends PUSH_ALARM';
+
+  // and the alarm is read from the launch URL before a queue off disk is
+  // resumed, so both end up in one queue rather than two screens
+  const alarmInit = bodyOf(js, 'init: function () {\n      var self = this;');
+  if (alarmInit.indexOf('this.fromLaunch()') === -1) return 'the boot never reads the launch hash';
+  if (alarmInit.indexOf('this.resume()') === -1) return 'the boot stopped resuming a stored queue';
+  return true;
+});
+
+/* ---- 51d. §4 — the subscription, on disk and in D1 ---- */
+
+check('the stored subscription is never half-stored', () => {
+  const U = loadApp().ui;
+  const good = {
+    endpoint: 'https://fcm.googleapis.com/fcm/send/abc123',
+    keys: { p256dh: 'BPublicKeyMaterialHere00', auth: 'authsecret01' }
+  };
+
+  const kept = U.normSub(good);
+  if (kept.endpoint !== good.endpoint) return 'a valid subscription was not kept';
+  if (kept.p256dh !== good.keys.p256dh || kept.auth !== good.keys.auth) return 'the keys were dropped';
+
+  // the flat shape too — what comes back off disk has no nested `keys`
+  const flat = U.normSub({ endpoint: good.endpoint, p256dh: good.keys.p256dh, auth: good.keys.auth, at: '2026-08-07T09:00' });
+  if (flat.endpoint !== good.endpoint) return 'a stored row does not survive a reload';
+  if (flat.at !== '2026-08-07T09:00') return 'the registration stamp was lost';
+
+  /* all three fields or none. An endpoint with no keys cannot be encrypted to,
+     so a half-row would claim this device is reachable while every dispatch to
+     it failed — none is honest, half is not. */
+  [
+    null, undefined, 'nonsense', {},
+    { endpoint: good.endpoint },
+    { endpoint: good.endpoint, keys: { p256dh: good.keys.p256dh } },
+    { endpoint: good.endpoint, keys: { auth: good.keys.auth } },
+    { endpoint: 'http://insecure.example/push', keys: good.keys },
+    { endpoint: 'not-a-url', keys: good.keys }
+  ].forEach(bad => {
+    const out = U.normSub(bad);
+    if (out.endpoint !== '' || out.p256dh !== '' || out.auth !== '') {
+      throw new Error('a half-subscription survived: ' + JSON.stringify(bad));
+    }
+  });
+
+  // and a store written before Sprint 19 carries none at all
+  const APP = loadApp(), Store = APP.Store;
+  Store.load();
+  if (Store.data.prefs.notify.sub.endpoint !== '') return 'a fresh store claims a subscription';
+  Store.data.prefs.notify = { on: true, lead: 10, sound: true, serverAt: '' };
+  Store.load();
+  if (!Store.data.prefs.notify.sub || typeof Store.data.prefs.notify.sub.endpoint !== 'string') {
+    return 'a legacy store leaves the subscription undefined';
+  }
+  return true;
+});
+
+checkAsync('linking a device writes the subscription to disk AND to the Worker', () => {
+  const endpoint = 'https://fcm.googleapis.com/fcm/send/device-under-test';
+  const keys = { p256dh: 'BdeviceP256dhKeyMaterial', auth: 'deviceAuthSecret' };
+  // built rather than written out: a literal 87-char key in any source file is
+  // what §43b's "no VAPID key is committed" check exists to catch
+  const publicKey = 'B' + 'A'.repeat(86);
+  const posts = [];
+
+  const APP = loadApp({
+    navigator: {
+      userAgent: 'healthcheck/1.0',
+      serviceWorker: {
+        addEventListener() {},
+        ready: Promise.resolve({
+          pushManager: {
+            getSubscription: () => Promise.resolve(null),
+            subscribe: () => Promise.resolve({ toJSON: () => ({ endpoint, keys }) })
+          }
+        })
+      }
+    },
+    location: { protocol: 'https:' },
+    globals: {
+      atob: s => Buffer.from(s, 'base64').toString('binary'),
+      Uint8Array,
+      PushManager: function PushManager() {},
+      Notification: { permission: 'granted', requestPermission: () => Promise.resolve('granted') },
+      fetch: (url, init) => {
+        if (!init || init.method === 'GET') {
+          return Promise.resolve({ json: () => Promise.resolve({ ok: true, data: { configured: true, publicKey } }) });
+        }
+        posts.push({ url, body: JSON.parse(init.body) });
+        return Promise.resolve({ json: () => Promise.resolve({ ok: true, data: { id: 'row1' } }) });
+      }
+    }
+  });
+
+  APP.Store.load();
+  APP.Store.data.prefs.notify.on = true;
+
+  return APP.Notify.linkServer().then(result => {
+    if (result !== endpoint) return 'linkServer resolved ' + result;
+
+    // D1 — the half that lets a closed app be reached at all
+    if (posts.length !== 1) return 'the Worker was POSTed ' + posts.length + ' times';
+    if (posts[0].url.indexOf('api/push/subscribe') === -1) return 'the subscription went to ' + posts[0].url;
+    if (posts[0].body.endpoint !== endpoint) return 'the Worker was sent the wrong endpoint';
+    if (posts[0].body.keys.p256dh !== keys.p256dh) return 'the Worker was sent no encryption key';
+    if (posts[0].body.ua !== 'healthcheck/1.0') return 'the device is unidentifiable in the register';
+
+    // localStorage — the half that lets the device say what it registered
+    const sub = APP.Store.data.prefs.notify.sub;
+    if (sub.endpoint !== endpoint) return 'the subscription never reached the store';
+    if (sub.p256dh !== keys.p256dh || sub.auth !== keys.auth) return 'the stored subscription has no keys';
+    if (!sub.at) return 'the stored subscription is undated';
+    if (!APP.Store.data.prefs.notify.serverAt) return 'the D1 handshake was never recorded';
+
+    /* the two facts are separate on purpose: the browser commits the endpoint
+       before the POST goes out, so a device that subscribed on a flaky
+       connection has a real subscription the app must still be able to name */
+    const link = bodyOf(js, 'linkServer: function () {');
+    const stored = link.indexOf('Store.data.prefs.notify.sub =');
+    const sent = link.indexOf("window.fetch(PUSH_ENDPOINT + '/subscribe', {\n            method: 'POST'");
+    if (stored === -1 || sent === -1) return 'linkServer no longer does both halves';
+    if (stored > sent) return 'the subscription is only stored if the network answers';
+    return true;
+  });
+});
+
+check('the register refuses a subscription it could never deliver to', () => {
+  const subSrc = fs.readFileSync(path.join(ROOT, 'functions/api/push/subscribe.js'), 'utf8');
+  const sandbox = { console, JSON, RegExp, String, Object, crypto, TextEncoder, Array, Uint8Array };
+  vm.createContext(sandbox);
+  vm.runInContext(stripModule(subSrc) + '\n;globalThis.__s = { validSub, configured };',
+    sandbox, { filename: 'subscribe.js' });
+  const S = sandbox.__s;
+
+  const good = { endpoint: 'https://fcm.googleapis.com/fcm/send/abc', keys: { p256dh: 'BpublicKeyMaterial0000', auth: 'authSecret01' } };
+  if (S.validSub(good) !== '') return 'a valid subscription was rejected: ' + S.validSub(good);
+
+  const bad = [
+    [null, 'nothing at all'],
+    [{}, 'no endpoint'],
+    [{ endpoint: 42, keys: good.keys }, 'a non-string endpoint'],
+    [{ endpoint: 'http://plain.example/p', keys: good.keys }, 'an unencrypted endpoint'],
+    [{ endpoint: 'https://x.example/' + 'a'.repeat(1001), keys: good.keys }, 'an implausibly long endpoint'],
+    [{ endpoint: good.endpoint }, 'no keys at all'],
+    [{ endpoint: good.endpoint, keys: { p256dh: 'short', auth: good.keys.auth } }, 'a truncated public key'],
+    [{ endpoint: good.endpoint, keys: { p256dh: good.keys.p256dh } }, 'no auth secret']
+  ];
+  bad.forEach(([input, why]) => {
+    if (S.validSub(input) === '') throw new Error('the register accepted ' + why);
+  });
+
+  // and the whole route is off until the deployment actually has VAPID keys —
+  // storing devices nothing can be sent to is worse than storing none
+  if (S.configured({}) !== false) return 'an unconfigured deployment still registers devices';
+  if (S.configured({ VAPID_PUBLIC_KEY: 'a', VAPID_PRIVATE_KEY: 'b' }) !== true) {
+    return 'a configured deployment reports itself unconfigured';
+  }
+  return true;
+});
+
+/* ---- 51e. §2 — the payload the dispatcher actually puts on the wire ---- */
+
+check('the dispatched payload carries everything the alarm screen paints', () => {
+  const DS = loadDispatch();
+  const now = { date: '2026-08-07', minutes: 9 * 60 };            // 09:00 local
+
+  const rows = {
+    events: [{
+      id: 'e1', title: 'פגישת סקיצות', start_time: '2026-08-07T09:05', location: 'הסטודיו',
+      remind_key: 'default', category: 'business', alert_sound: 'long', alert_vibe: 'repeat'
+    }],
+    tasks: [{
+      id: 't1', title: 'לשלוח הצעת מחיר', due_date: '2026-08-07', due_time: '09:00',
+      status: 'todo', remind_key: 'at', category: 'personal', alert_sound: 'none', alert_vibe: 'none'
+    }]
+  };
+
+  const due = DS.selectDue(rows, now, 10);
+  const ev = due.filter(d => d.id === 'e1')[0];
+  const task = due.filter(d => d.id === 't1')[0];
+  if (!ev || !task) return 'the dispatcher stopped selecting the ordinary case';
+
+  const payload = DS.pushPayload(ev);
+  // the top of the payload is what the OS draws when nothing else is running
+  if (payload.title !== ev.title || payload.body !== ev.body) return 'the notification text is not the reminder’s';
+  if (payload.tag !== ev.key) return 'the notification is not tagged with the ledger key';
+  if (payload.url !== './index.html') return 'the tap opens ' + payload.url;
+
+  // ...and `alarm` is what survives it
+  const a = payload.alarm;
+  if (a.key !== ev.key) return 'the alarm carries no ledger key — a push would double-raise';
+  if (a.id !== 'e1' || a.collection !== 'events') return 'the alarm cannot open its own record';
+  if (a.cat !== 'business') return 'the alarm carries no category';
+  if (a.kind !== 'פגישה') return 'the alarm does not say what it is';
+  if (a.clock !== '09:05') return 'the alarm names ' + a.clock;
+  if (a.subject !== 'פגישת סקיצות') return 'the alarm carries no subject';
+  if (a.alert.sound !== 'long' || a.alert.vibe !== 'repeat') return 'the record’s own alert pair was dropped';
+
+  const t = DS.pushPayload(task).alarm;
+  if (t.collection !== 'tasks' || t.kind !== 'משימה') return 'a task reminder is mislabelled';
+  // 'ללא' is a real choice and must travel rather than being normalised away
+  if (t.alert.sound !== 'none') return 'a record that asked for silence was made to ring';
+
+  /* an unknown vocabulary falls back rather than travelling: a category this
+     build does not ship would paint no colour and no label on the screen */
+  const junk = DS.selectDue({
+    events: [{ id: 'e2', title: 'לא ידוע', start_time: '2026-08-07T09:05', remind_key: 'default', category: 'martian', alert_sound: 'trumpet', alert_vibe: 'earthquake' }],
+    tasks: []
+  }, now, 10)[0];
+  const jp = DS.pushPayload(junk).alarm;
+  if (jp.cat !== 'personal') return 'an unknown category travelled as ' + jp.cat;
+  if (jp.alert.sound !== 'short' || jp.alert.vibe !== 'short') return 'an unknown alert pair travelled intact';
+
+  // a custom reminder names ITS OWN moment, not the record's
+  const custom = DS.selectDue({
+    events: [{ id: 'e3', title: 'תזכורת מותאמת', start_time: '2026-08-07T18:00', remind_key: '@2026-08-07T09:00', category: 'business' }],
+    tasks: []
+  }, now, 10)[0];
+  if (!custom) return 'a custom reminder no longer comes due';
+  if (DS.pushPayload(custom).alarm.clock !== '09:00') return 'a custom reminder announces the record’s clock';
+
+  // and the dispatcher sends THIS, rather than building a second payload shape
+  if (!/sendPush\(sub, pushPayload\(item\), env\)/.test(dispatchSrc)) {
+    return 'the send loop builds its own payload instead of the one under test';
+  }
+  // the dry run is the diagnostic surface: it has to show the same thing
+  if (dispatchSrc.indexOf('found.fresh.map(pushPayload)') === -1) {
+    return 'the dry run hides the alarm block it would actually send';
+  }
+  return true;
+});
+
+check('the alarm block survives every hop from D1 to the screen', () => {
+  const DS = loadDispatch();
+  const U = loadApp().ui;
+  const now = { date: '2026-08-07', minutes: 9 * 60 };
+
+  const item = DS.selectDue({
+    events: [{
+      id: 'e1', title: 'פגישת סקיצות', start_time: '2026-08-07T09:05', location: 'הסטודיו',
+      remind_key: 'default', category: 'business', alert_sound: 'long', alert_vibe: 'repeat'
+    }],
+    tasks: []
+  }, now, 10)[0];
+
+  /* the whole journey, hop by hop: the dispatcher builds it, the worker
+     couriers it through a URL, the app parses it back and normalises it onto
+     the screen. Every hop is a place a field can be silently dropped, and a
+     dropped field is a blank alarm screen at 09:00. */
+  const wire = DS.pushPayload(item);
+  const hash = '#alarm=' + encodeURIComponent(JSON.stringify(wire.alarm));
+  const parsed = U.alarmFromHash(hash);
+  if (!parsed) return 'the worker’s own payload does not parse back';
+
+  const painted = U.normAlarms([Object.assign({ at: Date.now() }, parsed)])[0];
+  if (!painted) return 'the parsed alarm did not survive normalisation';
+  if (painted.key !== item.key) return 'the ledger key was lost in transit';
+  if (painted.subject !== 'פגישת סקיצות') return 'the subject was lost in transit';
+  if (painted.clock !== '09:05') return 'the clock was lost in transit';
+  if (painted.cat !== 'business') return 'the category was lost in transit';
+  if (painted.collection !== 'events') return 'the record link was lost in transit';
+  if (painted.alert.sound !== 'long' || painted.alert.vibe !== 'repeat') {
+    return 'the alert pair was lost in transit';
+  }
+  return true;
+});
+
+/* ---- 51f. the shipped shell and the specification ---- */
+
+check('the shell was bumped to v25 for Sprint 19', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'(v(\d+))'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[2], 10) < 25) return 'the cache is still ' + m[1] + ' — returning phones keep the old shell';
+  if (js.indexOf("APP_VERSION = '" + m[1] + "'") === -1) return 'app.js still reports a different version';
+  if (html.indexOf('app.js?v=' + m[1]) === -1) return 'app.js is not busted to ' + m[1];
+  if (html.indexOf('styles.css?v=' + m[1]) === -1) return 'styles.css is not busted to ' + m[1];
+  return true;
+});
+
+check('the permission is asked for in words that name the alarm clock', () => {
+  const U = loadApp().ui;
+  if (U.NOTIFY_ASK_CTA !== 'אפשר התראות בשביל שעון מעורר ברקע') {
+    return 'the ask reads "' + U.NOTIFY_ASK_CTA + '"';
+  }
+  // the browser dialog cannot be relabelled, so the app's own sentence has to
+  // come first — a permission granted without knowing what it buys is the one
+  // most likely to be revoked
+  const toggle = bodyOf(js, 'onToggle: function () {');
+  const said = toggle.indexOf('toast(NOTIFY_ASK_CTA)');
+  const asked = toggle.indexOf('window.Notification.requestPermission()');
+  if (said === -1) return 'the app never says what it is asking for';
+  if (said > asked) return 'the reason is given after the dialog it explains';
+
+  // ...and the banner CTA is the same sentence rather than a second wording
+  const paintAlert = bodyOf(js, 'paintAlert: function () {');
+  if (paintAlert.indexOf('cta.textContent = NOTIFY_ASK_CTA') === -1) {
+    return 'the banner asks in different words than the app does';
+  }
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 19', () => {
+  ['Sprint 19', 'PUSH_ALARM', 'ALARM_HASH', 'requireInteraction', 'pushPayload', 'v25']
+    .forEach(s => {
+      if (plan.indexOf(s) === -1) throw new Error('the plan never mentions ' + s);
+    });
+  return true;
+});
+
 /* --------------------------------------------------------------- report */
 
-/* The synchronous checks have all run by now; §43g is promise-based, so the
-   report waits for it rather than printing a green board mid-flight. */
+/* The synchronous checks have all run by now; §43g and §51 are promise-based,
+   so the report waits for them rather than printing a green board mid-flight. */
 asyncChecks
   .reduce((chain, run) => chain.then(run), Promise.resolve())
   ['catch'](err => { fail.push('async checks threw — ' + err.message); })

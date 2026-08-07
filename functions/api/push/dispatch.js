@@ -51,6 +51,19 @@ const REMIND_ORDER = ['default', '1440', '60', '15', 'at'];
 const REMIND_CUSTOM_RE = /^@\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 const REMIND_MAX = 12;
 
+/* Sprint 19 — the alarm screen's own vocabulary, the exact twin of app.js
+   normCat / normAlertSound / normVibe. An unknown value falls back rather than
+   travelling: a category this build does not ship would paint no colour and no
+   label, and an unknown sound family would be read as silence by a client that
+   has no idea what it means. Both ends normalise, so neither has to trust. */
+const CATS = ['personal', 'business'];
+const ALERT_SOUNDS = ['none', 'short', 'long'];
+const VIBE_KINDS = ['none', 'short', 'long', 'repeat'];
+
+const normCat = v => (CATS.indexOf(v) === -1 ? 'personal' : v);
+const normAlertSound = v => (ALERT_SOUNDS.indexOf(v) === -1 ? 'short' : v);
+const normVibe = v => (VIBE_KINDS.indexOf(v) === -1 ? 'short' : v);
+
 const DEFAULT_LEAD_MIN = 10;      // mirrors prefs.notify.lead's default
 const MISS_GRACE_MIN = 20;        // mirrors app.js MISS_GRACE_MIN
 const MAX_SENDS = 60;             // a single run is a minute of work, not a broadcast
@@ -181,14 +194,36 @@ export function selectDue(rows, now, defaultLead) {
    * is keyed by ITS OWN date — a reminder set for next Tuesday must not be
    * swept tonight by the `on_date < today` sweep.
    */
-  function collect(rec, id, kind, clockDate, clockTime, body) {
+  function collect(rec, id, kind, clockDate, clockTime, body, collection) {
+    /* Sprint 19 — everything the ALARM SCREEN paints, carried with the
+       reminder. The client's own scan hands Alarm.raise() a record it can
+       still read out of the local store; a push arrives at a phone whose app
+       has been closed for hours, so whatever the screen has to say has to
+       travel with it or the background alarm is a blank one. */
+    const face = {
+      id, collection,
+      cat: normCat(rec.category),
+      kind,
+      subject: String(rec.title || kind),
+      alert: {
+        sound: normAlertSound(rec.alert_sound),
+        vibe: normVibe(rec.alert_vibe)
+      }
+    };
+
     for (const tok of remindTokens(rec.remind_key)) {
       if (isCustom(tok)) {
         const stamp = tok.slice(1);
         const day = stamp.slice(0, 10);
-        const gap = gapTo(day, stamp.slice(11, 16));
+        const clock = stamp.slice(11, 16);
+        const gap = gapTo(day, clock);
         if (gap === null || gap > 0 || gap < -MISS_GRACE_MIN) continue;
-        out.push({ id, on: day, tok, key: remindMark(tok, id, day), title: 'תזכורת · ' + kind, body });
+        out.push({
+          id, on: day, tok, key: remindMark(tok, id, day),
+          title: 'תזכורת · ' + kind, body,
+          // a custom reminder names its own moment, not the record's
+          ...face, clock
+        });
         continue;
       }
       const window_ = leadOf(tok, defaultLead);
@@ -197,7 +232,8 @@ export function selectDue(rows, now, defaultLead) {
       if (gap === null || gap > window_ || gap < -MISS_GRACE_MIN) continue;
       out.push({
         id, on: clockDate, tok, key: remindMark(tok, id, clockDate),
-        title: kind + ' ' + phrase(gap), body
+        title: kind + ' ' + phrase(gap), body,
+        ...face, clock: clockTime
       });
     }
   }
@@ -208,16 +244,49 @@ export function selectDue(rows, now, defaultLead) {
     if (cut === -1) continue;                       // all-day: no clock to lead from
     collect(e, e.id, 'פגישה', stamp.slice(0, cut), stamp.slice(cut + 1, cut + 6),
       (e.title || 'פגישה') + ' · ' + stamp.slice(cut + 1, cut + 6) +
-      (e.location ? ' · ' + e.location : ''));
+      (e.location ? ' · ' + e.location : ''), 'events');
   }
 
   for (const t of rows.tasks) {
     if (CLOSED_STATUSES.indexOf(t.status) !== -1) continue;   // הושלם / בוטל
     collect(t, t.id, 'משימה', String(t.due_date || ''), String(t.due_time || ''),
-      (t.title || 'משימה') + ' · ' + t.due_time);
+      (t.title || 'משימה') + ' · ' + t.due_time, 'tasks');
   }
 
   return out;
+}
+
+/**
+ * One due reminder → the JSON body sw.js actually receives.
+ *
+ * The top three fields are what the platform draws when nothing else is
+ * running. `alarm` is what survives the tap: it is handed to Alarm.raise() —
+ * through a postMessage into an open window, or on the '#alarm=' hash of a
+ * cold launch — and becomes the full-screen alarm with the ביטול התראה button.
+ *
+ * The ledger KEY is the load-bearing field. The client keys its own prefs.fired
+ * the same way, so a reminder the local scan already raised is recognised as
+ * the same alarm rather than queued a second time behind it.
+ */
+export function pushPayload(item) {
+  return {
+    title: item.title,
+    body: item.body,
+    tag: item.key,
+    url: './index.html',
+    alarm: {
+      key: item.key,
+      id: item.id,
+      collection: item.collection || '',
+      cat: item.cat || '',
+      kind: item.kind || '',
+      clock: item.clock || '',
+      subject: item.subject || '',
+      title: item.title,
+      body: item.body,
+      alert: item.alert || { sound: 'short', vibe: 'short' }
+    }
+  };
 }
 
 /* -------------------------------------------------------------------- auth --- */
@@ -251,13 +320,17 @@ async function scan(env) {
 
   const until = addDaysISO(now.date, 2);   // exclusive — covers today + tomorrow
 
+  /* category, alert_sound and alert_vibe joined the SELECT in Sprint 19: the
+     alarm screen paints the category as a colour AND a label and rings the
+     record's own sound family, and a push is the one delivery path where the
+     client cannot look any of that up for itself. */
   const events = await binding.prepare(
-    'SELECT id, title, start_time, location, remind_key FROM events ' +
+    'SELECT id, title, start_time, location, remind_key, category, alert_sound, alert_vibe FROM events ' +
     'WHERE deleted_at IS NULL AND owner_id = ? AND start_time >= ? AND start_time < ?'
   ).bind(OWNER_ID, now.date, until).all();
 
   const tasks = await binding.prepare(
-    'SELECT id, title, due_date, due_time, status, remind_key FROM tasks ' +
+    'SELECT id, title, due_date, due_time, status, remind_key, category, alert_sound, alert_vibe FROM tasks ' +
     'WHERE deleted_at IS NULL AND owner_id = ? AND due_date >= ? AND due_date < ?'
   ).bind(OWNER_ID, now.date, until).all();
 
@@ -314,7 +387,9 @@ export async function onRequestGet(context) {
     devices: (devices && devices.n) || 0,
     scanned: found.scanned,
     due: found.due.length,
-    wouldSend: found.fresh.map(f => ({ key: f.key, title: f.title, body: f.body }))
+    // "exactly what a POST would send" means the whole payload, alarm block
+    // included — a dry run that hid it could not diagnose a blank alarm screen
+    wouldSend: found.fresh.map(pushPayload)
   });
 }
 
@@ -354,12 +429,7 @@ export async function onRequestPost(context) {
     let delivered = 0;
 
     for (const sub of devices) {
-      const res = await sendPush(sub, {
-        title: item.title,
-        body: item.body,
-        tag: item.key,
-        url: './index.html'
-      }, env);
+      const res = await sendPush(sub, pushPayload(item), env);
 
       if (res.ok) {
         delivered++;

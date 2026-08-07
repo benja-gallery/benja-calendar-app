@@ -8,13 +8,19 @@
    3. Serve same-origin static assets stale-while-revalidate.
    4. Receive background push messages and surface them through
       self.registration.showNotification().
+   5. Sprint 19 — carry the ALARM across the gap. A push that arrives with the
+      app closed is the only half of a reminder the platform will run, so the
+      notification it raises is the alarm's own: the mandated vibration beat,
+      requireInteraction so it stays on the lock screen until it is acted on,
+      and a payload that survives the tap and becomes the full-screen alarm
+      overlay the moment a window exists to paint it.
 
    Bump CACHE_VERSION on every shipped change to the core shell.
    ========================================================================== */
 
 'use strict';
 
-var CACHE_VERSION = 'v24';  // Sprint 18 — the full-screen alarm, tappable calendar titles
+var CACHE_VERSION = 'v25';  // Sprint 19 — the background alarm clock
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */
@@ -43,6 +49,17 @@ function shellURL(url) {
 
 var NOTIFY_ICON = './icons/icon-192.png';
 var NOTIFY_BADGE = './icons/favicon-32.png';
+
+/* Sprint 19 — the mandated alarm beat, the exact twin of app.js ALARM_VIBE.
+   A background reminder is the ONE the user cannot see coming, so the pattern
+   the OS plays for it is the alarm's, not the polite three-tick a foreground
+   notification used to carry. */
+var ALARM_VIBE = [1000, 500, 1000, 500];
+
+/* The hash a COLD launch arrives on. A phone with no window open has nothing
+   to postMessage, so the alarm rides the URL the tap opens instead, and app.js
+   raises it from there. Kept in step with app.js ALARM_HASH. */
+var ALARM_HASH = 'alarm';
 
 /* ------------------------------------------------------------- lifecycle */
 
@@ -137,8 +154,49 @@ self.addEventListener('fetch', function (event) {
 
 /* ------------------------------------------------------------------ push */
 
+/**
+ * The alarm block a dispatched reminder carries, trusted no further than its
+ * own shape. It is JSON off the network, it ends up on a screen, and the one
+ * field that actually has to be there is the ledger key — without it the page
+ * cannot de-duplicate a push against the same reminder its own scan raised.
+ *
+ * Everything else is normalised again by app.js normAlarms() before it paints,
+ * so this is a courier, never an authority.
+ */
+function alarmOf(parsed) {
+  var a = parsed && typeof parsed === 'object' ? (parsed.alarm || null) : null;
+  if (!a || typeof a !== 'object' || !a.key) return null;
+  return {
+    key: String(a.key),
+    id: String(a.id || ''),
+    collection: String(a.collection || ''),
+    cat: String(a.cat || ''),
+    kind: String(a.kind || ''),
+    clock: String(a.clock || ''),
+    subject: String(a.subject || ''),
+    title: String(a.title || parsed.title || ''),
+    body: String(a.body || parsed.body || ''),
+    alert: {
+      sound: String((a.alert && a.alert.sound) || ''),
+      vibe: String((a.alert && a.alert.vibe) || '')
+    }
+  };
+}
+
+/** './index.html' + the alarm, for the launch that has no window to talk to */
+function alarmURL(url, alarm) {
+  var base = String(url || './index.html').split('#')[0];
+  if (!alarm) return base;
+  try {
+    return base + '#' + ALARM_HASH + '=' + encodeURIComponent(JSON.stringify(alarm));
+  } catch (e) {
+    return base;                       // unserialisable — the app still opens
+  }
+}
+
 self.addEventListener('push', function (event) {
   var payload = { title: 'יומן חכם — Benja', body: 'יש לך תזכורת חדשה.', url: './index.html' };
+  var alarm = null;
 
   if (event.data) {
     try {
@@ -148,6 +206,7 @@ self.addEventListener('push', function (event) {
         payload.body = parsed.body || parsed.message || payload.body;
         payload.url = parsed.url || payload.url;
         payload.tag = parsed.tag;
+        alarm = alarmOf(parsed);
       }
     } catch (e) {
       payload.body = event.data.text() || payload.body;      // plain-text push
@@ -162,29 +221,41 @@ self.addEventListener('push', function (event) {
       dir: 'rtl',
       lang: 'he',
       tag: payload.tag || 'benja-push',
-      renotify: !!payload.tag,
+      // a second reminder re-alerts rather than silently replacing the first
+      renotify: true,
       // the OS tone can be silenced by a profile the app has no say in; the
       // app's own chime (below) is not subject to that
       silent: false,
-      vibrate: [110, 60, 110],
-      data: { url: payload.url },
-      actions: [{ action: 'open', title: 'פתיחת היומן' }]
-    }).then(chimeInClients)
+      vibrate: ALARM_VIBE,
+      /* Sprint 19 — this is an alarm, not an FYI. It stays on the lock screen
+         until a finger acts on it; an auto-dismissed reminder for a meeting
+         the phone was asleep through is exactly the failure being fixed. */
+      requireInteraction: true,
+      // the payload has to survive the tap: notificationclick is where a cold
+      // launch learns which reminder it is opening for
+      data: { url: payload.url, alarm: alarm },
+      actions: [{ action: 'open', title: '⏰ פתיחת ההתראה' }]
+    }).then(function () { return wakeClients(alarm); })
   );
 });
 
 /**
  * A worker has no audio of its own — there is no AudioContext in this scope.
- * When a window is open it does have one, so the sound is delegated: the page
- * answers PUSH_CHIME by playing the same two-note bell a locally scheduled
- * reminder plays. With no window open the notification's own tone is all
- * there is, which is exactly what the platform intends.
+ * When a window is open it does have one, so the sound is delegated.
+ *
+ * With an alarm block the page is asked for the whole alarm (PUSH_ALARM): the
+ * full-screen overlay rings on its own loop and would fight a one-shot chime,
+ * so the two messages are alternatives rather than a pair. Without one — a
+ * plain push from some other sender — the old PUSH_CHIME is still exactly
+ * right. With no window open at all, the notification's own tone and the
+ * vibration are what the platform intends to carry it.
  */
-function chimeInClients() {
+function wakeClients(alarm) {
+  var msg = alarm ? { type: 'PUSH_ALARM', alarm: alarm } : { type: 'PUSH_CHIME' };
   return self.clients.matchAll({ type: 'window', includeUncontrolled: true })
     .then(function (list) {
       list.forEach(function (c) {
-        try { c.postMessage({ type: 'PUSH_CHIME' }); } catch (e) { /* gone */ }
+        try { c.postMessage(msg); } catch (e) { /* gone */ }
       });
     })['catch'](function () { /* no clients — the OS tone stands alone */ });
 }
@@ -223,16 +294,47 @@ self.addEventListener('pushsubscriptionchange', function (event) {
   );
 });
 
+/**
+ * Sprint 19 — the tap has to land on the ALARM, not merely on the app.
+ *
+ * A background notification is a message the OS drew; the alarm screen is the
+ * thing that actually keeps ringing until it is dismissed. Tapping the
+ * notification therefore has to end at that screen either way:
+ *
+ *   a window is already open → focus it and hand it the alarm over
+ *                              postMessage, which Notify's message listener
+ *                              turns straight into Alarm.raise();
+ *   nothing is open          → open one on '#alarm=<payload>', which app.js
+ *                              reads on boot and raises from there.
+ *
+ * Both paths converge on the same overlay with the same ביטול התראה button,
+ * and the ledger key inside the payload is what stops a reminder the local
+ * scan already raised from being raised a second time.
+ */
 self.addEventListener('notificationclick', function (event) {
   event.notification.close();
-  var target = (event.notification.data && event.notification.data.url) || './index.html';
+  var data = event.notification.data || {};
+  var alarm = data.alarm || null;
+  var target = alarmURL(data.url || './index.html', alarm);
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (list) {
       for (var i = 0; i < list.length; i++) {
-        if (list[i].url.indexOf(self.location.origin) === 0 && 'focus' in list[i]) {
-          return list[i].focus();
-        }
+        var client = list[i];
+        if (client.url.indexOf(self.location.origin) !== 0 || !('focus' in client)) continue;
+
+        var focused;
+        try { focused = client.focus(); } catch (e) { focused = null; }
+        // focus() is a promise in a current browser and was a plain return in
+        // an older one; the alarm must be handed over either way
+        return Promise.resolve(focused)['catch'](function () { return null; })
+          .then(function (win) {
+            var open = win || client;
+            if (alarm) {
+              try { open.postMessage({ type: 'PUSH_ALARM', alarm: alarm }); } catch (e2) { /* gone */ }
+            }
+            return open;
+          });
       }
       return self.clients.openWindow(new URL(target, self.location.href).href);
     })

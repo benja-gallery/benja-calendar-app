@@ -258,7 +258,7 @@
   var THEME_DEFAULT = 'dark';
 
   /** the shell version — MUST match CACHE_VERSION in sw.js and the ?v= in index.html */
-  var APP_VERSION = 'v24';
+  var APP_VERSION = 'v25';
 
   /* --- client CRM (Sprint 4) --- */
   var CLIENT_STATUSES = ['lead', 'contacted', 'interested', 'quoted',
@@ -1777,7 +1777,11 @@
           pantry: { add: {}, hide: [], edit: {} },
           // serverAt — when the Worker last accepted this device's push
           // subscription. '' means local-only delivery (Sprint 11).
-          notify: { on: false, lead: 10, sound: true, serverAt: '' }, fired: {},
+          // sub — Sprint 19: the subscription itself, kept on disk so a device
+          // knows which endpoint it registered without asking the browser, and
+          // so a link that reached the browser but never reached D1 is visible
+          // rather than silent.
+          notify: { on: false, lead: 10, sound: true, serverAt: '', sub: blankSub() }, fired: {},
           // Sprint 18 — the alarms still waiting to be dismissed. Persisted on
           // purpose: an alarm the phone was locked on is still owed (§1).
           alarms: [],
@@ -1874,7 +1878,7 @@
 
       // reminder prefs may be absent in a store written before the PWA upgrade
       if (!d.prefs.notify || typeof d.prefs.notify !== 'object') {
-        d.prefs.notify = { on: false, lead: 10, sound: true, serverAt: '' };
+        d.prefs.notify = { on: false, lead: 10, sound: true, serverAt: '', sub: blankSub() };
       }
       d.prefs.notify.on = !!d.prefs.notify.on;
       if (typeof d.prefs.notify.lead !== 'number' || d.prefs.notify.lead < 0) d.prefs.notify.lead = 10;
@@ -1882,6 +1886,11 @@
       d.prefs.notify.sound = d.prefs.notify.sound !== false;
       // Sprint 11 — absent in every store written before server push existed
       if (typeof d.prefs.notify.serverAt !== 'string') d.prefs.notify.serverAt = '';
+      // Sprint 19 — the stored subscription, absent in every store written
+      // before it was kept at all. Normalised rather than trusted: a half-row
+      // that named an endpoint with no keys would claim a device is linked
+      // when nothing could ever be delivered to it.
+      d.prefs.notify.sub = normSub(d.prefs.notify.sub);
       if (!d.prefs.fired || typeof d.prefs.fired !== 'object') d.prefs.fired = {};
       d.prefs.upcomingOpen = d.prefs.upcomingOpen !== false;
 
@@ -8731,6 +8740,55 @@
    */
   var MISS_GRACE_MIN = 20;
 
+  /**
+   * Sprint 19 — the hash a background notification launches the app on.
+   *
+   * A phone with no window open has nothing to postMessage, so sw.js puts the
+   * alarm on the URL the tap opens and the app raises it from there. MUST stay
+   * in step with ALARM_HASH in sw.js.
+   */
+  var ALARM_HASH = 'alarm';
+
+  /**
+   * Sprint 19 — the words the app asks for the permission with.
+   *
+   * The browser's own dialog says nothing a user can act on. The sentence that
+   * precedes it has to name the capability being bought, and the capability is
+   * not "notifications" — it is an alarm clock that rings with the app closed.
+   */
+  var NOTIFY_ASK_CTA = 'אפשר התראות בשביל שעון מעורר ברקע';
+
+  /* --- the stored push subscription (Sprint 19) --- */
+
+  function blankSub() {
+    return { endpoint: '', p256dh: '', auth: '', at: '' };
+  }
+
+  /**
+   * A subscription off disk, trusted no further than its own completeness.
+   *
+   * All three fields or none: an endpoint with no keys cannot be encrypted to,
+   * so a half-row would claim this device is reachable while every dispatch to
+   * it failed. Half a subscription is worse than none, because none is honest.
+   */
+  function normSub(raw) {
+    var s = blankSub();
+    if (!raw || typeof raw !== 'object') return s;
+
+    var endpoint = typeof raw.endpoint === 'string' ? raw.endpoint : '';
+    var keys = raw.keys && typeof raw.keys === 'object' ? raw.keys : raw;
+    var p256dh = typeof keys.p256dh === 'string' ? keys.p256dh : '';
+    var auth = typeof keys.auth === 'string' ? keys.auth : '';
+
+    if (!/^https:\/\//.test(endpoint) || !p256dh || !auth) return s;
+
+    s.endpoint = endpoint;
+    s.p256dh = p256dh;
+    s.auth = auth;
+    s.at = typeof raw.at === 'string' ? raw.at : '';
+    return s;
+  }
+
   var Notify = {
     timer: null,
     // the in-flight server registration, so a focus + a launch cannot race
@@ -8783,7 +8841,7 @@
         ico.textContent = '🔔';
         label.textContent = 'הפעל התראות פוש';
         btn.setAttribute('aria-pressed', 'false');
-        btn.title = 'הפעלת התראות פוש ותזכורות';
+        btn.title = NOTIFY_ASK_CTA;
       }
     },
 
@@ -8838,11 +8896,18 @@
       } else {
         if (ico) ico.textContent = '🔔';
         if (text) {
+          /* Sprint 19 — the ask states what the permission is actually FOR.
+             "הפעל התראות" is a browser dialog nobody reads; the reason the app
+             needs it is that a closed PWA runs no timers at all, so without a
+             granted permission there is no background alarm clock — only a
+             reminder that arrives if the app happens to be open. */
           text.textContent = state === 'off'
-            ? 'ההתראות כבויות — תזכורות לפגישות ולמשימות לא יגיעו אליך.'
-            : 'התראות עוד לא הופעלו — בלעדיהן שום תזכורת לא תגיע לטלפון.';
+            ? 'ההתראות כבויות — תזכורות לפגישות ולמשימות לא יגיעו אליך, ' +
+              'וגם השעון המעורר לא יצלצל כשהאפליקציה סגורה.'
+            : 'התראות עוד לא הופעלו — בלי הרשאה שום תזכורת לא תגיע לטלפון ' +
+              'כשהאפליקציה סגורה.';
         }
-        if (cta) { cta.hidden = false; cta.textContent = 'הפעל התראות'; }
+        if (cta) { cta.hidden = false; cta.textContent = NOTIFY_ASK_CTA; }
       }
     },
 
@@ -8878,6 +8943,12 @@
         if (Store.data.prefs.notify.on) { self.tick(); self.linkServer(); }
         return;
       }
+
+      /* Sprint 19 — the ask, said in the app's own words a beat before the
+         browser's. The platform dialog cannot be relabelled, so this is the
+         only place the reason can be stated at all, and a permission granted
+         without knowing what it buys is the one most likely to be revoked. */
+      toast(NOTIFY_ASK_CTA);
 
       var req;
       try { req = window.Notification.requestPermission(); } catch (e) { req = null; }
@@ -9190,6 +9261,18 @@
         .then(function (sub) {
           if (!sub) return null;
           var json = typeof sub.toJSON === 'function' ? sub.toJSON() : sub;
+
+          /* Sprint 19 — on disk BEFORE the network, not after it.
+             The browser has already committed this endpoint by the time the
+             POST goes out; recording it only on a 200 would mean a device that
+             subscribed on a flaky connection has a live subscription the app
+             cannot name, and no way to tell that from never having subscribed
+             at all. serverAt below is the separate fact — whether D1 has it. */
+          Store.data.prefs.notify.sub = normSub({
+            endpoint: json.endpoint, keys: json.keys, at: toISOStamp(Date.now())
+          });
+          Store.save();
+
           return window.fetch(PUSH_ENDPOINT + '/subscribe', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -9232,10 +9315,20 @@
 
       /* A server-sent push is rendered by sw.js, which has no audio at all.
          When a window IS open the worker asks it to make the sound, so a real
-         Web Push carries the same chime a locally-scheduled reminder does. */
+         Web Push carries the same chime a locally-scheduled reminder does.
+
+         Sprint 19 — and when the push carries an ALARM, the worker asks for
+         the whole thing instead. A background reminder must end at the same
+         full-screen screen a foreground one does, or "the app was closed"
+         would still mean a quieter, dismissable, forgettable reminder. The
+         ledger key rides inside the payload, so a reminder the local scan
+         already raised is recognised rather than raised twice. */
       if (navigator.serviceWorker && navigator.serviceWorker.addEventListener) {
         navigator.serviceWorker.addEventListener('message', function (event) {
-          if (event && event.data && event.data.type === 'PUSH_CHIME') Chime.play();
+          var msg = event && event.data;
+          if (!msg) return;
+          if (msg.type === 'PUSH_ALARM') { Alarm.fromPush(msg.alarm); return; }
+          if (msg.type === 'PUSH_CHIME') Chime.play();
         });
       }
 
@@ -9336,6 +9429,46 @@
     return out.slice(0, ALARM_MAX);
   }
 
+  /**
+   * Sprint 19 — the alarm a BACKGROUND notification launched the app with.
+   *
+   * A phone with no window open has nothing for sw.js to postMessage, so the
+   * worker puts the payload on the URL the tap opens: '#alarm=<json>'. This
+   * reads it back. Anything malformed is dropped rather than half-raised — the
+   * hash is untrusted input that arrives straight from a URL bar.
+   */
+  function alarmFromHash(hash) {
+    var m = new RegExp('[#&]' + ALARM_HASH + '=([^&]+)').exec(String(hash || ''));
+    if (!m) return null;
+
+    var parsed;
+    try { parsed = JSON.parse(decodeURIComponent(m[1])); } catch (e) { return null; }
+    if (!parsed || typeof parsed !== 'object' || !parsed.key) return null;
+    return parsed;
+  }
+
+  /**
+   * The hash is a one-shot courier and is spent on arrival.
+   *
+   * Left in place, a reload — or the PWA being resumed on the same URL — would
+   * re-raise a reminder the user has already dismissed, which is the one way
+   * an alarm clock can become something you learn to ignore.
+   */
+  function clearAlarmHash() {
+    var loc = typeof window !== 'undefined' ? window.location : null;
+    if (!loc) return false;
+
+    var hist = typeof window.history !== 'undefined' ? window.history : null;
+    if (hist && typeof hist.replaceState === 'function') {
+      try {
+        hist.replaceState(null, '', (loc.pathname || '') + (loc.search || ''));
+        return true;
+      } catch (e) { /* a file: URL refuses — fall through */ }
+    }
+    try { loc.hash = ''; } catch (e2) { /* nothing else to try */ }
+    return true;
+  }
+
   /** one due reminder, reduced to what the alarm screen and the store need */
   function alarmOf(item) {
     return normAlarms([{
@@ -9387,6 +9520,37 @@
       // is only counted on it, which is what the "+N ממתינות" line says
       if (first) this.start(); else this.paint();
       return true;
+    },
+
+    /**
+     * Sprint 19 — a reminder that arrived while the app was closed.
+     *
+     * Identical to raise() in everything except where it came from, which is
+     * exactly the point: a push-delivered reminder is not a lesser reminder.
+     * normAlarms() inside alarmOf() does the validating, so a payload off the
+     * network gets the same treatment as a row off disk — an unknown category,
+     * an unreadable collection or a junk alert pair are all normalised rather
+     * than trusted, and anything without a ledger key is refused outright.
+     */
+    fromPush: function (raw) {
+      if (!raw || typeof raw !== 'object' || !raw.key) return false;
+      return this.raise(raw);
+    },
+
+    /**
+     * The COLD launch: no window existed, so the alarm rode in on the URL.
+     *
+     * Called before resume(), because a queue restored from disk and an alarm
+     * arriving from a tap are the same queue — and if they name the same
+     * reminder, the key makes them one entry rather than two.
+     */
+    fromLaunch: function () {
+      var loc = typeof window !== 'undefined' ? window.location : null;
+      var raw = loc ? alarmFromHash(loc.hash) : null;
+      if (!raw) return false;
+
+      clearAlarmHash();
+      return this.fromPush(raw);
     },
 
     /** put the head of the queue on screen and make it impossible to ignore */
@@ -9563,6 +9727,11 @@
      */
     resume: function () {
       if (!this.isOn()) return false;
+      /* Sprint 19 — fromLaunch() runs first and may already have put this
+         queue on the screen. Starting it a second time would re-arm a ring
+         that is already ringing and ask for a wake lock already held. */
+      var el = $('#alarmScreen');
+      if (el && el.hidden === false) return false;
       return this.start();
     },
 
@@ -9579,6 +9748,10 @@
         if (!Chime.loopOn()) self.ring();
       });
 
+      /* Sprint 19 — the tap that opened this window may BE the alarm. Read
+         first, then resume: both end in the same queue, and start() is only
+         ever called once for whichever entry ends up at its head. */
+      this.fromLaunch();
       this.resume();
     }
   };
@@ -10657,7 +10830,19 @@
       taskRow: taskRow,
       rowWhen: rowWhen,
       shortDay: shortDay,
-      stampDay: stampDay
+      stampDay: stampDay,
+
+      /* Sprint 19 — the background alarm. The two halves that turn a push into
+         the same full-screen alarm a foreground reminder raises are both pure:
+         alarmFromHash() parses the cold-launch URL, normSub() validates the
+         subscription kept on disk. Both take untrusted input, so healthcheck.js
+         drives them with real junk rather than pattern-matching the source. */
+      ALARM_HASH: ALARM_HASH,
+      NOTIFY_ASK_CTA: NOTIFY_ASK_CTA,
+      alarmFromHash: alarmFromHash,
+      clearAlarmHash: clearAlarmHash,
+      blankSub: blankSub,
+      normSub: normSub
     },
 
     // cloud sync engine — schema, serialisers, outbox and merge, all pure
