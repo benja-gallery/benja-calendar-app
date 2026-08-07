@@ -258,7 +258,7 @@
   var THEME_DEFAULT = 'dark';
 
   /** the shell version — MUST match CACHE_VERSION in sw.js and the ?v= in index.html */
-  var APP_VERSION = 'v25';
+  var APP_VERSION = 'v26';
 
   /* --- client CRM (Sprint 4) --- */
   var CLIENT_STATUSES = ['lead', 'contacted', 'interested', 'quoted',
@@ -306,8 +306,14 @@
   var DOW_SHORT = ['א', 'ב', 'ג', 'ד', 'ה', 'ו', 'ש'];
 
   /* --- calendar engine (Sprint 2) --- */
-  var CAL_VIEWS = ['day', 'week', 'month', 'agenda'];
-  var CAL_LABEL = { day: 'תצוגת יום', week: 'תצוגת שבוע', month: 'תצוגת חודש', agenda: 'סדר יום' };
+  /* Sprint 20 appends 'year': a 7/7 rotation is a STRIPE, and a stripe is not
+     a thing four weeks of grid can show. The whole point of the reserve-shift
+     engine is answering "where am I in November" without stepping there. */
+  var CAL_VIEWS = ['day', 'week', 'month', 'year', 'agenda'];
+  var CAL_LABEL = {
+    day: 'תצוגת יום', week: 'תצוגת שבוע', month: 'תצוגת חודש',
+    year: 'תצוגת שנה', agenda: 'סדר יום'
+  };
   var HOUR_PX = 56;      // day-view hour row height — mirrors --hour-h in styles.css
   var AGENDA_DAYS = 30;  // rolling agenda window
   var SWIPE_MIN = 55;    // px before a horizontal drag counts as navigation
@@ -317,6 +323,49 @@
      every one of them into uselessness; the rest are counted by +N. */
   var MONTH_DOTS = 4;
   var MONTH_CHIPS = 2;
+
+  /* ==========================================================================
+     Sprint 20 · מנוע סבבי מילואים ומשמרות — the reserve-duty rotation engine
+
+     A reserve rotation is not a set of records. It is a RULE — "a week at
+     base, a week at home, from the 10th of August" — and a rule that has to be
+     entered as 150 events is a rule nobody enters. So nothing is stored per
+     day: one config of six fields is stored, and every calendar surface asks
+     getShiftForDate() what any given date resolves to.
+
+     The rotation is defined from anchorDate to endDate INCLUSIVE and nowhere
+     else. A date before the anchor answers '' rather than an extrapolation
+     backwards: the anchor is where the cycle is KNOWN to start, and painting a
+     confident colour on a week nobody stated is how a schedule loses trust.
+     ========================================================================== */
+
+  var SHIFT_STATES = ['BASE', 'HOME'];
+  var SHIFT_LABEL = { HOME: '🏡 בית', BASE: '🪖 בסיס' };
+  var SHIFT_NAME = { HOME: 'בית', BASE: 'בסיס' };
+  var SHIFT_OTHER = { HOME: 'BASE', BASE: 'HOME' };
+
+  /* the defaults the field mandate names: the coming Monday, starting at base */
+  var SHIFT_ANCHOR_DEFAULT = '2026-08-10';
+  var SHIFT_STATE_DEFAULT = 'BASE';
+  var SHIFT_HOME_DEFAULT = 7;
+  var SHIFT_BASE_DEFAULT = 7;
+  var SHIFT_END_DEFAULT = '2026-12-31';
+
+  /* a leg of one day is legal (a 1/1 alternation is a real duty pattern); a leg
+     longer than a year is a typo, and normalising it is cheaper than painting
+     twelve blank months */
+  var SHIFT_DAYS_MIN = 1;
+  var SHIFT_DAYS_MAX = 365;
+
+  /* the ready-made rotations the settings sheet offers as one tap each */
+  var SHIFT_PRESETS = [
+    { home: 7, base: 7, label: '7 / 7' },
+    { home: 7, base: 14, label: '7 בית · 14 בסיס' },
+    { home: 14, base: 7, label: '14 בית · 7 בסיס' },
+    { home: 3, base: 4, label: '3 / 4' }
+  ];
+
+  var SHIFT_TOGGLE_LABEL = '🛡️ סבב מילואים';
 
   /* --- cloud sync engine (Sprint 5) --- */
 
@@ -982,6 +1031,23 @@
 
   function agendaRange(iso, days) {
     return { from: iso, to: addDaysISO(iso, (days || AGENDA_DAYS) - 1) };
+  }
+
+  /**
+   * Whole days from `from` to `to`, signed. Sprint 20.
+   *
+   * Computed on UTC midnights rather than on local ones ON PURPOSE, and this is
+   * the one place in the app that reaches for UTC: a local subtraction across
+   * a DST boundary is 23 or 25 hours, and Math.round() hiding that would put
+   * the whole rotation one day out for half the year. The dates themselves stay
+   * local — only the arithmetic between two of them is done on a fixed grid.
+   */
+  function daysBetweenISO(from, to) {
+    var a = parseISO(from), b = parseISO(to);
+    if (!a || !b) return null;
+    var ua = Date.UTC(a.getFullYear(), a.getMonth(), a.getDate());
+    var ub = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate());
+    return Math.round((ub - ua) / 86400000);
   }
 
   /** minutes since midnight, or null when there is no usable time */
@@ -1793,7 +1859,10 @@
           sound: { short: SHORT_DEFAULT, long: LONG_DEFAULT },
           vibe: VIBE_DEFAULT,
           haptics: true,
-          theme: THEME_DEFAULT
+          theme: THEME_DEFAULT,
+          // Sprint 20 — the reserve-duty rotation. Six fields, no records: the
+          // calendar asks getShiftForDate() rather than reading a table.
+          reserveShiftConfig: blankShiftConfig()
         },
         events: [], tasks: [], lists: [], notes: [], clients: [],
         // סל מחזור (Sprint 8) — deleted records wait here for ten days
@@ -1908,6 +1977,12 @@
       d.prefs.vibe = normVibe(d.prefs.vibe);
       d.prefs.haptics = d.prefs.haptics !== false;      // touch feedback defaults ON
       if (THEMES.indexOf(d.prefs.theme) === -1) d.prefs.theme = THEME_DEFAULT;
+
+      // Sprint 20 — the rotation config, absent in every store written before
+      // the engine existed. Normalised rather than trusted: an anchor that is
+      // not a date, or a leg of zero days, would paint a confident colour on
+      // days the owner never stated anything about.
+      d.prefs.reserveShiftConfig = normShiftConfig(d.prefs.reserveShiftConfig);
 
       // Sprint 5: the cloud block is absent in every pre-D1 store, and its
       // outbox is replayed from disk — a queued mutation survives a reload
@@ -3481,6 +3556,144 @@
       .concat(boardTasksOn(iso).map(function (x) { return { collection: 'tasks', rec: x }; }));
   }
 
+  /* ==========================================================================
+     Sprint 20 · the rotation engine itself
+
+     Six fields in, one word out. Everything the calendar paints — a month
+     cell's tint, a week column, the day banner, a year square — comes through
+     getShiftForDate(), so there is exactly one place that can be wrong.
+     ========================================================================== */
+
+  function blankShiftConfig() {
+    return {
+      enabled: true,
+      anchorDate: SHIFT_ANCHOR_DEFAULT,
+      anchorState: SHIFT_STATE_DEFAULT,
+      homeDays: SHIFT_HOME_DEFAULT,
+      baseDays: SHIFT_BASE_DEFAULT,
+      endDate: SHIFT_END_DEFAULT,
+      // last local edit, in ms — what the D1 round-trip resolves ties on
+      updatedAt: 0
+    };
+  }
+
+  function normShiftState(v) {
+    return SHIFT_STATES.indexOf(v) === -1 ? SHIFT_STATE_DEFAULT : v;
+  }
+
+  function normShiftDays(v, fallback) {
+    var n = parseInt(v, 10);
+    if (isNaN(n)) return fallback;
+    if (n < SHIFT_DAYS_MIN) return SHIFT_DAYS_MIN;
+    if (n > SHIFT_DAYS_MAX) return SHIFT_DAYS_MAX;
+    return n;
+  }
+
+  function normShiftDate(v, fallback) {
+    return (typeof v === 'string' && parseISO(v)) ? v : fallback;
+  }
+
+  /**
+   * Normalised rather than trusted, exactly like every other prefs block: a
+   * config written by a future vocabulary, a hand-edited localStorage or a
+   * half-row that arrived from D1 can never crash a render or silently paint
+   * the wrong colour on a real day.
+   */
+  function normShiftConfig(raw) {
+    var c = blankShiftConfig();
+    if (!raw || typeof raw !== 'object') return c;
+
+    c.enabled = raw.enabled !== false;
+    c.anchorDate = normShiftDate(raw.anchorDate, SHIFT_ANCHOR_DEFAULT);
+    c.anchorState = normShiftState(raw.anchorState);
+    c.homeDays = normShiftDays(raw.homeDays, SHIFT_HOME_DEFAULT);
+    c.baseDays = normShiftDays(raw.baseDays, SHIFT_BASE_DEFAULT);
+    c.endDate = normShiftDate(raw.endDate, SHIFT_END_DEFAULT);
+    c.updatedAt = typeof raw.updatedAt === 'number' && raw.updatedAt > 0 ? raw.updatedAt : 0;
+
+    // an end before the start is a rotation of zero days — the only reading
+    // that is never what somebody meant, so the end is pushed out to one cycle
+    if (c.endDate < c.anchorDate) c.endDate = addDaysISO(c.anchorDate, c.homeDays + c.baseDays - 1);
+    return c;
+  }
+
+  /** the live config, self-healing on every read (a pre-Sprint-20 store has none) */
+  function shiftCfg() {
+    var p = Store.data && Store.data.prefs;
+    if (!p) return blankShiftConfig();
+    if (!p.reserveShiftConfig || typeof p.reserveShiftConfig !== 'object') {
+      p.reserveShiftConfig = blankShiftConfig();
+    }
+    return p.reserveShiftConfig;
+  }
+
+  /** one full HOME+BASE turn, in days */
+  function shiftCycleDays(cfg) {
+    var c = cfg || shiftCfg();
+    return c.homeDays + c.baseDays;
+  }
+
+  /**
+   * 'HOME' | 'BASE' | '' — the one question every painted surface asks.
+   *
+   * The anchor opens a leg of `anchorState`; the legs alternate from there, so
+   * the answer is a modulo of the offset against the cycle. Nothing is stored
+   * per day, which is why a date three years out costs the same as tomorrow —
+   * and why "graceful infinite scroll" needs no special case: the window is not
+   * pre-computed, it is asked.
+   *
+   * Answers '' outside [anchorDate, endDate] and whenever the engine is off, so
+   * a caller can paint on truthiness alone.
+   */
+  function getShiftForDate(target, cfg) {
+    var c = cfg || shiftCfg();
+    if (!c.enabled) return '';
+
+    var iso = typeof target === 'string' ? target : isoDate(target);
+    if (!parseISO(iso)) return '';
+    if (iso < c.anchorDate || iso > c.endDate) return '';
+
+    var off = daysBetweenISO(c.anchorDate, iso);
+    if (off === null || off < 0) return '';
+
+    var first = normShiftState(c.anchorState);
+    var firstLen = first === 'BASE' ? c.baseDays : c.homeDays;
+    var pos = off % shiftCycleDays(c);
+    return pos < firstLen ? first : SHIFT_OTHER[first];
+  }
+
+  /** which day of the current leg this is — "יום 3 מתוך 7", the urgency readout */
+  function shiftLegDay(iso, cfg) {
+    var c = cfg || shiftCfg();
+    var state = getShiftForDate(iso, c);
+    if (!state) return null;
+    var first = normShiftState(c.anchorState);
+    var firstLen = first === 'BASE' ? c.baseDays : c.homeDays;
+    var pos = daysBetweenISO(c.anchorDate, iso) % shiftCycleDays(c);
+    var len = state === 'BASE' ? c.baseDays : c.homeDays;
+    return { state: state, day: (state === first ? pos : pos - firstLen) + 1, of: len };
+  }
+
+  /** the class the cell carries — colour is a modifier, never the carrier (§0.2) */
+  function shiftClass(iso, cfg) {
+    var state = getShiftForDate(iso, cfg);
+    return state ? ' is-shift is-shift-' + state.toLowerCase() : '';
+  }
+
+  /** …and the words beside it, because a tint alone states nothing to a reader */
+  function shiftTag(iso, cls, cfg) {
+    var state = getShiftForDate(iso, cfg);
+    if (!state) return '';
+    return '<span class="shift-tag shift-tag-' + state.toLowerCase() + (cls ? ' ' + cls : '') + '">' +
+      SHIFT_LABEL[state] + '</span>';
+  }
+
+  /** the same fact spelled out for a screen reader, appended to a cell's label */
+  function shiftAria(iso, cfg) {
+    var state = getShiftForDate(iso, cfg);
+    return state ? ' · סבב מילואים: ' + SHIFT_NAME[state] : '';
+  }
+
   var Cal = {
     view: 'month',
     anchor: todayISO(),
@@ -3498,6 +3711,7 @@
 
     step: function (dir) {
       if (this.view === 'month') this.anchor = addMonthsISO(this.anchor, dir);
+      else if (this.view === 'year') this.anchor = addMonthsISO(this.anchor, 12 * dir);
       else if (this.view === 'week') this.anchor = addDaysISO(this.anchor, 7 * dir);
       else if (this.view === 'agenda') this.anchor = addDaysISO(this.anchor, AGENDA_DAYS * dir);
       else this.anchor = addDaysISO(this.anchor, dir);
@@ -3533,6 +3747,7 @@
       var d = parseISO(this.anchor) || new Date();
       if (this.view === 'day') return relDay(this.anchor);
       if (this.view === 'month') return HE_MONTHS[d.getMonth()] + ' ' + d.getFullYear();
+      if (this.view === 'year') return 'שנת ' + d.getFullYear();
       if (this.view === 'week') {
         var w = weekDays(this.anchor);
         return fmtDayMon(w[0]) + ' – ' + fmtDayMon(w[6]) + ' ' + (parseISO(w[6]) || d).getFullYear();
@@ -3545,6 +3760,12 @@
     rangeDays: function () {
       if (this.view === 'day') return [this.anchor];
       if (this.view === 'week') return weekDays(this.anchor);
+      if (this.view === 'year') {
+        var y = (parseISO(this.anchor) || new Date()).getFullYear();
+        var out = [], cur = y + '-01-01';
+        while (cur.slice(0, 4) === String(y)) { out.push(cur); cur = addDaysISO(cur, 1); }
+        return out;
+      }
       if (this.view === 'month') {
         var m = (parseISO(this.anchor) || new Date()).getMonth();
         return monthMatrix(this.anchor).filter(function (iso) {
@@ -3577,6 +3798,7 @@
       var cells = monthMatrix(this.anchor);
       var month = (parseISO(this.anchor) || new Date()).getMonth();
       var t = todayISO();
+      var cfg = shiftCfg();
 
       var head = DOW_SHORT.map(function (d) { return '<span>' + d + '</span>'; }).join('');
 
@@ -3591,9 +3813,14 @@
         var extra = entries.length - shown.length;
 
         return cellOpen('cal-cell', iso,
-          (d.getMonth() !== month ? ' is-out' : '') + (iso === t ? ' is-today' : ''),
-          { text: hebDate(iso) + ' · ' + entries.length + ' פריטים — הקשה מוסיפה פריט חדש' }) +
+          (d.getMonth() !== month ? ' is-out' : '') + (iso === t ? ' is-today' : '') +
+          shiftClass(iso, cfg),
+          {
+            text: hebDate(iso) + ' · ' + entries.length + ' פריטים — הקשה מוסיפה פריט חדש' +
+              shiftAria(iso, cfg)
+          }) +
           '<span class="cal-num">' + d.getDate() + '</span>' +
+          shiftTag(iso, 'shift-tag-cell', cfg) +
           '<span class="cal-dots">' + dots.map(function (r) {
             return '<span class="dot dot-' + r.category + '"></span>';
           }).join('') + '</span>' +
@@ -3618,6 +3845,7 @@
     renderWeek: function () {
       var days = weekDays(this.anchor);
       var t = todayISO();
+      var cfg = shiftCfg();
       var byDay = days.map(function (iso) { return eventsOn(iso); });
 
       // widen the hour window rather than hide an event outside 08:00–22:00
@@ -3632,15 +3860,23 @@
         });
       });
 
+      // the column head is where the day states which shift it is: repeating
+      // "🪖 בסיס" in twenty-four hour cells below it would be noise, so the
+      // cells carry the tint and the head carries the words
       var head = '<span></span>' + days.map(function (iso) {
         var d = parseISO(iso);
-        return '<span class="' + (iso === t ? 'is-today' : '') + '">' +
-          DOW_SHORT[d.getDay()] + '<br>' + d.getDate() + '</span>';
+        return '<span class="' + (iso === t ? 'is-today' : '') + shiftClass(iso, cfg) + '">' +
+          DOW_SHORT[d.getDay()] + '<br>' + d.getDate() +
+          shiftTag(iso, 'shift-tag-col', cfg) + '</span>';
       }).join('');
 
       function cell(iso, time, list) {
-        return cellOpen('wk-cell', iso, (iso === t ? ' is-today' : ''),
-          { time: time, text: hebDate(iso) + (time ? ' ' + time : '') + ' — הקשה מוסיפה אירוע' }) +
+        return cellOpen('wk-cell', iso, (iso === t ? ' is-today' : '') + shiftClass(iso, cfg),
+          {
+            time: time,
+            text: hebDate(iso) + (time ? ' ' + time : '') + ' — הקשה מוסיפה אירוע' +
+              shiftAria(iso, cfg)
+          }) +
           list.slice(0, 2).map(function (e) {
             return calChip('events', e, 'wk-chip');
           }).join('') +
@@ -3719,8 +3955,20 @@
 
       var tasks = boardTasksOn(iso);
 
-      $('#calDay').innerHTML =
-        '<div class="cal-day">' +
+      /* the day view holds ONE day, so the shift is a statement rather than a
+         tint on a cell nobody can point at: a banner over the timeline, with
+         the leg position spelled out ("יום 3 מתוך 7") — the fact somebody
+         actually opens this view to check. */
+      var leg = shiftLegDay(iso, shiftCfg());
+      var banner = leg
+        ? '<div class="shift-banner is-shift-' + leg.state.toLowerCase() + '">' +
+        '<b>' + SHIFT_LABEL[leg.state] + '</b>' +
+        '<span>יום ' + leg.day + ' מתוך ' + leg.of + ' · סבב מילואים</span>' +
+        '</div>'
+        : '';
+
+      $('#calDay').innerHTML = banner +
+        '<div class="cal-day' + shiftClass(iso, shiftCfg()) + '">' +
         (untimed.length
           ? '<div class="dv-untimed">' + untimed.map(function (e) {
             return calChip('events', e, 'wk-chip');
@@ -3757,16 +4005,64 @@
         return;
       }
 
+      var acfg = shiftCfg();
       $('#calAgenda').innerHTML = groups.map(function (g) {
         var count = g.events.length + g.tasks.length;
-        return '<div class="day-group">' +
-          '<div class="day-head"><span>' + esc(relDay(g.date)) + '</span>' +
+        return '<div class="day-group' + shiftClass(g.date, acfg) + '">' +
+          '<div class="day-head"><span>' + esc(relDay(g.date)) +
+          shiftTag(g.date, 'shift-tag-row', acfg) + '</span>' +
           '<span class="day-count">' + plural(count, 'פריט אחד', 'פריטים') + '</span></div>' +
           '<div class="card" style="padding:6px 8px">' +
           g.events.map(eventCard).join('') +
           g.tasks.map(function (x) { return taskRow(x, true); }).join('') +
           '</div></div>';
       }).join('');
+    },
+
+    /* --------------------------------------------------------- year view */
+
+    /**
+     * Twelve mini-months, one grid each (Sprint 20 · mandate §3).
+     *
+     * This view exists because of the rotation and is the only surface that can
+     * show it whole: a 7/7 cycle is a stripe running through the year, and four
+     * weeks of month grid can only ever show one segment of it. Every square is
+     * a real control — tapping one opens that day — so the pane is a navigator
+     * as well as a picture, and a busy day still says so with a dot.
+     */
+    renderYear: function () {
+      var y = (parseISO(this.anchor) || new Date()).getFullYear();
+      var t = todayISO();
+      var cfg = shiftCfg();
+
+      var months = [];
+      for (var m = 0; m < 12; m++) {
+        var first = y + '-' + pad2(m + 1) + '-01';
+        var cells = monthMatrix(first).map(function (iso) {
+          var d = parseISO(iso);
+          if (d.getMonth() !== m || d.getFullYear() !== y) {
+            return '<span class="yr-pad" aria-hidden="true"></span>';
+          }
+          var busy = calMarks(iso).length;
+          return '<button type="button" class="yr-day' + shiftClass(iso, cfg) +
+            (iso === t ? ' is-today' : '') + (busy ? ' is-busy' : '') + '"' +
+            ' data-calday="' + iso + '"' +
+            ' aria-label="' + esc(hebDate(iso) + shiftAria(iso, cfg) +
+              (busy ? ' · ' + plural(busy, 'פריט אחד', 'פריטים') : '')) + '">' +
+            d.getDate() + '</button>';
+        }).join('');
+
+        months.push('<div class="yr-month">' +
+          '<h3 class="yr-name">' + HE_MONTHS[m] + '</h3>' +
+          '<div class="yr-dow">' + DOW_SHORT.map(function (s) {
+            return '<span>' + s + '</span>';
+          }).join('') + '</div>' +
+          '<div class="yr-grid">' + cells + '</div>' +
+          '</div>');
+      }
+
+      $('#calYear').innerHTML = '<div class="cal-year">' + months.join('') + '</div>' +
+        Shift.legend() + this.legend();
     },
 
     /* ------------------------------------------------------------- paint */
@@ -3802,16 +4098,19 @@
       $('#calMonth').hidden = this.view !== 'month';
       $('#calWeek').hidden = this.view !== 'week';
       $('#calDay').hidden = this.view !== 'day';
+      if ($('#calYear')) $('#calYear').hidden = this.view !== 'year';
       $('#calAgenda').hidden = this.view !== 'agenda';
 
       if (quiet) { /* the pane was patched in place — only the labels move */ }
       else if (this.view === 'month') this.renderMonth();
       else if (this.view === 'week') this.renderWeek();
       else if (this.view === 'day') this.renderDay();
+      else if (this.view === 'year') this.renderYear();
       else this.renderAgenda();
 
       $('#calRange').textContent = this.label();
       setText($('#calendarMeta'), this.meta());
+      Shift.paint();
       $('#view-calendar').setAttribute('aria-label', 'יומן — ' + CAL_LABEL[this.view]);
     },
 
@@ -3855,6 +4154,249 @@
   };
 
   function renderCalendar(quiet) { Cal.render(quiet); }
+
+  /* ==========================================================================
+     Sprint 20 · 🛡️ סבב מילואים — the toggle, the settings sheet and the cloud
+
+     The engine above answers questions. This is everything that ASKS them: the
+     one control that turns the overlay on and off, the sheet that changes the
+     rule behind it, and the D1 round-trip that makes the rule follow the owner
+     onto a second device instead of living on one phone.
+
+     Every mutation goes through commit(): save to localStorage, push to D1,
+     repaint. There is no path that writes the config and forgets one of the
+     three, which is the failure that makes a "persisted" setting mysterious.
+     ========================================================================== */
+
+  /** where the config lives in D1 — one row, one key, one owner */
+  var SHIFT_KEY = 'reserve_shift';
+
+  var Shift = {
+
+    cfg: function () { return shiftCfg(); },
+
+    /* ---------------------------------------------------------- the toggle */
+
+    toggle: function () {
+      var c = shiftCfg();
+      c.enabled = !c.enabled;
+      Shift.commit(c.enabled ? 'סבב המילואים מוצג ביומן' : 'צבעי סבב המילואים כובו');
+      return c.enabled;
+    },
+
+    /** the two colours, named — a tint is never the sole carrier of meaning */
+    legend: function () {
+      return '<div class="shift-legend">' +
+        '<span class="shift-key shift-key-home">' + SHIFT_LABEL.HOME + '</span>' +
+        '<span class="shift-key shift-key-base">' + SHIFT_LABEL.BASE + '</span>' +
+        '</div>';
+    },
+
+    /** "🪖 בסיס · יום 3 מתוך 7" for today, or why there is nothing to say */
+    summary: function () {
+      var c = shiftCfg();
+      if (!c.enabled) return 'הצגת הסבב כבויה';
+      var leg = shiftLegDay(todayISO(), c);
+      if (leg) return SHIFT_LABEL[leg.state] + ' · יום ' + leg.day + ' מתוך ' + leg.of;
+      if (todayISO() < c.anchorDate) return 'הסבב מתחיל ב־' + fmtDayMon(c.anchorDate);
+      return 'הסבב הסתיים ב־' + fmtDayMon(c.endDate);
+    },
+
+    paint: function () {
+      var c = shiftCfg();
+      var btn = $('#shiftToggle');
+      if (btn) {
+        btn.classList.toggle('is-on', c.enabled);
+        btn.setAttribute('aria-pressed', c.enabled ? 'true' : 'false');
+        btn.setAttribute('aria-label', (c.enabled ? 'הסתרת' : 'הצגת') + ' צבעי סבב המילואים');
+      }
+      setText($('#shiftNow'), Shift.summary());
+      if (Shift.isOpen()) Shift.paintSheet();
+    },
+
+    /* ----------------------------------------------------- the settings sheet */
+
+    isOpen: function () {
+      var el = $('#shiftSheet');
+      return !!el && !el.hidden;
+    },
+
+    open: function () {
+      if (!$('#shiftSheet')) return false;
+      closeSheets();
+      openSheet('shiftSheet');
+      Shift.paintSheet();
+      return true;
+    },
+
+    /**
+     * The one leg length that is not a number in a box: "החלף בית ⇆ בסיס"
+     * rewrites which state the anchor opens, which slides the whole rotation
+     * by one leg. It is the correction somebody actually needs — the rule was
+     * right and the phase was inverted — and doing it by hand means editing
+     * the anchor date, which changes the answer for a different reason.
+     */
+    flip: function () {
+      var c = shiftCfg();
+      c.anchorState = SHIFT_OTHER[normShiftState(c.anchorState)];
+      Shift.commit('הסבב הוחלף — ' + fmtDayMon(c.anchorDate) + ' מתחיל ב' + SHIFT_NAME[c.anchorState]);
+      return c.anchorState;
+    },
+
+    setField: function (which, value) {
+      var c = shiftCfg();
+      if (which === 'anchorDate') c.anchorDate = normShiftDate(value, c.anchorDate);
+      else if (which === 'endDate') c.endDate = normShiftDate(value, c.endDate);
+      else if (which === 'homeDays') c.homeDays = normShiftDays(value, c.homeDays);
+      else if (which === 'baseDays') c.baseDays = normShiftDays(value, c.baseDays);
+      else return false;
+
+      // one normalisation pass over the whole config, so an end date that just
+      // fell behind the anchor is repaired here rather than at paint time
+      Store.data.prefs.reserveShiftConfig = normShiftConfig(c);
+      Shift.commit('');
+      return true;
+    },
+
+    preset: function (i) {
+      var p = SHIFT_PRESETS[i];
+      if (!p) return false;
+      var c = shiftCfg();
+      c.homeDays = p.home;
+      c.baseDays = p.base;
+      Shift.commit('אורך הסבב: ' + p.label);
+      return true;
+    },
+
+    reset: function () {
+      var fresh = blankShiftConfig();
+      fresh.enabled = shiftCfg().enabled;      // the overlay switch is not a rule
+      Store.data.prefs.reserveShiftConfig = fresh;
+      Shift.commit('הסבב הוחזר לברירת המחדל');
+      return true;
+    },
+
+    /** save · push · repaint — the three halves no caller may do two of */
+    commit: function (msg) {
+      var c = normShiftConfig(shiftCfg());
+      c.updatedAt = Date.now();
+      Store.data.prefs.reserveShiftConfig = c;
+      Store.save();
+      Shift.push();
+      render();
+      Shift.paint();
+      if (msg) toast(msg);
+      return c;
+    },
+
+    /* ------------------------------------------------------------- the cloud */
+
+    /** the same gate Sync uses: file:// and a blank endpoint mean local-only */
+    online: function () {
+      return Sync.enabled() && Sync.online() && typeof window.fetch === 'function';
+    },
+
+    push: function () {
+      if (!Shift.online()) return null;
+      var c = shiftCfg();
+      return window.fetch(SYNC_ENDPOINT + '/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          key: SHIFT_KEY,
+          value: c,
+          updated_at: toISOStamp(c.updatedAt || Date.now())
+        })
+      })['catch'](function () { return null; });       // offline is not an error
+    },
+
+    /**
+     * Pull once on launch. Last-write-wins on updatedAt, exactly like every
+     * other record in the app: a device that edited the rotation more recently
+     * than the server keeps its own answer and pushes it instead, so opening a
+     * second phone can never silently undo a change made on the first.
+     */
+    pull: function () {
+      if (!Shift.online()) return null;
+      return window.fetch(SYNC_ENDPOINT + '/settings?key=' + SHIFT_KEY)
+        .then(function (res) { return res && res.ok ? res.json() : null; })
+        .then(function (out) {
+          if (!out || out.ok !== true || !out.data || !out.data.value) return false;
+          var remote = normShiftConfig(out.data.value);
+          var local = shiftCfg();
+          if (remote.updatedAt <= local.updatedAt) {
+            // ours is the newer answer — make sure the server has it
+            if (remote.updatedAt < local.updatedAt) Shift.push();
+            return false;
+          }
+          Store.data.prefs.reserveShiftConfig = remote;
+          Store.save();
+          render();
+          Shift.paint();
+          return true;
+        })['catch'](function () { return false; });
+    },
+
+    /* ---------------------------------------------------------------- paint */
+
+    paintSheet: function () {
+      var box = $('#shiftSheet');
+      if (!box) return;
+      var c = shiftCfg();
+
+      var anchor = $('#shiftAnchor');
+      if (anchor) anchor.value = c.anchorDate;
+      var end = $('#shiftEnd');
+      if (end) end.value = c.endDate;
+      var home = $('#shiftHomeDays');
+      if (home) home.value = c.homeDays;
+      var base = $('#shiftBaseDays');
+      if (base) base.value = c.baseDays;
+
+      setText($('#shiftStateLine'),
+        fmtDayMon(c.anchorDate) + ' פותח סבב של ' + SHIFT_NAME[normShiftState(c.anchorState)] +
+        ' · מחזור מלא: ' + shiftCycleDays(c) + ' ימים');
+
+      var presets = $('#shiftPresets');
+      if (presets) {
+        setHTML(presets, SHIFT_PRESETS.map(function (p, i) {
+          var on = p.home === c.homeDays && p.base === c.baseDays;
+          return '<button type="button" class="mini' + (on ? ' is-on' : '') + '"' +
+            ' data-shiftpreset="' + i + '" aria-pressed="' + (on ? 'true' : 'false') + '">' +
+            esc(p.label) + '</button>';
+        }).join(''));
+      }
+
+      // the rule, read back as the next four legs — the only honest way to
+      // check a rotation is to see the dates it actually produces
+      var rows = [], iso = c.anchorDate, guard = 0;
+      while (iso <= c.endDate && rows.length < 4 && guard++ < 64) {
+        var state = getShiftForDate(iso, c);
+        if (!state) break;
+        var len = state === 'BASE' ? c.baseDays : c.homeDays;
+        var last = addDaysISO(iso, len - 1);
+        if (last > c.endDate) last = c.endDate;
+        rows.push('<li class="shift-preview-row is-shift-' + state.toLowerCase() + '">' +
+          '<b>' + SHIFT_LABEL[state] + '</b>' +
+          '<span>' + esc(fmtDayMon(iso) + ' – ' + fmtDayMon(last)) + '</span></li>');
+        iso = addDaysISO(iso, len);
+      }
+      setHTML($('#shiftPreview'), rows.join('') ||
+        '<li class="shift-preview-row"><span>אין סבב בטווח שנבחר</span></li>');
+
+      var sw = $('#shiftSheetToggle');
+      if (sw) {
+        sw.classList.toggle('is-on', c.enabled);
+        sw.setAttribute('aria-pressed', c.enabled ? 'true' : 'false');
+        setText(sw, c.enabled ? '✓ הצבעים מוצגים ביומן' : '✕ הצבעים מוסתרים');
+      }
+    },
+
+    init: function () {
+      Shift.paint();
+      Shift.pull();
+    }
+  };
 
   /* ---------------------------------------------- render: tasks / lists / notes */
 
@@ -6073,6 +6615,7 @@
     $('#trashSheet').hidden = true;
     if ($('#openSheet')) $('#openSheet').hidden = true;
     if ($('#shopSheet')) $('#shopSheet').hidden = true;
+    if ($('#shiftSheet')) $('#shiftSheet').hidden = true;
     Detail.close();
     Settings.close();
     // a selection belongs to the bin that is open — closing it ends the mode,
@@ -6089,7 +6632,7 @@
   function anySheetOpen() {
     return !$('#typeSheet').hidden || !$('#formSheet').hidden ||
       !$('#trashSheet').hidden || openSheetOpen() || Detail.isOpen() ||
-      Drawer.isOpen() || Settings.isOpen() || Shop.isOpen();
+      Drawer.isOpen() || Settings.isOpen() || Shop.isOpen() || Shift.isOpen();
   }
 
   /** סל מחזור — opened from the header pill, painted fresh every time */
@@ -9919,6 +10462,8 @@
     var el = e.target.closest ? e.target.closest(
       '[data-nav],[data-action],[data-type],[data-filter],[data-cat],[data-toggle],[data-del],' +
       '[data-calview],[data-calnav],[data-calslot],[data-calday],' +
+      // Sprint 20 — the reserve-rotation toggle, its settings sheet and presets
+      '[data-shift],[data-shiftpreset],' +
       '[data-tasktab],[data-work],[data-upcoming],' +
       // Sprint 12 — the reminder panel, the "פתוחות" sheet and the detail reader
       '[data-remindmode],[data-remindadd],[data-reminddrop],' +
@@ -10020,6 +10565,24 @@
     if (el.dataset.calslot) {
       var slot = el.dataset.calslot.split('|');
       openTypeSheet({ date: slot[0], start: slot[1] || '' });
+      return;
+    }
+
+    /* Sprint 20 — 🛡️ סבב מילואים. The toggle is one tap on the calendar
+       header; everything that changes the RULE behind it lives in the sheet. */
+    if (el.dataset.shift) {
+      Haptics.light();
+      var what = el.dataset.shift;
+      if (what === 'toggle') Shift.toggle();
+      else if (what === 'settings') Shift.open();
+      else if (what === 'flip') Shift.flip();
+      else if (what === 'reset') Shift.reset();
+      return;
+    }
+
+    if (el.dataset.shiftpreset) {
+      Haptics.light();
+      Shift.preset(parseInt(el.dataset.shiftpreset, 10));
       return;
     }
 
@@ -10285,6 +10848,14 @@
     if (el.dataset.setpick) {
       Haptics.light();
       Settings.pick(el.dataset.setpick, el.value);
+      return;
+    }
+
+    /* Sprint 20 — the four fields of the rotation sheet. Same reason again:
+       a <input type="date"> and a <input type="number"> both report through
+       `change`, and the click delegate never sees the value landed on. */
+    if (el.dataset.shiftfield) {
+      Shift.setField(el.dataset.shiftfield, el.value);
       return;
     }
 
@@ -10650,6 +11221,7 @@
     Sync.init();
     GCal.init();
     Settings.init();                  // applies the stored theme and follows the OS
+    Shift.init();                     // paints the rotation toggle, then pulls D1
   }
 
   if (document.readyState === 'loading') {
@@ -11130,7 +11702,42 @@
       daysInMonth: daysInMonth,
       minutesOf: minutesOf,
       shiftTime: shiftTime,
-      layoutBlocks: layoutBlocks
+      layoutBlocks: layoutBlocks,
+      // Sprint 20 — DST-safe whole-day arithmetic, the rotation's foundation
+      daysBetweenISO: daysBetweenISO
+    },
+
+    /* Sprint 20 — מנוע סבבי מילואים. The whole engine is pure: six fields in,
+       one word out, no DOM and no store of its own once a config is handed to
+       it. healthcheck.js drives a full year of it against arithmetic it
+       computes independently. */
+    shift: {
+      SHIFT_STATES: SHIFT_STATES,
+      SHIFT_LABEL: SHIFT_LABEL,
+      SHIFT_NAME: SHIFT_NAME,
+      SHIFT_OTHER: SHIFT_OTHER,
+      SHIFT_ANCHOR_DEFAULT: SHIFT_ANCHOR_DEFAULT,
+      SHIFT_STATE_DEFAULT: SHIFT_STATE_DEFAULT,
+      SHIFT_HOME_DEFAULT: SHIFT_HOME_DEFAULT,
+      SHIFT_BASE_DEFAULT: SHIFT_BASE_DEFAULT,
+      SHIFT_END_DEFAULT: SHIFT_END_DEFAULT,
+      SHIFT_DAYS_MIN: SHIFT_DAYS_MIN,
+      SHIFT_DAYS_MAX: SHIFT_DAYS_MAX,
+      SHIFT_PRESETS: SHIFT_PRESETS,
+      SHIFT_TOGGLE_LABEL: SHIFT_TOGGLE_LABEL,
+      SHIFT_KEY: SHIFT_KEY,
+      blankShiftConfig: blankShiftConfig,
+      normShiftConfig: normShiftConfig,
+      normShiftState: normShiftState,
+      normShiftDays: normShiftDays,
+      shiftCfg: shiftCfg,
+      shiftCycleDays: shiftCycleDays,
+      getShiftForDate: getShiftForDate,
+      shiftLegDay: shiftLegDay,
+      shiftClass: shiftClass,
+      shiftTag: shiftTag,
+      shiftAria: shiftAria,
+      Shift: Shift
     }
   };
 

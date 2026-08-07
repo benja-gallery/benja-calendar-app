@@ -20,7 +20,7 @@
 
 'use strict';
 
-var CACHE_VERSION = 'v25';  // Sprint 19 — the background alarm clock
+var CACHE_VERSION = 'v26';  // Sprint 20 — the reserve-duty rotation engine
 var CACHE_NAME = 'benja-calendar-' + CACHE_VERSION;
 
 /* relative URLs — keeps the worker correct under a GitHub Pages sub-path */

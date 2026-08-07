@@ -26,7 +26,7 @@
 <!-- ?v= MUST match CACHE_VERSION in sw.js. GitHub Pages serves these with
      max-age=600 and no content hash, so without the query an installed phone
      can keep serving the previous build out of its own HTTP cache. -->
-<link rel="stylesheet" href="styles.css?v=v25">
+<link rel="stylesheet" href="styles.css?v=v26">
 </head>
 <body>
 
@@ -199,11 +199,12 @@
     <!-- ---------- VIEW: CALENDAR ---------- -->
     <section class="view" id="view-calendar" aria-label="יומן">
 
-      <!-- view switcher: day / week / month / agenda -->
+      <!-- view switcher: day / week / month / year / agenda -->
       <div class="segmented cal-views" role="tablist" aria-label="בחירת תצוגת יומן">
         <button class="seg"           role="tab" aria-selected="false" data-calview="day"    type="button">יום</button>
         <button class="seg"           role="tab" aria-selected="false" data-calview="week"   type="button">שבוע</button>
         <button class="seg is-active" role="tab" aria-selected="true"  data-calview="month"  type="button">חודש</button>
+        <button class="seg"           role="tab" aria-selected="false" data-calview="year"   type="button">שנה</button>
         <button class="seg"           role="tab" aria-selected="false" data-calview="agenda" type="button">סדר יום</button>
       </div>
 
@@ -218,10 +219,26 @@
         <button class="cal-today" data-calnav="today" type="button">היום</button>
       </div>
 
+      <!-- Sprint 20 · 🛡️ סבב מילואים — one switch for the overlay, one ⚙ for the
+           rule behind it, and the readout of where today falls in the cycle. It
+           sits above the stage rather than inside a view, because the overlay is
+           the same fact in all five of them. -->
+      <div class="shift-bar" id="shiftBar">
+        <button class="shift-toggle is-on" id="shiftToggle" data-shift="toggle"
+                type="button" aria-pressed="true" aria-label="הסתרת צבעי סבב המילואים">
+          <span class="shift-ico" aria-hidden="true">🛡️</span>
+          <span class="shift-toggle-label">סבב מילואים</span>
+        </button>
+        <span class="shift-now block-meta" id="shiftNow"></span>
+        <button class="shift-cog" data-shift="settings" type="button"
+                aria-label="הגדרות סבב מילואים">⚙</button>
+      </div>
+
       <div class="cal-stage" id="calStage">
         <div class="cal-pane" id="calMonth"  hidden></div>
         <div class="cal-pane" id="calWeek"   hidden></div>
         <div class="cal-pane" id="calDay"    hidden></div>
+        <div class="cal-pane" id="calYear"   hidden></div>
         <div class="cal-pane" id="calAgenda" hidden></div>
       </div>
 
@@ -595,6 +612,65 @@
   <div class="sheet-tail"></div>
 </div>
 
+<!-- ============ הגדרות סבב מילואים (Sprint 20) ============
+     The RULE, not the records. Six fields describe a whole year of rotation,
+     so the sheet's job is to make each of them changeable in one gesture and
+     then read the rule straight back as the dates it produces — a rotation
+     nobody can verify at a glance is a rotation nobody trusts. -->
+<div class="sheet shift-sheet" id="shiftSheet" role="dialog" aria-modal="true"
+     aria-labelledby="shiftSheetTitle" hidden>
+  <div class="sheet-grab" aria-hidden="true"></div>
+  <div class="sheet-head">
+    <h2 id="shiftSheetTitle">🛡️ הגדרות סבב מילואים</h2>
+    <button class="sheet-x" data-action="close-sheet" type="button" aria-label="סגירה">✕</button>
+  </div>
+
+  <p class="trash-hint">
+    הסבב מחושב אוטומטית מתאריך ההתחלה ועד תאריך הסיום — אין צורך להזין ימים
+    אחד־אחד. כל שינוי כאן נשמר מיד כברירת מחדל, גם אחרי סגירת האפליקציה.
+  </p>
+
+  <button class="shift-switch is-on" id="shiftSheetToggle" data-shift="toggle"
+          type="button" aria-pressed="true">✓ הצבעים מוצגים ביומן</button>
+
+  <div class="field">
+    <label class="field-label" for="shiftAnchor">תאריך תחילת הסבב</label>
+    <input class="input" id="shiftAnchor" type="date" data-shiftfield="anchorDate">
+    <p class="field-hint" id="shiftStateLine"></p>
+  </div>
+
+  <button class="btn btn-ghost shift-flip" data-shift="flip" type="button">החלף בית ⇆ בסיס</button>
+
+  <div class="shift-lengths">
+    <div class="field">
+      <label class="field-label" for="shiftHomeDays">🏡 ימי בית</label>
+      <input class="input" id="shiftHomeDays" type="number" min="1" max="365" inputmode="numeric"
+             data-shiftfield="homeDays">
+    </div>
+    <div class="field">
+      <label class="field-label" for="shiftBaseDays">🪖 ימי בסיס</label>
+      <input class="input" id="shiftBaseDays" type="number" min="1" max="365" inputmode="numeric"
+             data-shiftfield="baseDays">
+    </div>
+  </div>
+
+  <div class="shift-presets" id="shiftPresets" role="group" aria-label="סבבים מוכנים"></div>
+
+  <div class="field">
+    <label class="field-label" for="shiftEnd">תאריך סיום הסבב</label>
+    <input class="input" id="shiftEnd" type="date" data-shiftfield="endDate">
+  </div>
+
+  <h3 class="shift-preview-head">כך ייראה הסבב</h3>
+  <ul class="shift-preview" id="shiftPreview"></ul>
+
+  <div class="sheet-actions">
+    <button class="btn btn-ghost" data-shift="reset" type="button">איפוס לברירת מחדל</button>
+    <button class="btn" data-action="close-sheet" type="button">סיום</button>
+  </div>
+  <div class="sheet-tail"></div>
+</div>
+
 <!-- ============ DELETE CONFIRMATION ============
      Sprint 7 deleted first and asked afterwards. The mandate asks explicitly,
      and the אחזר window still arms behind it — a confirmed deletion is still
@@ -821,6 +897,6 @@
   <button class="toast-undo" id="toastUndo" data-undo="1" type="button" hidden>אחזר</button>
 </div>
 
-<script src="app.js?v=v25"></script>
+<script src="app.js?v=v26"></script>
 </body>
 </html>

@@ -1,6 +1,18 @@
 # Calendar App — Project Plan & Full Specification
 
-> **Status:** Sprint 18 shipped (§7.4t) — **מסך שעון מעורר ופתיחת פרטים מהיומן**: a due
+> **Status:** Sprint 20 shipped (§7.4v) — **מנוע סבבי מילואים ומשמרות**: the calendar now
+> *computes* a reserve-duty rotation instead of asking anyone to type it in. One
+> `reserveShiftConfig` of six fields — anchor date, which leg it opens, the two leg lengths
+> and an end date — and `getShiftForDate()` answers `HOME` / `BASE` / `''` for any date at
+> all, with nothing stored per day, so a date three years out costs what tomorrow costs.
+> 🏡 בית and 🪖 בסיס are tinted across month, week, day, agenda and a **new year view**
+> (twelve mini-months — the only surface a 7/7 stripe fits on), behind one 🛡️ toggle and a
+> settings sheet that moves the transition date, flips the phase, changes the leg lengths and
+> reads the rule back as real dates. The config syncs to D1 through a new `app_settings`
+> table and `/api/settings`. v26.
+> Sprint 19 before it (§7.4u) — **שעון מעורר ברקע**: a push now carries the alarm itself, so
+> a reminder rings on a locked phone with the app closed. v25.
+> Sprint 18 before it (§7.4t) — **מסך שעון מעורר ופתיחת פרטים מהיומן**: a due
 > reminder no longer just notifies, it raises a full-screen alarm that rings on a beat,
 > buzzes on `[1000,500,1000,500]`, holds a `wakeLock` on the screen and does not stop for
 > anything but `ביטול התראה / כבה` — with a persisted queue, so two reminders in one minute
@@ -327,6 +339,8 @@ CREATE TABLE sync_ops (
 | `POST` | `/api/gcal/auth` | `{ action: 'disconnect' }` — forgets every stored token |
 | `GET`  | `/api/gcal/sync` | Per-calendar sync state, runs nothing |
 | `POST` | `/api/gcal/sync` | Runs one two-way Google Calendar cycle (§7.4e) |
+| `GET`  | `/api/settings?key=` | One `app_settings` row — the reserve rotation config (§7.4v) |
+| `POST` | `/api/settings` | `{ key, value, updated_at }` — last-write-wins upsert |
 | `POST` | `/api/ics/import` | Parse and ingest `.ics` |
 | `GET`  | `/api/ics/export?calendar_id=` | Emit `.ics` |
 
@@ -2323,6 +2337,97 @@ reminder the local scan already holds. `linkServer()` is executed against a stub
 `pushManager` and `fetch`, proving both halves land; `validSub()` is executed against eight
 malformed subscriptions; `normSub()` and `alarmFromHash()` are table-driven against junk.
 The cache floor is raised to **v25** with `APP_VERSION` and both `?v=` URLs asserted in step.
+
+### 7.4v מנוע סבבי מילואים ומשמרות — the reserve-duty rotation engine (shipped — Sprint 20)
+
+A reserve rotation is not a set of records. It is a **rule** — "a week at base, a week at
+home, from the 10th of August" — and a rule that has to be entered as 150 events is a rule
+nobody enters. Every previous sprint added things you *create*; this one adds a thing the
+calendar *computes*, and the whole design follows from that distinction.
+
+**§1 — one config, three homes.** `prefs.reserveShiftConfig` carries exactly six fields:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | whether the overlay is painted at all |
+| `anchorDate` | `2026-08-10` | the day the rotation is *known* to start |
+| `anchorState` | `BASE` | which leg that day opens |
+| `homeDays` | `7` | length of the 🏡 בית leg |
+| `baseDays` | `7` | length of the 🪖 בסיס leg |
+| `endDate` | `2026-12-31` | the last day the rule speaks for |
+
+It lives in state, in `localStorage` under the same versioned key as everything else, and in
+D1 — see §4 below. `normShiftConfig()` is the single read path and normalises rather than
+trusts: an anchor that is not an ISO date, a leg of zero days, an unknown state or an end
+date behind the start are all repaired on load, because a garbage config that reaches the
+renderer paints a confident colour on days nobody stated anything about.
+
+**§2 — `getShiftForDate(iso, cfg)` → `'HOME' | 'BASE' | ''`.** Nothing is stored per day.
+The anchor opens a leg of `anchorState`, the legs alternate, and the answer is a modulo of
+the offset against `homeDays + baseDays`. That is why a date three years out costs exactly
+what tomorrow costs, and why "graceful infinite scroll / future navigation" needed no special
+case at all — the window is never pre-computed, it is *asked*.
+
+Two decisions are worth naming. **The rotation is defined only on `[anchorDate, endDate]`**
+and answers `''` outside it — the cycle is deliberately *not* extrapolated backwards, because
+the anchor is where it is known to start and a colour painted on a week nobody stated is how
+a schedule stops being believed. And the day arithmetic runs on `daysBetweenISO()`, the one
+function in the app that reaches for UTC: subtracting two *local* midnights across Israel's
+October DST change gives 25 hours, and a `Math.round()` hiding that would put every day after
+the change one leg out. The dates stay local; only the arithmetic between two of them sits on
+a fixed grid.
+
+**§3 — the overlay, on all five views.** `shiftClass()` returns the cell modifier and
+`shiftTag()` the words, and both are called from `renderMonth`, `renderWeek`, `renderDay`,
+`renderYear` and `renderAgenda` — one source of truth, five surfaces. The tints are the values
+the field mandate named to the digit (`--shift-home` / `--shift-base` in `:root`), and they
+are deliberately weak: an overlay that outshouts the meetings drawn on top of it is an
+overlay people switch off. Legibility is therefore carried by **three** things and never by
+the colour — the tint, a 2px edge in the same hue, and the printed **🏡 בית** / **🪖 בסיס**
+(§0.2: colour is never the sole carrier). `is-today` still outranks the rotation: gold wins
+the cell background, the shift keeps the edge and the words. The day view gets a banner
+instead of a tinted cell, because it holds one day and can afford the sentence the tint
+cannot fit — **"🪖 בסיס · יום 3 מתוך 7"**, from `shiftLegDay()`.
+
+**Sprint 20 adds a fifth calendar view — `year`.** It exists *because* of the rotation: a 7/7
+cycle is a stripe running through twelve months, and four weeks of month grid can only ever
+show one segment of it. Twelve mini-months, each square a real `data-calday` control that
+opens that day, each busy day still carrying its dot. `CAL_VIEWS` is now
+`['day','week','month','year','agenda']` and the arrows step a whole year on it.
+
+**§4 — the settings sheet, and why it is a sheet.** `#shiftSheet` ("🛡️ הגדרות סבב מילואים")
+exposes exactly the four adjustments the mandate names: move the transition date, flip the
+phase (**החלף בית ⇆ בסיס**), change the leg lengths (free numbers plus one-tap presets), and
+move the end date. It then reads the rule back as the next four legs with real dates — a
+rotation nobody can verify at a glance is a rotation nobody trusts. Every mutator routes
+through `Shift.commit()`, which does three things and never two of them: save to
+`localStorage`, push to D1, repaint. A setter that saved without pushing is exactly how a
+"persisted" setting becomes mysterious on a second device.
+
+**The D1 half.** `migrations/0007_sprint20_settings.sql` adds **`app_settings`**
+(`key`, `owner_id`, `value_json`, `updated_at`, `created_at`) and `/api/settings` answers GET
+and POST over it, last-write-wins on `updated_at` enforced in the UPSERT. It is deliberately
+**not** part of `/api/sync`: that route replays an outbox of row ops against the five entity
+tables and iterates `TABLES` to build its delta, and a setting has no category, no tombstone
+and no place in a recycle bin — folding it in would have meant every one of those concepts
+growing an exception. The migration adds a table and alters none, so the column-drift check
+between the SQL, `_shared.js` `SCHEMA` and `app.js` `SYNC_SCHEMA` is untouched. The Worker
+never parses the blob for meaning: the vocabulary of a rotation belongs to the client, and a
+Worker that validated the field names would need redeploying before the client could learn a
+new one. `Shift.pull()` runs once at boot and resolves on `updatedAt` the same way — a device
+holding the newer rule keeps it and pushes it back rather than being silently overwritten.
+
+**Verification (§52).** The engine is **executed**, not grepped. Every day of the default
+rotation is compared against arithmetic `healthcheck.js` computes independently by walking
+one day at a time from the anchor, so a day lost to a DST hour makes the two answers diverge;
+the same sweep runs for `14/7`, `7/14`, `3/4`, `1/1` and `30/5`, and for the flipped phase,
+which is additionally asserted to be an exact day-for-day mirror. The window boundaries, the
+disabled switch and five kinds of garbage date are asserted to answer `''`. `/api/settings`
+is loaded with `_shared.js` into a sandbox and driven against an in-memory `app_settings`
+that enforces the same last-write-wins guard the SQL does, proving a full write → read →
+stale-write → newer-write cycle. The overlay is asserted present in all five renderers, the
+tints against the mandated literals in `:root`, and the sheet against all four adjustments.
+The cache floor is raised to **v26** with `APP_VERSION` and both `?v=` URLs asserted in step.
 
 ### 7.4 General layout
 

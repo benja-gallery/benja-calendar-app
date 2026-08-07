@@ -26,7 +26,7 @@ the public internet.
 | `migrations/` | D1 SQL migrations, numbered and append-only | ❌ |
 | `wrangler.toml` | `pages_build_output_dir = "public"` + the D1 binding | ❌ |
 | `PROJECT_PLAN.md` | Full specification | ❌ |
-| `healthcheck.js` | Repo-local verification suite (165 checks) | ❌ |
+| `healthcheck.js` | Repo-local verification suite (467 checks) | ❌ |
 
 ---
 
@@ -81,6 +81,11 @@ wrangler pages deploy
 
 `wrangler.toml` sets `pages_build_output_dir = "public"`, so only `public/` is uploaded and
 `functions/api/*` is compiled from the root and mounted at `/api/*`.
+
+Sprint 20 adds `migrations/0007_sprint20_settings.sql` (the `app_settings` table behind
+`/api/settings`), so `wrangler d1 migrations apply` must run before the reserve rotation can
+follow the owner onto a second device. Until it does, the app is unaffected: the rotation is
+local-first like everything else, and a failed push is a no-op rather than an error.
 
 Google Calendar (Sprint 6) needs four secrets on the Pages project:
 
@@ -174,6 +179,27 @@ twice.
 POST would send — payloads included — and sends nothing.
 
 ---
+
+## 🛡️ סבב מילואים — the reserve-duty rotation (Sprint 20)
+
+The calendar computes the rotation instead of asking you to enter it. Open **יומן**, and the
+bar above the grid carries the toggle, today's position in the cycle, and a ⚙ that opens
+**הגדרות סבב מילואים**.
+
+| Field | Default | |
+|---|---|---|
+| תאריך תחילת הסבב | `2026-08-10` | the day the rotation is known to start |
+| which leg it opens | 🪖 בסיס | flipped in one tap with **החלף בית ⇆ בסיס** |
+| ימי בית / ימי בסיס | 7 / 7 | any lengths, or one of the ready-made presets |
+| תאריך סיום הסבב | `2026-12-31` | the last day the rule speaks for |
+
+🏡 בית tints green and 🪖 בסיס tints red across **all five** calendar views — including the
+new **שנה** view, which is twelve mini-months and the only surface a 7/7 stripe fits on. The
+tints are soft on purpose and never carry the meaning alone: every tinted day also prints its
+name. Changes stick as the new default and sync to D1 through `/api/settings`.
+
+Days before the start date and after the end date are deliberately left uncoloured — the
+anchor is where the cycle is *known* to begin, and the app does not extrapolate backwards.
 
 ## Google Calendar (Sprint 6)
 

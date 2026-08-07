@@ -115,6 +115,25 @@
   --l-glow-fab:      0 14px 30px rgba(134,101,26,.20);
   --l-bar-bg:        rgba(245,242,234,.94);
   --l-scrim:         rgba(27,33,48,.38);
+
+  /* --- 🛡️ סבב מילואים · the rotation overlay (Sprint 20) -------------------
+     The two tints are the values the field mandate named to the digit, and
+     they are deliberately weak: an overlay that outshouts the meetings drawn
+     on top of it is an overlay people switch off. Legibility is carried by
+     three things and never by the colour alone — the tint, an edge in the same
+     hue, and the printed words 🏡 בית / 🪖 בסיס (§0.2).
+
+     The tints are shared by both palettes (one pair of values was mandated,
+     not two); only the INK is doubled, because #6fcf7b on paper is roughly
+     1.9:1 and would fail the 4.5:1 floor on every "בית" label. */
+  --shift-home:      rgba(46,125,50,.12);
+  --shift-base:      rgba(211,47,47,.12);
+  --shift-home-edge: rgba(46,125,50,.55);
+  --shift-base-edge: rgba(211,47,47,.55);
+  --shift-home-ink:  #6fcf7b;
+  --shift-base-ink:  #ef8172;
+  --l-shift-home-ink: #2e7d32;
+  --l-shift-base-ink: #c62828;
 }
 
 /* ==========================================================================
@@ -157,6 +176,11 @@ html[data-theme="light"]{
   --business-edge: var(--l-business-edge);
   --danger-edge:   var(--l-danger-edge);
   --danger-glow:   var(--l-danger-glow);
+
+  /* Sprint 20 — the tints stay (one mandated pair), the ink deepens to clear
+     the 4.5:1 contrast floor on paper */
+  --shift-home-ink: var(--l-shift-home-ink);
+  --shift-base-ink: var(--l-shift-base-ink);
 
   --shadow:        var(--l-shadow);
   --shadow-sm:     var(--l-shadow-sm);
@@ -1326,6 +1350,185 @@ body.is-selecting .toast{ bottom:calc(var(--bar-h) + var(--safe-b) + 132px); }
   width:9px; height:9px; border-radius:50%;
   background:var(--danger);
 }
+
+/* ==========================================================================
+   Sprint 20 · 🛡️ סבב מילואים — the reserve-duty rotation overlay
+
+   Two tints, one bar, one year grid, one sheet.
+
+   The tint values are the ones the field mandate named to the digit; they live
+   in :root as --shift-home / --shift-base. They are deliberately weak —
+   a schedule overlay that outshouts the meetings on top of it is a schedule
+   overlay people turn off — so legibility is carried by THREE things and not
+   by the colour: the tint, a 2px edge in the same hue, and the words
+   "🏡 בית" / "🪖 בסיס" printed in the cell (§0.2: colour is never the sole
+   carrier). The edge is what survives a colour-blind reader and a phone in
+   sunlight, and the words are what survives everything.
+
+   Every literal the overlay uses lives in :root with the rest of the palette
+   (--shift-* / --l-shift-*), so nothing below this line is anything but var()
+   plumbing — the same contract every other block in this file keeps.
+   ========================================================================== */
+
+/* ---------- the bar above the stage ---------- */
+.shift-bar{
+  display:flex; align-items:center; gap:10px;
+  margin:0 2px 12px;
+}
+.shift-toggle{
+  flex:0 0 auto;
+  display:inline-flex; align-items:center; gap:7px;
+  padding:0 14px; height:var(--tap); min-height:var(--tap);
+  background:var(--card); border:1px solid var(--line-soft);
+  border-radius:999px;
+  color:var(--muted); font-size:13px; font-weight:800; white-space:nowrap;
+  cursor:pointer;
+  transition:color .18s, border-color .18s, background .18s;
+}
+.shift-toggle .shift-ico{ font-size:15px; line-height:1; }
+.shift-toggle.is-on{ background:var(--gold-soft); border-color:var(--gold-edge); color:var(--gold); }
+.shift-toggle:hover{ color:var(--ink); }
+.shift-now{ flex:1 1 auto; min-width:0; margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.shift-cog{
+  flex:0 0 auto;
+  width:var(--tap); height:var(--tap);
+  display:grid; place-items:center;
+  background:var(--card); border:1px solid var(--line-soft);
+  border-radius:var(--r-md);
+  color:var(--muted); font-size:17px; line-height:1; cursor:pointer;
+  transition:color .18s, border-color .18s;
+}
+.shift-cog:hover{ color:var(--gold); border-color:var(--gold-edge); }
+
+/* ---------- the tint, on every surface that draws a day ---------- */
+.is-shift-home{ background:var(--shift-home); }
+.is-shift-base{ background:var(--shift-base); }
+/* …but is-today keeps its gold: "today" outranks "which week of the cycle" */
+.cal-cell.is-today.is-shift, .wk-cell.is-today.is-shift{ background:var(--gold-soft); }
+
+.cal-cell.is-shift-home{ border-color:var(--shift-home-edge); }
+.cal-cell.is-shift-base{ border-color:var(--shift-base-edge); }
+.wk-cell.is-shift-home{ border-inline-start:2px solid var(--shift-home-edge); }
+.wk-cell.is-shift-base{ border-inline-start:2px solid var(--shift-base-edge); }
+.wk-head .is-shift-home{ border-bottom:2px solid var(--shift-home-edge); }
+.wk-head .is-shift-base{ border-bottom:2px solid var(--shift-base-edge); }
+.day-group.is-shift-home > .day-head{ border-inline-start:3px solid var(--shift-home-edge); padding-inline-start:8px; }
+.day-group.is-shift-base > .day-head{ border-inline-start:3px solid var(--shift-base-edge); padding-inline-start:8px; }
+
+/* ---------- the words ---------- */
+.shift-tag{
+  display:inline-block; max-width:100%;
+  font-size:9.5px; font-weight:800; line-height:1.5;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.shift-tag-home{ color:var(--shift-home-ink); }
+.shift-tag-base{ color:var(--shift-base-ink); }
+.shift-tag-col{ display:block; margin-top:2px; }
+.shift-tag-row{ margin-inline-start:8px; font-size:11px; }
+
+.shift-legend{
+  display:flex; flex-wrap:wrap; justify-content:center; gap:12px;
+  margin-top:10px;
+}
+.shift-key{
+  padding:3px 10px; border-radius:999px;
+  font-size:11.5px; font-weight:800;
+}
+.shift-key-home{ background:var(--shift-home); color:var(--shift-home-ink); }
+.shift-key-base{ background:var(--shift-base); color:var(--shift-base-ink); }
+
+/* ---------- the day view's banner ---------- */
+.shift-banner{
+  display:flex; align-items:baseline; gap:10px;
+  margin-bottom:10px; padding:10px 14px;
+  border-radius:var(--r-md);
+  border-inline-start:4px solid transparent;
+}
+.shift-banner b{ font-size:15px; font-weight:800; }
+.shift-banner span{ font-size:12px; color:var(--muted); }
+.shift-banner.is-shift-home{ background:var(--shift-home); border-inline-start-color:var(--shift-home-edge); }
+.shift-banner.is-shift-home b{ color:var(--shift-home-ink); }
+.shift-banner.is-shift-base{ background:var(--shift-base); border-inline-start-color:var(--shift-base-edge); }
+.shift-banner.is-shift-base b{ color:var(--shift-base-ink); }
+
+/* ==========================================================================
+   Year view — twelve mini-months. The one surface a 7/7 stripe fits on.
+   ========================================================================== */
+
+.cal-year{
+  display:grid; grid-template-columns:repeat(2,1fr); gap:10px;
+}
+@media (min-width:720px){ .cal-year{ grid-template-columns:repeat(3,1fr); } }
+@media (min-width:1080px){ .cal-year{ grid-template-columns:repeat(4,1fr); } }
+
+.yr-month{
+  padding:8px 6px;
+  background:var(--card); border:1px solid var(--line-soft);
+  border-radius:var(--r-md);
+}
+.yr-name{ margin:0 0 6px; text-align:center; font-size:12.5px; font-weight:800; color:var(--gold); }
+.yr-dow, .yr-grid{ display:grid; grid-template-columns:repeat(7,1fr); gap:2px; }
+.yr-dow span{ text-align:center; font-size:8.5px; font-weight:800; color:var(--faint); }
+.yr-dow{ margin-bottom:3px; }
+.yr-pad{ display:block; }
+.yr-day{
+  position:relative;
+  display:grid; place-items:center;
+  aspect-ratio:1 / 1; min-width:0; padding:0;
+  background:transparent; border:1px solid transparent; border-radius:4px;
+  font-family:inherit; font-size:9.5px; font-weight:700; color:var(--muted);
+  font-variant-numeric:tabular-nums; cursor:pointer;
+  transition:background .14s, color .14s, border-color .14s;
+}
+.yr-day:hover{ background:var(--line-soft); color:var(--ink); }
+.yr-day.is-shift-home{ color:var(--shift-home-ink); border-color:var(--shift-home-edge); }
+.yr-day.is-shift-base{ color:var(--shift-base-ink); border-color:var(--shift-base-edge); }
+.yr-day.is-today{ background:var(--gold-soft); border-color:var(--gold); color:var(--gold); font-weight:800; }
+/* a busy day still says so — the rotation is an overlay, never a replacement */
+.yr-day.is-busy::after{
+  content:""; position:absolute; bottom:1px; inset-inline-start:50%;
+  width:3px; height:3px; margin-inline-start:-1.5px;
+  border-radius:50%; background:var(--gold);
+}
+
+/* ==========================================================================
+   הגדרות סבב מילואים — the sheet behind the ⚙
+   ========================================================================== */
+
+.shift-sheet[hidden]{ display:none; }
+.field-hint{ margin:6px 0 0; font-size:11.5px; color:var(--faint); line-height:1.6; }
+
+.shift-switch{
+  width:100%; min-height:var(--tap); margin-bottom:16px;
+  padding:0 14px;
+  background:var(--card-2); border:1px solid var(--line-soft); border-radius:var(--r-md);
+  color:var(--muted); font-family:inherit; font-size:13.5px; font-weight:800;
+  cursor:pointer; transition:color .18s, background .18s, border-color .18s;
+}
+.shift-switch.is-on{ background:var(--gold-soft); border-color:var(--gold-edge); color:var(--gold); }
+
+.shift-flip{ width:100%; margin-bottom:16px; }
+.shift-lengths{ display:flex; gap:10px; }
+.shift-lengths > .field{ flex:1 1 0; min-width:0; }
+
+.shift-presets{ display:flex; flex-wrap:wrap; gap:8px; margin-bottom:16px; }
+.shift-presets .mini{ cursor:pointer; }
+.shift-presets .mini.is-on{ background:var(--gold-soft); border-color:var(--gold-edge); color:var(--gold); }
+
+.shift-preview-head{ margin:0 0 8px; font-size:12.5px; font-weight:800; color:var(--muted); }
+.shift-preview{ margin:0 0 18px; padding:0; list-style:none; }
+.shift-preview-row{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  margin-bottom:5px; padding:8px 12px;
+  border-radius:var(--r-sm); border-inline-start:3px solid var(--line-soft);
+  background:var(--card-2);
+  font-size:12.5px;
+}
+.shift-preview-row span{ color:var(--muted); font-variant-numeric:tabular-nums; }
+.shift-preview-row.is-shift-home{ background:var(--shift-home); border-inline-start-color:var(--shift-home-edge); }
+.shift-preview-row.is-shift-home b{ color:var(--shift-home-ink); }
+.shift-preview-row.is-shift-base{ background:var(--shift-base); border-inline-start-color:var(--shift-base-edge); }
+.shift-preview-row.is-shift-base b{ color:var(--shift-base-ink); }
 
 /* ==========================================================================
    Bottom navigation (mobile)

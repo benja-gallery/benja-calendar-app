@@ -529,23 +529,28 @@ check('notification state is persisted and never double-fires', () => {
 
 /* ---- 15a. structure: four views, navigation, contextual creation ---- */
 
-check('calendar exposes all four views as selectable tabs', () => {
-  ['day', 'week', 'month', 'agenda'].forEach(v => {
+/* Sprint 20 appends 'year' — a 7/7 reserve rotation is a stripe running
+   through the year, and four weeks of month grid can only ever show one
+   segment of it. The other four are unchanged and still mandatory. */
+check('calendar exposes all five views as selectable tabs', () => {
+  ['day', 'week', 'month', 'year', 'agenda'].forEach(v => {
     if (html.indexOf('data-calview="' + v + '"') === -1) throw new Error('no tab for ' + v);
   });
-  const labels = ['יום', 'שבוע', 'חודש', 'סדר יום'];
+  const labels = ['יום', 'שבוע', 'חודש', 'שנה', 'סדר יום'];
   const missing = labels.filter(l => html.indexOf('>' + l + '<') === -1);
   if (missing.length) return 'missing tab labels: ' + missing.join(', ');
-  if (!/CAL_VIEWS = \['day', 'week', 'month', 'agenda'\]/.test(js)) return 'CAL_VIEWS vocabulary changed';
+  if (!/CAL_VIEWS = \['day', 'week', 'month', 'year', 'agenda'\]/.test(js)) {
+    return 'CAL_VIEWS vocabulary changed';
+  }
   return true;
 });
 
 check('every calendar pane exists in the DOM and has a renderer', () => {
-  ['calMonth', 'calWeek', 'calDay', 'calAgenda'].forEach(id => {
+  ['calMonth', 'calWeek', 'calDay', 'calYear', 'calAgenda'].forEach(id => {
     if (html.indexOf('id="' + id + '"') === -1) throw new Error('no #' + id + ' pane');
     if (js.indexOf("$('#" + id + "')") === -1) throw new Error('#' + id + ' is never painted');
   });
-  ['renderMonth', 'renderWeek', 'renderDay', 'renderAgenda'].forEach(fn => {
+  ['renderMonth', 'renderWeek', 'renderDay', 'renderYear', 'renderAgenda'].forEach(fn => {
     if (js.indexOf(fn + ':') === -1) throw new Error('no Cal.' + fn + '()');
   });
   return true;
@@ -10424,10 +10429,615 @@ check('PROJECT_PLAN documents Sprint 19', () => {
   return true;
 });
 
+/* ==========================================================================
+   §52 — SPRINT 20 · מנוע סבבי מילואים ומשמרות (the reserve-duty rotation)
+
+   A reserve rotation is a RULE, not a set of records: "a week at base, a week
+   at home, from the 10th of August". The whole sprint is the refusal to make
+   somebody enter that as 150 events.
+
+     §1  one config of six fields — enabled / anchorDate / anchorState /
+         homeDays / baseDays / endDate — in state, in localStorage and in D1;
+     §2  getShiftForDate(), which answers 'HOME' | 'BASE' | '' for ANY date
+         with nothing stored per day, so a date three years out costs the same
+         as tomorrow and "infinite scroll" needs no special case;
+     §3  the overlay on every calendar surface — month, week, day, year — plus
+         the one toggle that turns it off;
+     §4  the settings sheet: move the transition date, flip the phase, change
+         the leg lengths, move the end date, and have all of it stick.
+
+   The engine below is EXECUTED, not grepped. Every answer it gives across the
+   whole default rotation is compared against arithmetic this file computes
+   independently, including across the October DST boundary — the one place a
+   local-midnight subtraction would silently put the rotation a day out.
+   ========================================================================== */
+
+let SH = null;
+
+check('app.js exports the rotation engine without touching the DOM', () => {
+  const APP = loadApp();
+  if (!APP) return 'window.APP was never set';
+  SH = APP.shift;
+  if (!SH) return 'no APP.shift export';
+  ['blankShiftConfig', 'normShiftConfig', 'getShiftForDate', 'shiftLegDay',
+    'shiftCycleDays', 'shiftClass', 'shiftTag'].forEach(k => {
+      if (typeof SH[k] !== 'function') throw new Error('APP.shift.' + k + ' is missing');
+    });
+  if (typeof loadApp().dates.daysBetweenISO !== 'function') return 'no DST-safe day arithmetic';
+  return true;
+});
+
+/* ---- 52a. §1 — the config, exactly as the field mandate names it ---- */
+
+check('reserveShiftConfig ships the six mandated fields with the mandated defaults', () => {
+  const c = SH.blankShiftConfig();
+  if (c.enabled !== true) return 'the overlay does not default on';
+  if (c.anchorDate !== '2026-08-10') return 'the anchor is ' + c.anchorDate;
+  if (c.anchorState !== 'BASE') return 'the anchor opens on ' + c.anchorState;
+  if (c.homeDays !== 7 || c.baseDays !== 7) return 'the default rotation is not 7/7';
+  if (c.endDate !== '2026-12-31') return 'the rotation ends ' + c.endDate;
+  if (SH.SHIFT_STATES.join(',') !== 'BASE,HOME') return 'the state vocabulary changed';
+
+  // it is a real block of the blank store, not something invented at paint time
+  const blank = loadApp().Store.blank();
+  if (!blank.prefs.reserveShiftConfig) return 'the blank store carries no reserveShiftConfig';
+  if (blank.prefs.reserveShiftConfig.anchorDate !== '2026-08-10') {
+    return 'the blank store and blankShiftConfig() disagree';
+  }
+  if (js.indexOf('reserveShiftConfig: blankShiftConfig()') === -1) {
+    return 'the store block is not built from the one constructor';
+  }
+  return true;
+});
+
+check('a config from disk is normalised rather than trusted', () => {
+  // garbage in every field at once — nothing may crash and nothing may survive
+  const junk = SH.normShiftConfig({
+    enabled: 'yes', anchorDate: 'מחר', anchorState: 'VACATION',
+    homeDays: 0, baseDays: 9999, endDate: '31/12/2026'
+  });
+  if (junk.anchorDate !== '2026-08-10') return 'a non-date anchor was accepted';
+  if (junk.anchorState !== 'BASE') return 'an unknown state was accepted';
+  if (junk.homeDays !== SH.SHIFT_DAYS_MIN) return 'a zero-day leg was accepted';
+  if (junk.baseDays !== SH.SHIFT_DAYS_MAX) return 'an unbounded leg was accepted';
+  if (junk.endDate !== '2026-12-31') return 'a non-ISO end date was accepted';
+
+  // an end before the start is a rotation of zero days — repaired, not painted
+  const inverted = SH.normShiftConfig({ anchorDate: '2026-08-10', endDate: '2026-01-01' });
+  if (inverted.endDate <= inverted.anchorDate) return 'an end before the anchor survived';
+
+  // and the whole block is normalised on the load path, not only here
+  if (js.indexOf('d.prefs.reserveShiftConfig = normShiftConfig(d.prefs.reserveShiftConfig)') === -1) {
+    return 'Store.load() never normalises the rotation';
+  }
+  // …a store written before Sprint 20 has no block at all
+  const old = SH.normShiftConfig(undefined);
+  if (old.anchorDate !== '2026-08-10' || old.enabled !== true) {
+    return 'a pre-Sprint-20 store does not fall back to the defaults';
+  }
+  return true;
+});
+
+/* ---- 52b. §2 — the cycle math, executed against independent arithmetic ---- */
+
+/**
+ * The rotation, recomputed here from first principles and NOT from the app's
+ * own helpers: whole days are counted by walking one day at a time from the
+ * anchor, so if getShiftForDate() ever loses a day to a DST hour this walk
+ * still has it and the two answers diverge.
+ */
+function expectedShifts(cfg) {
+  const out = {};
+  const cycle = cfg.homeDays + cfg.baseDays;
+  const firstLen = cfg.anchorState === 'BASE' ? cfg.baseDays : cfg.homeDays;
+  const other = cfg.anchorState === 'BASE' ? 'HOME' : 'BASE';
+  let iso = cfg.anchorDate, off = 0;
+  while (iso <= cfg.endDate) {
+    out[iso] = (off % cycle) < firstLen ? cfg.anchorState : other;
+    iso = D.addDaysISO(iso, 1);
+    off++;
+  }
+  return out;
+}
+
+check('the 7/7 default resolves every day of the rotation correctly', () => {
+  const c = SH.blankShiftConfig();
+  const want = expectedShifts(c);
+  const days = Object.keys(want);
+
+  // 2026-08-10 → 2026-12-31 is 144 days: four and a bit full 14-day cycles.
+  // A rotation shorter than that would mean the sweep proved almost nothing.
+  if (days.length < 140) return 'the default rotation only spans ' + days.length + ' days';
+
+  const wrong = days.filter(iso => SH.getShiftForDate(iso, c) !== want[iso]);
+  if (wrong.length) {
+    return wrong.length + ' days disagree, first: ' + wrong[0] +
+      ' → ' + SH.getShiftForDate(wrong[0], c) + ', expected ' + want[wrong[0]];
+  }
+
+  // the boundaries the mandate names by hand, stated explicitly rather than
+  // trusted to the sweep above
+  if (SH.getShiftForDate('2026-08-10', c) !== 'BASE') return 'the anchor Monday is not base';
+  if (SH.getShiftForDate('2026-08-16', c) !== 'BASE') return 'day 7 left base early';
+  if (SH.getShiftForDate('2026-08-17', c) !== 'HOME') return 'day 8 did not switch to home';
+  if (SH.getShiftForDate('2026-08-23', c) !== 'HOME') return 'day 14 left home early';
+  if (SH.getShiftForDate('2026-08-24', c) !== 'BASE') return 'the second cycle did not start at base';
+  return true;
+});
+
+check('the rotation survives the October DST change with no drift', () => {
+  const c = SH.blankShiftConfig();
+  const dates = loadApp().dates;
+
+  /* Israel moves off DST on the last Sunday of October. A day count taken by
+     subtracting two LOCAL midnights across it is 25 hours, and a Math.round()
+     that hides it puts every day after the change one leg out. */
+  const across = dates.daysBetweenISO('2026-10-01', '2026-11-01');
+  if (across !== 31) return 'October is ' + across + ' days long across the DST change';
+  if (dates.daysBetweenISO('2026-03-01', '2026-04-01') !== 31) return 'the spring change loses a day';
+  if (dates.daysBetweenISO('2026-08-10', '2026-08-10') !== 0) return 'a date is not zero days from itself';
+  if (dates.daysBetweenISO('2026-08-10', '2026-08-09') !== -1) return 'backwards counting is broken';
+
+  // and the engine itself: the leg containing 1 November is the one a walk
+  // from the anchor says it is
+  const want = expectedShifts(c);
+  ['2026-10-24', '2026-10-25', '2026-10-26', '2026-11-01', '2026-12-31'].forEach(iso => {
+    if (SH.getShiftForDate(iso, c) !== want[iso]) {
+      throw new Error(iso + ' resolves to ' + SH.getShiftForDate(iso, c) + ', expected ' + want[iso]);
+    }
+  });
+  return true;
+});
+
+check('the rotation is defined only inside its own window', () => {
+  const c = SH.blankShiftConfig();
+
+  // before the anchor: the cycle is not extrapolated backwards. The anchor is
+  // where it is KNOWN to start, and a confident colour on a week nobody stated
+  // is how a schedule stops being believed.
+  if (SH.getShiftForDate('2026-08-09', c) !== '') return 'the day before the anchor was painted';
+  if (SH.getShiftForDate('2020-01-01', c) !== '') return 'the rotation runs backwards forever';
+
+  // after the end date, and on the end date itself (inclusive)
+  if (SH.getShiftForDate('2026-12-31', c) === '') return 'the last day of the rotation is blank';
+  if (SH.getShiftForDate('2027-01-01', c) !== '') return 'the rotation outlives its end date';
+
+  // the switch is a real switch
+  const off = SH.normShiftConfig(Object.assign({}, c, { enabled: false }));
+  if (SH.getShiftForDate('2026-08-10', off) !== '') return 'a disabled rotation still answers';
+
+  // garbage in never paints a colour out
+  ['', 'מחר', '2026-13-40', null, undefined].forEach(bad => {
+    if (SH.getShiftForDate(bad, c) !== '') throw new Error('a bad date resolved to a shift');
+  });
+  return true;
+});
+
+check('flipping the phase inverts every day and changes nothing else', () => {
+  const base = SH.blankShiftConfig();
+  const home = SH.normShiftConfig(Object.assign({}, base, { anchorState: 'HOME' }));
+  const want = expectedShifts(home);
+
+  const days = Object.keys(want);
+  const wrong = days.filter(iso => SH.getShiftForDate(iso, home) !== want[iso]);
+  if (wrong.length) return wrong.length + ' days wrong after the flip, first ' + wrong[0];
+
+  // an inverted anchor is the exact mirror of the original, day for day
+  const notMirrored = days.filter(iso =>
+    SH.getShiftForDate(iso, home) !== SH.SHIFT_OTHER[SH.getShiftForDate(iso, base)]);
+  if (notMirrored.length) return 'the flip is not a mirror at ' + notMirrored[0];
+
+  // …and the control that does it goes through the one commit path
+  const flip = bodyOf(js, 'flip: function () {');
+  if (flip.indexOf('SHIFT_OTHER[') === -1) return 'flip() does not swap the anchor state';
+  if (flip.indexOf('Shift.commit(') === -1) return 'a flip is never saved';
+  if (html.indexOf('החלף בית ⇆ בסיס') === -1) return 'the mandated flip control is not in the sheet';
+  return true;
+});
+
+check('asymmetric and custom leg lengths work as well as 7/7', () => {
+  [[14, 7], [7, 14], [3, 4], [1, 1], [30, 5]].forEach(pair => {
+    const c = SH.normShiftConfig({
+      anchorDate: '2026-08-10', anchorState: 'BASE',
+      homeDays: pair[0], baseDays: pair[1], endDate: '2027-06-30'
+    });
+    if (SH.shiftCycleDays(c) !== pair[0] + pair[1]) {
+      throw new Error(pair.join('/') + ' has a cycle of ' + SH.shiftCycleDays(c));
+    }
+    const want = expectedShifts(c);
+    const wrong = Object.keys(want).filter(iso => SH.getShiftForDate(iso, c) !== want[iso]);
+    if (wrong.length) throw new Error(pair.join('/') + ' is wrong on ' + wrong.length + ' days');
+  });
+
+  // "יום 3 מתוך 7" — the readout the day view exists to give
+  const c = SH.blankShiftConfig();
+  const first = SH.shiftLegDay('2026-08-10', c);
+  if (!first || first.day !== 1 || first.of !== 7 || first.state !== 'BASE') {
+    return 'the anchor is not day 1 of 7 at base';
+  }
+  const last = SH.shiftLegDay('2026-08-16', c);
+  if (last.day !== 7 || last.of !== 7) return 'the last day of a leg reads ' + last.day;
+  const home = SH.shiftLegDay('2026-08-17', c);
+  if (home.state !== 'HOME' || home.day !== 1) return 'the home leg does not restart its count';
+  if (SH.shiftLegDay('2026-08-09', c) !== null) return 'a day outside the rotation has a leg position';
+
+  // the presets the sheet offers are real rotations, not decoration
+  if (!SH.SHIFT_PRESETS.length) return 'no ready-made rotations are offered';
+  SH.SHIFT_PRESETS.forEach(p => {
+    if (!(p.home >= 1 && p.base >= 1 && p.label)) throw new Error('a preset is malformed');
+  });
+  return true;
+});
+
+/* ---- 52c. §3 — the overlay, on every view the calendar has ---- */
+
+check('every calendar view paints the rotation', () => {
+  const panes = {
+    'renderMonth: function () {': 'month',
+    'renderWeek: function () {': 'week',
+    'renderDay: function () {': 'day',
+    'renderYear: function () {': 'year',
+    'renderAgenda: function () {': 'agenda'
+  };
+  Object.keys(panes).forEach(sig => {
+    const body = bodyOf(js, sig);
+    if (!body) throw new Error('no Cal.' + panes[sig] + ' renderer');
+    if (body.indexOf('shiftClass(') === -1 && body.indexOf('shiftLegDay(') === -1) {
+      throw new Error(panes[sig] + ' view never tints a day');
+    }
+  });
+
+  // …and the tint is never the only carrier: the words ship with it (§0.2)
+  ['renderMonth: function () {', 'renderWeek: function () {', 'renderAgenda: function () {']
+    .forEach(sig => {
+      if (bodyOf(js, sig).indexOf('shiftTag(') === -1) {
+        throw new Error(sig.split(':')[0] + ' tints without naming the shift');
+      }
+    });
+  if (bodyOf(js, 'renderDay: function () {').indexOf('shift-banner') === -1) {
+    return 'the day timeline tints without a banner naming the shift';
+  }
+  if (bodyOf(js, 'renderYear: function () {').indexOf('Shift.legend()') === -1) {
+    return 'the year grid paints two colours and explains neither';
+  }
+
+  // the class is stated once, and it is what the stylesheet paints
+  if (js.indexOf("' is-shift is-shift-' + state.toLowerCase()") === -1) {
+    return 'the overlay class is not built in one place';
+  }
+  return true;
+});
+
+check('the two tints are the mandated values and live in :root', () => {
+  const want = {
+    '--shift-home': 'rgba(46,125,50,.12)',
+    '--shift-base': 'rgba(211,47,47,.12)'
+  };
+  Object.keys(want).forEach(tok => {
+    const re = new RegExp(tok + '\\s*:\\s*' + want[tok].replace(/[().]/g, m => '\\' + m));
+    if (!re.test(rootBlock)) throw new Error(tok + ' is not ' + want[tok] + ' in :root');
+  });
+
+  ['.is-shift-home', '.is-shift-base'].forEach(sel => {
+    if (css.indexOf(sel) === -1) throw new Error('no ' + sel + ' rule');
+  });
+  if (!/\.is-shift-home\{\s*background:var\(--shift-home\)/.test(css)) return 'home is not painted from its token';
+  if (!/\.is-shift-base\{\s*background:var\(--shift-base\)/.test(css)) return 'base is not painted from its token';
+
+  // the light palette deepens the INK (a pale green label on paper is illegible)
+  // without touching the mandated tints
+  if (rootBlock.indexOf('--l-shift-home-ink') === -1) return 'the light theme has no readable home ink';
+  if (css.indexOf('--shift-home-ink: var(--l-shift-home-ink)') === -1) {
+    return 'the light theme never swaps the shift ink in';
+  }
+
+  // the words, and the emoji the mandate named
+  if (js.indexOf("HOME: '🏡 בית'") === -1) return 'the home label is not 🏡 בית';
+  if (js.indexOf("BASE: '🪖 בסיס'") === -1) return 'the base label is not 🪖 בסיס';
+  return true;
+});
+
+check('the year view is a real navigator, not a picture', () => {
+  const body = bodyOf(js, 'renderYear: function () {');
+  if (body.indexOf('for (var m = 0; m < 12; m++)') === -1) return 'the year is not twelve months';
+  if (body.indexOf('data-calday="') === -1) return 'a day in the year grid cannot be opened';
+  if (body.indexOf('is-busy') === -1) return 'a busy day in the year grid says nothing';
+  if (js.indexOf("if (this.view === 'year') this.anchor = addMonthsISO(this.anchor, 12 * dir)") === -1) {
+    return 'the arrows do not step a whole year';
+  }
+  if (js.indexOf("if (this.view === 'year') return 'שנת ' + d.getFullYear()") === -1) {
+    return 'the year view has no period label';
+  }
+  if (js.indexOf("$('#calYear').hidden = this.view !== 'year'") === -1) {
+    return 'the year pane is never shown or hidden';
+  }
+  if (!/\.yr-day\{/.test(css) || !/\.cal-year\{/.test(css)) return 'the year grid has no styles';
+  // a 44px tap target is the app's floor everywhere else; a year of squares
+  // cannot honour it, so it says so by being a grid of aspect-ratio cells
+  if (!/\.yr-day\{[\s\S]*?aspect-ratio:1 \/ 1/.test(css)) return 'the year squares are not square';
+  return true;
+});
+
+/* ---- 52d. §3–§4 — the toggle and the settings sheet ---- */
+
+check('🛡️ סבב מילואים is one visible toggle in the calendar header', () => {
+  if (html.indexOf('data-shift="toggle"') === -1) return 'no toggle control';
+  if (html.indexOf('id="shiftToggle"') === -1) return 'the toggle has no id to paint';
+  if (html.indexOf('🛡️') === -1) return 'the mandated shield is missing';
+  if (html.indexOf('סבב מילואים') === -1) return 'the mandated Hebrew label is missing';
+  if (html.indexOf('data-shift="settings"') === -1) return 'the settings sheet cannot be reached';
+  if (html.indexOf('id="shiftNow"') === -1) return 'the bar never says where today falls';
+
+  // it is a switch, so it reports its state to a screen reader as one
+  const bar = (html.match(/<div class="shift-bar"[\s\S]*?<\/div>\s*<div class="cal-stage"/) || [''])[0];
+  if (bar.indexOf('aria-pressed') === -1) return 'the toggle does not report its state';
+
+  const paint = bodyOf(js, 'paint: function () {\n      var c = shiftCfg();');
+  if (paint.indexOf("classList.toggle('is-on', c.enabled)") === -1) return 'the toggle never paints its state';
+  if (js.indexOf('Shift.paint();') === -1) return 'nothing ever repaints the toggle';
+  return true;
+});
+
+check('הגדרות סבב מילואים exposes all four mandated adjustments', () => {
+  const sheet = (html.match(/<div class="sheet shift-sheet"[\s\S]*?\n<\/div>/) || [''])[0];
+  if (!sheet) return 'no #shiftSheet';
+  if (sheet.indexOf('הגדרות סבב מילואים') === -1) return 'the sheet is not titled as mandated';
+
+  // §4.1 move the transition date · §4.2 flip · §4.3 leg lengths · §4.4 end date
+  [['shiftfield="anchorDate"', 'the transition date cannot be moved'],
+  ['data-shift="flip"', 'the phase cannot be flipped'],
+  ['shiftfield="homeDays"', 'the home leg cannot be changed'],
+  ['shiftfield="baseDays"', 'the base leg cannot be changed'],
+  ['shiftfield="endDate"', 'the end date cannot be moved'],
+  ['id="shiftPresets"', 'the ready-made rotations are not offered'],
+  ['data-shift="reset"', 'there is no way back to the defaults'],
+  ['id="shiftPreview"', 'the rule cannot be read back as dates']]
+    .forEach(pair => {
+      if (sheet.indexOf(pair[0]) === -1) throw new Error(pair[1]);
+    });
+
+  // the fields answer `change`, which is the only event a date/number input
+  // reports a landed value on — a click delegate would never see it
+  if (bodyOf(js, 'function onChange(e) {').indexOf('el.dataset.shiftfield') === -1) {
+    return 'the sheet fields are never read';
+  }
+  if (js.indexOf('[data-shift],[data-shiftpreset],') === -1) {
+    return 'the toggle and presets are not delegated';
+  }
+
+  // the sheet is a layer like every other: it closes with the rest and it
+  // counts as open while it is open
+  if (bodyOf(js, 'function closeSheets() {').indexOf("$('#shiftSheet').hidden = true") === -1) {
+    return 'the sheet survives closeSheets()';
+  }
+  if (bodyOf(js, 'function anySheetOpen() {').indexOf('Shift.isOpen()') === -1) {
+    return 'the app does not know the rotation sheet is open';
+  }
+  return true;
+});
+
+check('every change to the rule saves, pushes and repaints — no path does two of three', () => {
+  const commit = bodyOf(js, 'commit: function (msg) {');
+  if (!commit) return 'no Shift.commit()';
+  ['normShiftConfig(', 'c.updatedAt = Date.now()', 'Store.save()', 'Shift.push()', 'render()']
+    .forEach(s => {
+      if (commit.indexOf(s) === -1) throw new Error('commit() never does: ' + s);
+    });
+
+  // EVERY mutator goes through it. A setter that saved without pushing is
+  // exactly how a "persisted" setting becomes mysterious on a second device.
+  ['toggle: function () {', 'flip: function () {', 'setField: function (which, value) {',
+    'preset: function (i) {', 'reset: function () {'].forEach(sig => {
+      const body = bodyOf(js, sig);
+      if (!body) throw new Error('no Shift.' + sig.split(':')[0] + '()');
+      if (body.indexOf('Shift.commit(') === -1) {
+        throw new Error(sig.split(':')[0] + '() changes the rule without committing it');
+      }
+    });
+
+  // …and the rotation is live from boot, not from the first visit to the sheet
+  if (bodyOf(js, 'function init() {').indexOf('Shift.init()') === -1) {
+    return 'the rotation is never initialised at boot';
+  }
+  if (bodyOf(js, 'init: function () {\n      Shift.paint();').indexOf('Shift.pull()') === -1) {
+    return 'boot never asks D1 what the rule is';
+  }
+  return true;
+});
+
+/* ---- 52e. §1 — the D1 half, executed against a stub binding ---- */
+
+const SETTINGS_ROUTE = 'functions/api/settings.js';
+const settingsSrc = fs.existsSync(at(SETTINGS_ROUTE)) ? read(SETTINGS_ROUTE) : '';
+
+check('the settings route and its migration ship', () => {
+  if (!settingsSrc) return 'no ' + SETTINGS_ROUTE;
+  if (!fs.existsSync(at('migrations/0007_sprint20_settings.sql'))) return 'no 0007 migration';
+  const mig = read('migrations/0007_sprint20_settings.sql');
+  if (mig.indexOf('CREATE TABLE IF NOT EXISTS app_settings') === -1) return 'no app_settings table';
+  ['key', 'owner_id', 'value_json', 'updated_at', 'created_at'].forEach(c => {
+    if (mig.indexOf(c) === -1) throw new Error('app_settings has no ' + c);
+  });
+  // append-only: the five entity tables are not touched, so the column-drift
+  // check between SQL, Worker and client stays meaningful
+  if (/ALTER TABLE (events|tasks|lists|notes|clients)/.test(mig)) {
+    return 'migration 0007 alters an entity table';
+  }
+  ['onRequestGet', 'onRequestPost', 'onRequestOptions'].forEach(h => {
+    if (settingsSrc.indexOf('export const ' + h) === -1) throw new Error('/api/settings has no ' + h);
+  });
+  new vm.Script(stripModule(settingsSrc), { filename: SETTINGS_ROUTE });
+  return true;
+});
+
+/**
+ * The route, running for real against an in-memory app_settings table.
+ *
+ * The stub answers the two statements the route actually issues and enforces
+ * the last-write-wins guard the way the SQL does, so a stale POST really is a
+ * no-op here rather than something a comment claims.
+ */
+function loadSettingsRoute() {
+  const rows = {};
+
+  function Res(body, init) {
+    this.body = body;
+    this.status = (init && init.status) || 200;
+  }
+  Res.prototype.json = function () { return JSON.parse(this.body); };
+
+  const binding = {
+    prepare(sql) {
+      let args = [];
+      return {
+        bind(...a) { args = a; return this; },
+        first() {
+          if (sql.indexOf('SELECT') !== 0) throw new Error('unexpected read: ' + sql);
+          const row = rows[args[0]];
+          return Promise.resolve(row && row.owner_id === args[1] ? row : null);
+        },
+        run() {
+          if (sql.indexOf('INSERT INTO app_settings') !== 0) throw new Error('unexpected write: ' + sql);
+          const [key, owner_id, value_json, updated_at, created_at] = args;
+          const prev = rows[key];
+          // the SQL's own guard: an older payload updates nothing
+          if (prev && updated_at < prev.updated_at) return Promise.resolve({ skipped: true });
+          rows[key] = prev
+            ? { key, owner_id, value_json, updated_at, created_at: prev.created_at }
+            : { key, owner_id, value_json, updated_at, created_at };
+          return Promise.resolve({ written: true });
+        }
+      };
+    }
+  };
+
+  const sandbox = { console, Response: Res, URL, JSON, Date, Math, String, Object, Array, Promise, RegExp, Error };
+  vm.createContext(sandbox);
+  vm.runInContext(
+    stripModule(read('functions/api/_shared.js')) + '\n' + stripModule(settingsSrc) +
+    '\n;globalThis.__settings = { onRequestGet, onRequestPost };',
+    sandbox, { filename: 'settings-route.js' });
+
+  const env = { DB: binding };
+  const api = sandbox.__settings;
+
+  return {
+    rows,
+    get: key => api.onRequestGet({ request: { url: 'https://c.example/api/settings?key=' + key }, env })
+      .then(r => r.json()),
+    post: body => api.onRequestPost({
+      request: { url: 'https://c.example/api/settings', json: () => Promise.resolve(body) },
+      env
+    }).then(r => r.json())
+  };
+}
+
+checkAsync('the rotation config round-trips through D1 and resolves conflicts last-write-wins', () => {
+  const R = loadSettingsRoute();
+  const cfg = SH.blankShiftConfig();
+  cfg.updatedAt = 1000;
+
+  // nothing stored yet is an ANSWER, not an error: a first device has to be
+  // able to tell "no rule" from "the request failed"
+  return R.get('reserve_shift')
+    .then(out => {
+      if (out.ok !== true) return 'an empty settings row answered ' + JSON.stringify(out);
+      if (out.data.value !== null) return 'an unwritten key invented a value';
+
+      return R.post({ key: 'reserve_shift', value: cfg, updated_at: '2026-08-08T10:00:00Z' })
+        .then(() => R.get('reserve_shift'));
+    })
+    .then(res => {
+      if (typeof res === 'string') return res;
+      if (!res.data || !res.data.value) return 'the config did not come back';
+      const back = SH.normShiftConfig(res.data.value);
+      if (back.anchorDate !== cfg.anchorDate || back.anchorState !== cfg.anchorState ||
+        back.homeDays !== cfg.homeDays || back.baseDays !== cfg.baseDays ||
+        back.endDate !== cfg.endDate || back.enabled !== cfg.enabled) {
+        return 'the config changed in transit';
+      }
+
+      // a stale phone coming back online must not undo a newer rule
+      const stale = Object.assign({}, cfg, { anchorState: 'HOME' });
+      return R.post({ key: 'reserve_shift', value: stale, updated_at: '2026-08-01T10:00:00Z' })
+        .then(() => R.get('reserve_shift'))
+        .then(after => {
+          if (after.data.value.anchorState !== 'BASE') return 'a stale write overwrote a newer rule';
+
+          // …while a newer one lands
+          const fresh = Object.assign({}, cfg, { anchorState: 'HOME' });
+          return R.post({ key: 'reserve_shift', value: fresh, updated_at: '2026-08-09T10:00:00Z' })
+            .then(() => R.get('reserve_shift'))
+            .then(last => last.data.value.anchorState === 'HOME'
+              ? true : 'a newer rule was refused');
+        });
+    });
+});
+
+checkAsync('the settings route refuses what it cannot store', () => {
+  const R = loadSettingsRoute();
+  return R.get('../../secrets')
+    .then(out => {
+      if (out.ok !== false) return 'an arbitrary key was read';
+      return R.post({ key: 'reserve_shift', value: 'BASE' });
+    })
+    .then(out => {
+      if (out.ok !== false) return 'a scalar was stored as a config';
+      return R.post({ key: 'anything', value: {} });
+    })
+    .then(out => (out.ok === false ? true : 'an unknown key was written'));
+});
+
+check('the client pushes and pulls the rule without touching the sync engine', () => {
+  const push = bodyOf(js, 'push: function () {\n      if (!Shift.online()) return null;');
+  if (!push) return 'no Shift.push()';
+  if (push.indexOf("SYNC_ENDPOINT + '/settings'") === -1) return 'the push does not go to /api/settings';
+  if (push.indexOf('SHIFT_KEY') === -1) return 'the push does not name its key';
+
+  const pull = bodyOf(js, 'pull: function () {');
+  if (pull.indexOf('remote.updatedAt <= local.updatedAt') === -1) {
+    return 'the pull does not resolve conflicts last-write-wins';
+  }
+  if (pull.indexOf('normShiftConfig(out.data.value)') === -1) {
+    return 'a config from the network is trusted rather than normalised';
+  }
+  if (pull.indexOf('Shift.push()') === -1) return 'a device holding the newer rule never offers it back';
+
+  // offline is not an error — a rotation is a local-first fact, exactly like
+  // every record in the app
+  if (push.indexOf("['catch']") === -1) return 'a failed push throws instead of waiting';
+  if (js.indexOf("SYNC_TABLES = ['events', 'tasks', 'lists', 'notes', 'clients']") === -1) {
+    return 'the settings row leaked into the entity sync loop';
+  }
+  return true;
+});
+
+/* ---- 52f. the shipped shell and the specification ---- */
+
+check('the shell was bumped to v26 for Sprint 20', () => {
+  const m = sw.match(/CACHE_VERSION\s*=\s*'(v(\d+))'/);
+  if (!m) return 'no CACHE_VERSION';
+  if (parseInt(m[2], 10) < 26) return 'the cache is still ' + m[1] + ' — returning phones keep the old shell';
+  if (js.indexOf("APP_VERSION = '" + m[1] + "'") === -1) return 'app.js still reports a different version';
+  if (html.indexOf('app.js?v=' + m[1]) === -1) return 'app.js is not busted to ' + m[1];
+  if (html.indexOf('styles.css?v=' + m[1]) === -1) return 'styles.css is not busted to ' + m[1];
+  return true;
+});
+
+check('PROJECT_PLAN documents Sprint 20', () => {
+  ['Sprint 20', 'reserveShiftConfig', 'getShiftForDate', 'anchorState',
+    'app_settings', 'סבב מילואים', 'v26']
+    .forEach(s => {
+      if (plan.indexOf(s) === -1) throw new Error('the plan never mentions ' + s);
+    });
+  return true;
+});
+
 /* --------------------------------------------------------------- report */
 
-/* The synchronous checks have all run by now; §43g and §51 are promise-based,
-   so the report waits for them rather than printing a green board mid-flight. */
+/* The synchronous checks have all run by now; §43g, §51 and §52 are
+   promise-based, so the report waits for them rather than printing a green
+   board mid-flight. */
 asyncChecks
   .reduce((chain, run) => chain.then(run), Promise.resolve())
   ['catch'](err => { fail.push('async checks threw — ' + err.message); })
